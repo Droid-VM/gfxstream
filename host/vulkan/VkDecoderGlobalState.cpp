@@ -193,7 +193,7 @@ static uint64_t hostBlobId = 0;
 static uint32_t kTemporaryContextIdForSnapshotLoading = 1;
 
 static std::unordered_set<std::string> kSnapshotAppAllowList = {"Chromium"};
-static std::unordered_set<std::string> kSnapshotEngineAllowList = {"ANGLE"};
+static std::unordered_set<std::string> kSnapshotEngineAllowList = {"ANGLE", "ace"};
 
 #define DEFINE_BOXED_HANDLE_TYPE_TAG(type) Tag_##type,
 
