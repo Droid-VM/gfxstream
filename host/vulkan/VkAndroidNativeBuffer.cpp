@@ -32,7 +32,7 @@
 namespace gfxstream {
 namespace vk {
 
-#define VK_ANB_ERR(fmt, ...) INFO(fmt, ##__VA_ARGS__);
+#define VK_ANB_ERR(fmt, ...) ERR(fmt, ##__VA_ARGS__);
 
 #define ENABLE_VK_ANB_DEBUG 0
 
@@ -551,6 +551,7 @@ VkResult AndroidNativeBufferInfo::on_vkAcquireImageANDROID(VkEmulation* emu,
     mEverAcquired = true;
 
     if (firstTimeSetup) {
+        mLastUsedQueueFamilyIndex = defaultQueueFamilyIndex;
         VkSubmitInfo submitInfo = {
             VK_STRUCTURE_TYPE_SUBMIT_INFO,
             0,
@@ -565,6 +566,11 @@ VkResult AndroidNativeBufferInfo::on_vkAcquireImageANDROID(VkEmulation* emu,
         std::lock_guard<std::mutex> qlock(*defaultQueueMutex);
         VK_CHECK(vk->vkQueueSubmit(defaultQueue, 1, &submitInfo, fence));
         return VK_SUCCESS;
+    }
+
+    if (mLastUsedQueueFamilyIndex == INVALID_QUEUE_FAMILY_INDEX) {
+        ERR("AndroidNativeBufferInfo missing last used queue.");
+        return VK_ERROR_INITIALIZATION_FAILED;
     }
 
     // Setup queue state for this queue family index.
