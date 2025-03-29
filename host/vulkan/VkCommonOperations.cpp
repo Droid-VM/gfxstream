@@ -31,6 +31,9 @@
 #include "VulkanDispatch.h"
 #include "aemu/base/Optional.h"
 #include "aemu/base/Tracing.h"
+#ifdef CONFIG_AEMU
+#include "aemu/base/async/ThreadLooper.h"
+#endif
 #include "aemu/base/containers/Lookup.h"
 #include "aemu/base/containers/StaticMap.h"
 #include "aemu/base/synchronization/Lock.h"
@@ -777,7 +780,7 @@ int VkEmulation::getSelectedGpuIndex(
 /*static*/
 std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                                                  gfxstream::host::BackendCallbacks callbacks,
-                                                 gfxstream::host::FeatureSet features) {
+                                                 const gfxstream::host::FeatureSet& features) {
 // Downstream branches can provide abort logic or otherwise use result without a new macro
 #define VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(res, ...) \
     do {                                               \
@@ -1455,6 +1458,12 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         INFO("Enabling VK_EXT_robustness2 (%d %d %d).", r2features.robustBufferAccess2,
              r2features.robustImageAccess2, r2features.nullDescriptor);
         vk_append_struct(&deviceCiChain, &r2features);
+
+        // vkCreateDevice() - VUID-04000: If robustBufferAccess2 is enabled then robustBufferAccess
+        // must be enabled.
+        if (r2features.robustBufferAccess2) {
+            physicalDeviceFeatures.features.robustBufferAccess = VK_TRUE;
+        }
     }
 
     ivk->vkCreateDevice(emulation->mPhysicalDevice, &dCi, nullptr, &emulation->mDevice);
@@ -2133,7 +2142,14 @@ void VkEmulation::freeExternalMemoryLocked(VulkanDispatch* vk,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
         if (mOccupiedGpas.find(info->gpa) != mOccupiedGpas.end()) {
             mOccupiedGpas.erase(info->gpa);
+#ifdef CONFIG_AEMU
+            android::base::ThreadLooper::runOnMainLooper(
+                [gpa = info->gpa, size = info->sizeToPage] {
+                    get_emugl_vm_operations().unmapUserBackedRam(gpa, size);
+                });
+#else
             get_emugl_vm_operations().unmapUserBackedRam(info->gpa, info->sizeToPage);
+#endif
             info->gpa = 0u;
         }
 
@@ -3083,13 +3099,13 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
     mDebugUtilsHelper.cmdBeginDebugLabel(mCommandBuffer, "readColorBufferToBytes(ColorBuffer:%d)",
                                          colorBufferHandle);
 
-    VkImageLayout currentLayout = colorBufferInfo->currentLayout;
-    VkImageLayout transferSrcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    const VkImageLayout currentLayout = colorBufferInfo->currentLayout;
+    const VkImageLayout transferSrcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
     const VkImageMemoryBarrier toTransferSrcImageBarrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
-        .srcAccessMask = 0,
+        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
         .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
         .oldLayout = currentLayout,
         .newLayout = transferSrcLayout,
@@ -3111,7 +3127,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
                              &toTransferSrcImageBarrier);
 
     vk->vkCmdCopyImageToBuffer(mCommandBuffer, colorBufferInfo->image,
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mStaging.buffer,
+                               transferSrcLayout, mStaging.buffer,
                                bufferImageCopies.size(), bufferImageCopies.data());
 
     // Change back to original layout
@@ -3120,7 +3136,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
         const VkImageMemoryBarrier toCurrentLayoutImageBarrier = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+            .srcAccessMask = VK_ACCESS_HOST_READ_BIT,
             .dstAccessMask = VK_ACCESS_NONE_KHR,
             .oldLayout = transferSrcLayout,
             .newLayout = colorBufferInfo->currentLayout,

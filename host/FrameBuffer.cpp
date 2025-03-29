@@ -259,7 +259,7 @@ void MaybeIncreaseFileDescriptorSoftLimit() {
 #endif
 }
 
-bool FrameBuffer::initialize(int width, int height, gfxstream::host::FeatureSet features,
+bool FrameBuffer::initialize(int width, int height, const gfxstream::host::FeatureSet& features,
                              bool useSubWindow, bool egl2egl) {
     GL_LOG("FrameBuffer::initialize");
 
@@ -463,15 +463,12 @@ bool FrameBuffer::initialize(int width, int height, gfxstream::host::FeatureSet 
         }
 #endif
     }
-    // TODO: 0-copy gl interop on swiftshader vk
+
     if (android::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD") == "lavapipe"
             || android::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD") == "swiftshader") {
         vulkanInteropSupported = false;
         GL_LOG("vk icd software rendering, disable interop");
     }
-
-    fb->m_vulkanInteropSupported = vulkanInteropSupported;
-    GL_LOG("interop? %d", fb->m_vulkanInteropSupported);
 
 #if GFXSTREAM_ENABLE_HOST_GLES
     if (vulkanInteropSupported && fb->m_emulationGl && fb->m_emulationGl->isMesa()) {
@@ -481,8 +478,8 @@ bool FrameBuffer::initialize(int width, int height, gfxstream::host::FeatureSet 
     }
 #endif
 
-    GL_LOG("glvk interop final: %d", fb->m_vulkanInteropSupported);
-    vkEmulationFeatures.glInteropSupported = fb->m_vulkanInteropSupported;
+    GL_LOG("glvk interop final: %d", vulkanInteropSupported);
+    vkEmulationFeatures.glInteropSupported = vulkanInteropSupported;
     if (fb->m_emulationVk && fb->m_features.Vulkan.enabled) {
         fb->m_emulationVk->initFeatures(std::move(vkEmulationFeatures));
 
@@ -568,7 +565,7 @@ void FrameBuffer::finalize() {
     }
 }
 
-FrameBuffer::FrameBuffer(int p_width, int p_height, gfxstream::host::FeatureSet features, bool useSubWindow)
+FrameBuffer::FrameBuffer(int p_width, int p_height, const gfxstream::host::FeatureSet& features, bool useSubWindow)
     : m_features(features),
       m_framebufferWidth(p_width),
       m_framebufferHeight(p_height),
@@ -1172,7 +1169,7 @@ HandleType FrameBuffer::createColorBuffer(int p_width,
 void FrameBuffer::createColorBufferWithResourceHandle(int p_width, int p_height,
                                                       GLenum p_internalFormat,
                                                       FrameworkFormat p_frameworkFormat,
-                                                      HandleType handle, bool p_linear) {
+                                                      HandleType handle) {
     {
         AutoLock mutex(m_lock);
         sweepColorBuffersLocked();
@@ -1188,18 +1185,17 @@ void FrameBuffer::createColorBufferWithResourceHandle(int p_width, int p_height,
         }
 
         createColorBufferWithResourceHandleLocked(p_width, p_height, p_internalFormat,
-                                                  p_frameworkFormat, handle, p_linear);
+                                                  p_frameworkFormat, handle);
     }
 }
 
 HandleType FrameBuffer::createColorBufferWithResourceHandleLocked(int p_width, int p_height,
                                                                   GLenum p_internalFormat,
                                                                   FrameworkFormat p_frameworkFormat,
-                                                                  HandleType handle,
-                                                                  bool p_linear) {
-    ColorBufferPtr cb = ColorBuffer::create(m_emulationGl.get(), m_emulationVk.get(), p_width,
-                                            p_height, p_internalFormat, p_frameworkFormat, handle,
-                                            nullptr /*stream*/, p_linear);
+                                                                  HandleType handle) {
+    ColorBufferPtr cb =
+        ColorBuffer::create(m_emulationGl.get(), m_emulationVk.get(), p_width, p_height,
+                            p_internalFormat, p_frameworkFormat, handle, nullptr /*stream*/);
     if (cb.get() == nullptr) {
         GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
             << "Failed to create ColorBuffer:" << handle << " format:" << p_internalFormat

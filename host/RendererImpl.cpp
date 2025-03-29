@@ -125,7 +125,7 @@ RendererImpl::~RendererImpl() {
     mRenderWindow.reset();
 }
 
-bool RendererImpl::initialize(int width, int height, gfxstream::host::FeatureSet features,
+bool RendererImpl::initialize(int width, int height, const gfxstream::host::FeatureSet& features,
                               bool useSubWindow, bool egl2egl) {
 #ifdef CONFIG_AEMU
     if (android::base::getEnvironmentVariable("ANDROID_EMUGL_VERBOSE") == "1") {
@@ -572,10 +572,9 @@ static struct AndroidVirtioGpuOps sVirtioGpuOps = {
             FrameBuffer::getFB()->createBufferWithResourceHandle(size, handle);
         },
     .create_color_buffer_with_handle =
-        [](uint32_t width, uint32_t height, uint32_t format, uint32_t fwkFormat, uint32_t handle,
-           bool linear) {
+        [](uint32_t width, uint32_t height, uint32_t format, uint32_t fwkFormat, uint32_t handle) {
             FrameBuffer::getFB()->createColorBufferWithResourceHandle(
-                width, height, (GLenum)format, (FrameworkFormat)fwkFormat, handle, linear);
+                width, height, (GLenum)format, (FrameworkFormat)fwkFormat, handle);
         },
     .open_color_buffer = [](uint32_t handle) { FrameBuffer::getFB()->openColorBuffer(handle); },
     .close_buffer = [](uint32_t handle) { FrameBuffer::getFB()->closeBuffer(handle); },
