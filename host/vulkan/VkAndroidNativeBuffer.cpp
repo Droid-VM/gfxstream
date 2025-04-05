@@ -371,7 +371,7 @@ std::unique_ptr<AndroidNativeBufferInfo> AndroidNativeBufferInfo::create(
 
         uint32_t stagingMemoryTypeIndex = -1;
         bool stagingIndexRes =
-            getStagingMemoryTypeIndex(vk, device, memProps, &stagingMemoryTypeIndex);
+            getStagingMemoryTypeIndex(vk, device, memProps, stagingMemoryRequirements, &stagingMemoryTypeIndex);
         if (!stagingIndexRes) {
             VK_ANB_ERR(
                 "VK_ANDROID_native_buffer: could not obtain "
@@ -410,6 +410,11 @@ std::unique_ptr<AndroidNativeBufferInfo> AndroidNativeBufferInfo::create(
             return nullptr;
         }
     }
+
+    emu->getDebugUtilsHelper().addDebugLabel(out->mStagingBuffer, "ANB_StagingBuffer:%d",
+                                             out->mColorBufferHandle);
+    emu->getDebugUtilsHelper().addDebugLabel(out->mStagingBufferMemory, "ANB_StagingMemory:%d",
+                                             out->mColorBufferHandle);
 
     out->mQsriWaitFencePool = std::make_unique<AndroidNativeBufferInfo::QsriWaitFencePool>(
         out->mDeviceDispatch, out->mDevice);

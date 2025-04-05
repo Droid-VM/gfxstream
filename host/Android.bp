@@ -43,6 +43,7 @@ gfxstream_backend_static_deps = [
     "gfxstream_host_common",
     "libgfxstream_common_utils",
     "libgfxstream_host_features",
+    "libgfxstream_host_snapshot",
     "libgfxstream_host_tracing",
     "libgfxstream_etc",
     "libgfxstream_glestranslator_egl",
@@ -69,11 +70,6 @@ gfxstream_backend_snapshot_static_deps = [
     "libgfxstream_backend_proto",
     "libprotobuf-cpp-full",
     "libz",
-]
-
-gfxstream_backend_magma_static_deps = [
-    "libgfxstream_host_magma_dec",
-    "libgfxstream_host_magma_server",
 ]
 
 cc_defaults {
@@ -104,6 +100,7 @@ cc_defaults {
     export_static_lib_headers: [
         "gfxstream_base",
         "libgfxstream_host_features",
+        "libgfxstream_host_snapshot",
         "libgfxstream_host_tracing",
         "libgfxstream_host_gl_host_common",
         "libgfxstream_host_gles2_dec",
@@ -170,18 +167,6 @@ cc_library {
     defaults: ["libgfxstream_backend_defaults"],
 }
 
-cc_library {
-    name: "libgfxstream_backend_magma",
-    defaults: ["libgfxstream_backend_defaults"],
-    static: {
-        whole_static_libs: gfxstream_backend_magma_static_deps,
-    },
-    shared: {
-        static_libs: gfxstream_backend_magma_static_deps,
-    },
-    export_static_lib_headers: gfxstream_backend_magma_static_deps,
-}
-
 cc_test_library {
     name: "gfxstream_backend_test_support",
     defaults: ["gfxstream_defaults"],
@@ -206,12 +191,12 @@ cc_test_library {
         "libgfxstream_oswindow_test_support",
     ],
     static_libs: [
-        "libgfxstream_host_apigen_codec_common",
-        "gfxstream_base",
         "gfxstream_base_test_support",
+        "gfxstream_base",
         "gfxstream_host_common_test_support",
-        "gfxstream_snapshot",
+        "libgfxstream_host_apigen_codec_common",
         "libgfxstream_oswindow_test_support",
+        "libgfxstream_host_snapshot",
         "libgmock",
         "liblz4",
     ],
@@ -294,10 +279,10 @@ cc_test_host {
         "gfxstream_base_test_support",
         "gfxstream_base",
         "gfxstream_host_common_test_support",
-        "gfxstream_snapshot",
         "libgfxstream_common_image",
         "libgfxstream_host_vulkan_server",
         "libgfxstream_oswindow_test_support",
+        "libgfxstream_host_snapshot",
         "libgfxstream_thirdparty_glm",
         "libgmock",
         "liblz4",
@@ -306,21 +291,6 @@ cc_test_host {
         // Disabled by default as requires Vulkan.
         unit_test: false,
     },
-    test_suites: [
-        "general-tests",
-    ],
-}
-
-cc_test_host {
-    name: "gfxstream_magma_tests",
-    defaults: ["gfxstream_defaults"],
-    srcs: [
-        "tests/Magma_unittest.cpp",
-    ],
-    shared_libs: [
-        "libbase",
-        "libgfxstream_backend_magma",
-    ],
     test_suites: [
         "general-tests",
     ],

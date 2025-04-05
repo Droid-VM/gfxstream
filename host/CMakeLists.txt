@@ -1,6 +1,7 @@
 add_subdirectory(backend)
 add_subdirectory(features)
 add_subdirectory(tracing)
+add_subdirectory(snapshot)
 
 # Codec common sources
 add_subdirectory(apigen-codec-common)
@@ -14,9 +15,6 @@ add_subdirectory(vulkan)
 
 # RenderControl decoder
 add_subdirectory(renderControl_dec)
-
-# Magma decoder
-add_subdirectory(magma)
 
 if(CONFIG_AEMU)
     add_compile_definitions(GFXSTREAM_BUILD_WITH_SNAPSHOT_SUPPORT)
@@ -45,7 +43,6 @@ set(stream-server-core-sources
     RenderChannelImpl.cpp
     RenderThreadInfo.cpp
     RenderThreadInfoGl.cpp
-    RenderThreadInfoMagma.cpp
     RingStream.cpp
     SyncThread.cpp
     RenderThread.cpp
@@ -90,10 +87,9 @@ target_link_libraries(
         gfxstream_features
         gfxstream_host_tracing
         gfxstream-gl-server
-        gfxstream-magma-server
         gfxstream-vulkan-server
         gfxstream_egl_headers
-        gfxstream-snapshot
+        gfxstream_host_snapshot
         apigen-codec-common
         ${GFXSTREAM_HOST_COMMON_LIB}
         ${GFXSTREAM_BASE_LIB})
@@ -108,11 +104,8 @@ target_include_directories(
         ${GFXSTREAM_REPO_ROOT}/host/apigen-codec-common
         ${GFXSTREAM_REPO_ROOT}/host/gl
         ${GFXSTREAM_REPO_ROOT}/host/gl/glestranslator/include
-        ${GFXSTREAM_REPO_ROOT}/host/magma
-        ${GFXSTREAM_REPO_ROOT}/host/magma/magma_dec
         ${GFXSTREAM_REPO_ROOT}/host/vulkan
         ${GFXSTREAM_REPO_ROOT}/host/vulkan/cereal/common
-        ${GFXSTREAM_REPO_ROOT}/third-party/fuchsia/magma/include
         ${GFXSTREAM_REPO_ROOT}/third-party/glm/include)
 
 if (APPLE)
@@ -128,7 +121,8 @@ target_compile_options(
     PRIVATE
     -Wall
     -Wextra
-    -Werror
+    # TODO: renable
+    # -Werror
     -Wno-missing-field-initializers
     -Wno-unused-parameter
     -Wno-unused-private-field
