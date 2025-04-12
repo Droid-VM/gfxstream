@@ -759,7 +759,7 @@ class FrameBuffer : public android::base::EventNotificationSupport<FrameBufferCh
     android::base::Lock m_lock;
     android::base::ReadWriteLock m_contextStructureLock;
     android::base::Lock m_colorBufferMapLock;
-    uint64_t mFrameNumber;
+    uint64_t mFrameNumber = 0;
     FBNativeWindowType m_nativeWindow = 0;
 
     ColorBufferMap m_colorbuffers;
@@ -880,7 +880,7 @@ class FrameBuffer : public android::base::EventNotificationSupport<FrameBufferCh
 
     // TODO(b/233939967): Refactor to create DisplayGl and DisplaySurfaceGl
     // and remove usage of non-generic DisplayVk.
-    Display* m_display;
+    Display* m_display = nullptr;
     std::unique_ptr<DisplaySurface> m_displaySurface;
 
     // CompositorGl.
