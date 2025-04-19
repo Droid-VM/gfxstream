@@ -14,23 +14,7 @@ cc_library(
         ":GLSnapshot",
         "//common/opengl:gfxstream_opengl_headers",
         "//host/apigen-codec-common",
-        "//host/logging:gfxstream_host_logging",
-    ],
-)
-
-objc_library(
-    name = "gfxstream-gl-host-common-darwin",
-    srcs = [
-        "gl-host-common/opengl/macTouchOpenGL.m",
-    ],
-    hdrs = ["gl-host-common/include/host-common/opengl/macTouchOpenGL.h"],
-    defines = ["EMUGL_BUILD"],
-    includes = ["gl-host-common/include"],
-    target_compatible_with = [
-        "@platforms//os:macos",
-    ],
-    deps = [
-        "//:gfxstream-gl-host-common-headers",
+        "//host/iostream:gfxstream_host_iostream",
         "//host/logging:gfxstream_host_logging",
     ],
 )
@@ -41,7 +25,10 @@ cc_library(
     copts = ["-fno-exceptions"],
     includes = ["glestranslator/GLcommon/include"],
     visibility = ["//visibility:public"],
-    deps = ["//host/apigen-codec-common"],
+    deps = [
+        "//host/apigen-codec-common",
+        "//host/gl/OpenGLESDispatch:gfxstream_host_openglesdispatch_headers",
+    ],
 )
 
 objc_library(
@@ -176,21 +163,8 @@ cc_library(
     name = "gfxstream-gl-host-common",
     srcs = [
         "gl-host-common/opengl/EmuglBackendList.cpp",
-        "gl-host-common/opengl/GLProcessPipe.cpp",
-        "gl-host-common/opengl/OpenglEsPipe.cpp",
-        "gl-host-common/opengl/emugl_config.cpp",
-        "gl-host-common/opengl/gpuinfo.cpp",
-        "gl-host-common/opengl/logger.cpp",
         "gl-host-common/opengl/misc.cpp",
-        "gl-host-common/opengles.cpp",
-    ] + select({
-        "@platforms//os:macos": [
-            "gl-host-common/opengl/NativeGpuInfo_darwin.cpp",
-        ],
-        "@platforms//os:windows": ["gl-host-common/opengl/NativeGpuInfo_windows.cpp"],
-        "@platforms//os:linux": ["gl-host-common/opengl/NativeGpuInfo_linux.cpp"],
-        "//conditions:default": [],
-    }) + glob(["gl-host-common/include/**/*.h"]),
+    ] + glob(["gl-host-common/include/**/*.h"]),
     copts = [
         "-Wno-return-type-c-linkage",
         "-fno-exceptions",
@@ -208,14 +182,12 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//common/opengl:gfxstream_opengl_headers",
+        "//host:gfxstream_backend_headers",
         "//host/apigen-codec-common",
         "//host/features:gfxstream_features",
         "//host/logging:gfxstream_host_logging",
         "//host/snapshot:aemu-snapshot",
-    ] + select({
-        "@platforms//os:macos": ["gfxstream-gl-host-common-darwin"],
-        "//conditions:default": [],
-    }),
+    ],
 )
 
 cc_library(
@@ -233,6 +205,7 @@ cc_library(
         "//:gfxstream-gl-host-common-headers",
         "//common/opengl:gfxstream_opengl_headers",
         "//host/apigen-codec-common",
+        "//host/iostream:gfxstream_host_iostream",
         "//host/logging:gfxstream_host_logging",
     ],
 )
@@ -248,33 +221,9 @@ cc_library(
     defines = ["EMUGL_BUILD"],
     includes = ["glsnapshot"],
     visibility = ["//visibility:public"],
-    deps = ["//host/apigen-codec-common"],
-)
-
-cc_library(
-    name = "OpenGLESDispatch",
-    srcs = [
-        "OpenGLESDispatch/EGLDispatch.cpp",
-        "OpenGLESDispatch/GLESv1Dispatch.cpp",
-        "OpenGLESDispatch/GLESv2Dispatch.cpp",
-        "OpenGLESDispatch/OpenGLDispatchLoader.cpp",
-        "OpenGLESDispatch/StaticDispatch.cpp",
-        "OpenGLESDispatch/gles1_stubbed_in_translator_namespace.cpp",
-        "OpenGLESDispatch/gles2_stubbed_in_translator_namespace.cpp",
-    ],
-    copts = [
-        "-fno-exceptions",
-        "-Wno-extern-c-compat",
-    ],
-    defines = ["EMUGL_BUILD"],
-    visibility = ["//visibility:public"],
     deps = [
-        ":EGL_translator_static",
-        ":gles1_dec",
-        ":gles2_dec",
-        "//:gfxstream-gl-host-common-headers",
-        "//common/opengl:gfxstream_opengl_headers",
         "//host/apigen-codec-common",
+        "//host/gl/OpenGLESDispatch:gfxstream_host_openglesdispatch",
     ],
 )
 
@@ -295,6 +244,7 @@ cc_library(
         "EmulationGl.cpp",
         "GLESVersionDetector.cpp",
         "ReadbackWorkerGl.cpp",
+        "RenderThreadInfoGl.cpp",
         "TextureDraw.cpp",
         "TextureResize.cpp",
         "YUVConverter.cpp",
@@ -312,15 +262,17 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":OpenGLESDispatch",
         ":gfxstream-gl-host-common",
         ":gles1_dec",
         ":gles2_dec",
         "//:gfxstream-gl-host-common-headers",
-        "//host:gfxstream_host_headers",
+        "//host:gfxstream_backend_headers",
         "//host/apigen-codec-common",
+        "//host/backend:gfxstream_host_backend",
         "//host/gl:GLSnapshot",
+        "//host/gl/OpenGLESDispatch:gfxstream_host_openglesdispatch",
         "//host/logging:gfxstream_host_logging",
+        "//utils:gfxstream_utils_headers",
     ],
 )
 

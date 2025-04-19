@@ -109,6 +109,8 @@ gfxstream_headers = files(
   'include/gfxstream/virtio-gpu-gfxstream-renderer.h',
   'include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h')
 
+inc_gfxstream_server = include_directories('include')
+
 inc_root = include_directories('../')
 inc_gfxstream_include = include_directories('../include')
 # Included by all host component builds. Leave empty for future build updates.
@@ -142,6 +144,7 @@ inc_gl_common = include_directories('gl/glestranslator/GLcommon/include')
 
 subdir('logging')
 subdir('features')
+subdir('iostream')
 subdir('tracing')
 
 subdir('apigen-codec-common')
@@ -150,18 +153,16 @@ subdir('backend')
 
 inc_gfxstream_backend = [inc_root, inc_gfxstream_include, inc_include, inc_apigen_codec, inc_utils,
                          inc_gl_host_common, inc_host_include, inc_common_utils, inc_host_backend,
-                         inc_host_features, inc_host_logging, inc_host_tracing]
+                         inc_host_features, inc_host_logging, inc_host_iostream, inc_host_tracing]
 
 link_gfxstream_backend = [lib_gl_host_common, lib_apigen_codec, lib_common_utils, lib_host_backend,
-                          lib_host_features, lib_host_logging, lib_host_tracing, lib_host_logging]
+                          lib_host_features, lib_host_logging, lib_host_iostream, lib_host_tracing]
 
 files_lib_gfxstream_backend = files(
   'Buffer.cpp',
   'ExternalObjectManager.cpp',
   'ChannelStream.cpp',
   'ColorBuffer.cpp',
-  'DisplaySurface.cpp',
-  'DisplaySurfaceUser.cpp',
   'Hwc2.cpp',
   'PostWorker.cpp',
   'ReadBuffer.cpp',
@@ -180,6 +181,7 @@ files_lib_gfxstream_backend = files(
   'virtio-gpu-gfxstream-renderer.cpp',
   'VirtioGpuContext.cpp',
   'VirtioGpuFrontend.cpp',
+  'VirtioGpuPipe.cpp',
   'VirtioGpuResource.cpp',
   'VirtioGpuRingBlob.cpp',
   'VirtioGpuTimelines.cpp',
@@ -194,10 +196,9 @@ if use_gles
   subdir('gl')
 
   files_lib_gfxstream_backend += files('PostWorkerGl.cpp')
-  files_lib_gfxstream_backend += files('RenderThreadInfoGl.cpp')
   files_lib_gfxstream_backend += files('RenderControl.cpp')
 
-  inc_gfxstream_backend += [inc_gl_server, inc_gl_snapshot, inc_gl_common]
+  inc_gfxstream_backend += [inc_gl_server, inc_gl_snapshot, inc_gl_common, inc_gl_openglesdispatch]
   link_gfxstream_backend += lib_gl_server
 endif
 

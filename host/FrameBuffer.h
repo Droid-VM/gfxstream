@@ -29,8 +29,8 @@
 #include "Buffer.h"
 #include "ColorBuffer.h"
 #include "Compositor.h"
-#include "Display.h"
-#include "DisplaySurface.h"
+#include "gfxstream/host/display.h"
+#include "gfxstream/host/display_surface.h"
 #include "ExternalObjectManager.h"
 #include "Hwc2.h"
 #include "PostCommands.h"
@@ -85,7 +85,6 @@
 #include "render-utils/render_api.h"
 #include "snapshot/common.h"
 #include "utils/RenderDoc.h"
-#include "vulkan/vk_util.h"
 
 namespace gfxstream {
 namespace vk {

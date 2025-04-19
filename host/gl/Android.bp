@@ -26,6 +26,7 @@ cc_library_static {
         "EmulationGl.cpp",
         "GLESVersionDetector.cpp",
         "ReadbackWorkerGl.cpp",
+        "RenderThreadInfoGl.cpp",
         "TextureDraw.cpp",
         "TextureResize.cpp",
         "YUVConverter.cpp",
@@ -35,11 +36,14 @@ cc_library_static {
         "gfxstream_opengl_headers",
     ],
     static_libs: [
+        "libgfxstream_host_backend",
         "libgfxstream_host_features",
         "libgfxstream_host_gles1_dec",
         "libgfxstream_host_gles2_dec",
         "libgfxstream_host_glestranslator_glcommon",
         "libgfxstream_host_glsnapshot",
         "libgfxstream_host_logging",
+        "libgfxstream_host_openglesdispatch",
+        "libgfxstream_utils_renderdoc",
     ],
 }

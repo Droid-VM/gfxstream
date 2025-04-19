@@ -12,16 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "DisplaySurface.h"
+#include "gfxstream/host/display_surface.h"
 
-#include "Display.h"
+#include "gfxstream/host/display.h"
 #include "gfxstream/host/logging.h"
-#include "host-common/GfxstreamFatalError.h"
 
 namespace gfxstream {
-
-using emugl::ABORT_REASON_OTHER;
-using emugl::FatalError;
 
 DisplaySurface::DisplaySurface(uint32_t width,
                                uint32_t height,
@@ -32,8 +28,7 @@ DisplaySurface::DisplaySurface(uint32_t width,
 
 DisplaySurface::~DisplaySurface() {
     if (!mBoundUsers.empty()) {
-        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
-            << "DisplaySurface destroyed while there are still users!";
+        GFXSTREAM_FATAL("DisplaySurface destroyed while there are still users!");
     }
 }
 

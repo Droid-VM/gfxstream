@@ -36,7 +36,6 @@
 #include "host-common/address_space_device.h"
 #include "host-common/address_space_device.hpp"
 #include "host-common/address_space_device_control_ops.h"
-#include "host-common/opengles.h"
 #include "virtgpu_gfxstream_protocol.h"
 
 namespace gfxstream {
@@ -114,9 +113,11 @@ class CleanupThread {
 
 VirtioGpuFrontend::VirtioGpuFrontend() = default;
 
-int VirtioGpuFrontend::init(void* cookie, const gfxstream::host::FeatureSet& features,
+int VirtioGpuFrontend::init(RendererPtr renderer,
+                            void* cookie, const gfxstream::host::FeatureSet& features,
                             stream_renderer_fence_callback fence_callback) {
     GFXSTREAM_DEBUG("cookie: %p", cookie);
+    mRenderer = renderer;
     mCookie = cookie;
     mFeatures = features;
     mFenceCallback = fence_callback;
@@ -140,31 +141,18 @@ void VirtioGpuFrontend::teardown() {
     destroyVirtioGpuObjects();
 
     mCleanupThread.reset();
-}
 
-int VirtioGpuFrontend::resetPipe(VirtioGpuContextId contextId, GoldfishHostPipe* hostPipe) {
-    GFXSTREAM_DEBUG("reset pipe for context %u to hostpipe %p", contextId, hostPipe);
+    if (mRenderer) {
+        mRenderer->finish();
 
-    auto contextIt = mContexts.find(contextId);
-    if (contextIt == mContexts.end()) {
-        GFXSTREAM_ERROR("failed to reset pipe: context %u not found.", contextId);
-        return -EINVAL;
-    }
-    auto& context = contextIt->second;
-    context.SetHostPipe(hostPipe);
-
-    // Also update any resources associated with it
-    for (auto resourceId : context.GetAttachedResources()) {
-        auto resourceIt = mResources.find(resourceId);
-        if (resourceIt == mResources.end()) {
-            GFXSTREAM_ERROR("failed to reset pipe: resource %d not found.", resourceId);
-            return -EINVAL;
+        bool success = mRenderer->destroyOpenGLSubwindow();
+        if (!success) {
+            GFXSTREAM_WARNING("Failed to destroy renderer window.");
         }
-        auto& resource = resourceIt->second;
-        resource.SetHostPipe(hostPipe);
-    }
 
-    return 0;
+        mRenderer->stop(/*wait*/true);
+        mRenderer.reset();
+    }
 }
 
 int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, const char* name,
@@ -172,9 +160,8 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
     std::string contextName(name, nlen);
 
     GFXSTREAM_DEBUG("ctxid: %u len: %u name: %s", contextId, nlen, contextName.c_str());
-    auto ops = ensureAndGetServiceOps();
 
-    auto contextOpt = VirtioGpuContext::Create(ops, contextId, contextName, contextInit);
+    auto contextOpt = VirtioGpuContext::Create(mRenderer, contextId, contextName, contextInit);
     if (!contextOpt) {
         GFXSTREAM_ERROR("Failed to create context %u.", contextId);
         return -EINVAL;
@@ -208,7 +195,7 @@ int VirtioGpuFrontend::destroyContext(VirtioGpuCtxId contextId) {
     }
     auto& context = contextIt->second;
 
-    context.Destroy(ensureAndGetServiceOps(), mAddressSpaceDeviceControlOps);
+    context.Destroy(mAddressSpaceDeviceControlOps);
 
     mContexts.erase(contextIt);
     return 0;
@@ -555,9 +542,7 @@ int VirtioGpuFrontend::transferReadIov(int resId, uint64_t offset, stream_render
         return EINVAL;
     }
     auto& resource = it->second;
-
-    auto ops = ensureAndGetServiceOps();
-    return resource.TransferRead(ops, offset, box, AsVecOption(iov, iovec_cnt));
+    return resource.TransferRead(offset, box, AsVecOption(iov, iovec_cnt));
 }
 
 int VirtioGpuFrontend::transferWriteIov(int resId, uint64_t offset, stream_renderer_box* box,
@@ -568,15 +553,7 @@ int VirtioGpuFrontend::transferWriteIov(int resId, uint64_t offset, stream_rende
         return EINVAL;
     }
     auto& resource = it->second;
-
-    auto ops = ensureAndGetServiceOps();
-    auto result = resource.TransferWrite(ops, offset, box, AsVecOption(iov, iovec_cnt));
-    if (result.status != 0) return result.status;
-
-    if (result.contextPipe) {
-        resetPipe(result.contextId, result.contextPipe);
-    }
-    return 0;
+    return resource.TransferWrite(offset, box, AsVecOption(iov, iovec_cnt));
 }
 
 void VirtioGpuFrontend::getCapset(uint32_t set, uint32_t* max_size) {
@@ -954,14 +931,43 @@ int VirtioGpuFrontend::destroyVirtioGpuObjects() {
     return 0;
 }
 
-#ifdef CONFIG_AEMU
-void VirtioGpuFrontend::setServiceOps(const GoldfishPipeServiceOps* ops) { mServiceOps = ops; }
-#endif  // CONFIG_AEMU
+void VirtioGpuFrontend::setupWindow(void* nativeWindowHandle,
+                                    int32_t windowX,
+                                    int32_t windowY,
+                                    int32_t windowWidth,
+                                    int32_t windowHeight,
+                                    int32_t framebufferWidth,
+                                    int32_t framebufferHeight) {
+    if (!mRenderer) {
+        GFXSTREAM_ERROR("Failed to setup window: renderer not available.");
+        return;
+    }
 
-inline const GoldfishPipeServiceOps* VirtioGpuFrontend::ensureAndGetServiceOps() {
-    if (mServiceOps) return mServiceOps;
-    mServiceOps = goldfish_pipe_get_service_ops();
-    return mServiceOps;
+    bool success = mRenderer->showOpenGLSubwindow((FBNativeWindowType)(uintptr_t)nativeWindowHandle,
+                                                  windowX,
+                                                  windowY,
+                                                  windowWidth,
+                                                  windowHeight,
+                                                  framebufferWidth,
+                                                  framebufferHeight,
+                                                  /*dpr=*/1.0f,
+                                                  /*rotation=*/0,
+                                                  /*deleteExisting=*/false,
+                                                  /*hideWindow=*/false);
+    if (!success) {
+        GFXSTREAM_ERROR("Failed to setup window: show subwindow failed.");
+    }
+}
+
+void VirtioGpuFrontend::setScreenMask(int width,
+                                      int height,
+                                      const unsigned char* rgbaData) {
+    if (!mRenderer) {
+        GFXSTREAM_ERROR("Failed to set screen mask: renderer not available.");
+        return;
+    }
+
+    mRenderer->setScreenMask(width, height, rgbaData);
 }
 
 #ifdef GFXSTREAM_BUILD_WITH_SNAPSHOT_FRONTEND_SUPPORT
@@ -980,7 +986,12 @@ int VirtioGpuFrontend::snapshotRenderer(const char* directory) {
         .stream = &stream,
     };
 
-    android_getOpenglesRenderer()->save(saveStream.stream, saveStream.textureSaver);
+    if (!mRenderer) {
+        GFXSTREAM_ERROR("Failed to snapshot renderer: renderer not available.");
+        return -EINVAL;
+    }
+    mRenderer->save(saveStream.stream, saveStream.textureSaver);
+
     return 0;
 }
 
@@ -1051,7 +1062,11 @@ int VirtioGpuFrontend::snapshotAsg(const char* directory) {
 int VirtioGpuFrontend::snapshot(const char* directory) {
     GFXSTREAM_DEBUG("directory:%s", directory);
 
-    android_getOpenglesRenderer()->pauseAllPreSave();
+    if (!mRenderer) {
+        GFXSTREAM_ERROR("Failed to restore renderer: renderer not available.");
+        return -EINVAL;
+    }
+    mRenderer->pauseAllPreSave();
 
     int ret = snapshotRenderer(directory);
     if (ret) {
@@ -1085,7 +1100,12 @@ int VirtioGpuFrontend::restoreRenderer(const char* directory) {
         .stream = &stream,
     };
 
-    android_getOpenglesRenderer()->load(loadStream.stream, loadStream.textureLoader);
+    if (!mRenderer) {
+        GFXSTREAM_ERROR("Failed to restore renderer: renderer not available.");
+        return -EINVAL;
+    }
+    mRenderer->load(loadStream.stream, loadStream.textureLoader);
+
     return 0;
 }
 
@@ -1112,7 +1132,7 @@ int VirtioGpuFrontend::restoreFrontend(const char* directory) {
     mResources.clear();
 
     for (const auto& [contextId, contextSnapshot] : snapshot.contexts()) {
-        auto contextOpt = VirtioGpuContext::Restore(contextSnapshot);
+        auto contextOpt = VirtioGpuContext::Restore(mRenderer, contextSnapshot);
         if (!contextOpt) {
             GFXSTREAM_ERROR("Failed to restore context %d", contextId);
             return -1;
@@ -1216,7 +1236,11 @@ int VirtioGpuFrontend::restore(const char* directory) {
         return ret;
     }
 
-    android_getOpenglesRenderer()->resumeAll();
+    if (!mRenderer) {
+        GFXSTREAM_ERROR("Failed to restore: renderer not available.");
+        return -EINVAL;
+    }
+    mRenderer->resumeAll();
 
     GFXSTREAM_DEBUG("directory:%s - done!", directory);
     return 0;

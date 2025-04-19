@@ -30,12 +30,11 @@
 #undef Status
 #include "VirtioGpuContextSnapshot.pb.h"
 #endif
+#include "VirtioGpuPipe.h"
 #include "VirtioGpuResource.h"
 #include "gfxstream/virtio-gpu-gfxstream-renderer.h"
 #include "host-common/address_space_device_control_ops.h"
-extern "C" {
-#include "host-common/goldfish_pipe.h"
-}  // extern "C"
+#include "render-utils/Renderer.h"
 
 namespace gfxstream {
 namespace host {
@@ -44,20 +43,19 @@ class VirtioGpuContext {
    public:
     VirtioGpuContext() = default;
 
-    static std::optional<VirtioGpuContext> Create(const GoldfishPipeServiceOps* ops,
+    static std::optional<VirtioGpuContext> Create(RendererPtr renderer,
                                                   VirtioGpuContextId contextId,
                                                   const std::string& contextName,
                                                   uint32_t capsetId);
 
-    int Destroy(const GoldfishPipeServiceOps* pipeOps,
-                const struct address_space_device_control_ops* asgOps);
+    int Destroy(const struct address_space_device_control_ops* asgOps);
 
     void AttachResource(VirtioGpuResource& resource);
     void DetachResource(VirtioGpuResource& resource);
 
     const std::unordered_set<VirtioGpuResourceId>& GetAttachedResources() const;
 
-    void SetHostPipe(GoldfishHostPipe* pipe);
+    void SetHostPipe(std::shared_ptr<VirtioGpuPipe> pipe);
 
     int AcquireSync(uint64_t syncId);
     std::optional<SyncDescriptorInfo> TakeSync();
@@ -77,15 +75,17 @@ class VirtioGpuContext {
     std::optional<gfxstream::host::snapshot::VirtioGpuContextSnapshot> Snapshot() const;
 
     static std::optional<VirtioGpuContext> Restore(
+        RendererPtr renderer,
         const gfxstream::host::snapshot::VirtioGpuContextSnapshot& snapshot);
 #endif
 
    private:
     // LINT.IfChange(virtio_gpu_context)
+    RendererPtr mRenderer;
     VirtioGpuContextId mId;
     std::string mName;
     uint32_t mCapsetId;
-    GoldfishHostPipe* mHostPipe;
+    std::shared_ptr<VirtioGpuPipe> mHostPipe;
     std::unordered_set<VirtioGpuResourceId> mAttachedResources;
     std::unordered_map<VirtioGpuResourceId, uint32_t> mAddressSpaceHandles;
     std::unordered_map<uint32_t, struct stream_renderer_resource_create_args> mPendingBlobs;

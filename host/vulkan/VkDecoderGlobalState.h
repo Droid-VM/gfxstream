@@ -33,7 +33,6 @@
 #include "cereal/common/goldfish_vk_transform.h"
 #include "gfxstream/host/Features.h"
 #include "goldfish_vk_private_defs.h"
-#include "host-common/GfxstreamFatalError.h"
 #include "utils/GfxApiLogger.h"
 #include "vk_util.h"
 
@@ -216,6 +215,20 @@ class VkDecoderGlobalState {
     void on_vkGetDeviceQueue2(android::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo,
                               VkDevice device, const VkDeviceQueueInfo2* pQueueInfo,
                               VkQueue* pQueue);
+
+    void on_vkGetPhysicalDeviceSparseImageFormatProperties(
+        android::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo,
+        VkPhysicalDevice physicalDevice, VkFormat format, VkImageType type,
+        VkSampleCountFlagBits samples, VkImageUsageFlags usage, VkImageTiling tiling,
+        uint32_t* pPropertyCount, VkSparseImageFormatProperties* pProperties);
+    void on_vkGetPhysicalDeviceSparseImageFormatProperties2(
+        android::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo,
+        VkPhysicalDevice physicalDevice, const VkPhysicalDeviceSparseImageFormatInfo2* pFormatInfo,
+        uint32_t* pPropertyCount, VkSparseImageFormatProperties2* pProperties);
+    void on_vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
+        android::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo,
+        VkPhysicalDevice physicalDevice, const VkPhysicalDeviceSparseImageFormatInfo2* pFormatInfo,
+        uint32_t* pPropertyCount, VkSparseImageFormatProperties2* pProperties);
 
     void on_vkDestroyDevice(android::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo,
                             VkDevice device, const VkAllocationCallbacks* pAllocator);

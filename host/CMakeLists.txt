@@ -3,6 +3,7 @@ add_subdirectory(logging)
 
 add_subdirectory(backend)
 add_subdirectory(features)
+add_subdirectory(iostream)
 add_subdirectory(tracing)
 add_subdirectory(snapshot)
 
@@ -27,34 +28,32 @@ endif()
 # Stream server core
 set(stream-server-core-sources
     Buffer.cpp
-    ExternalObjectManager.cpp
-    ColorBuffer.cpp
-    GfxStreamAgents.cpp
-    VirtioGpuContext.cpp
-    VirtioGpuFrontend.cpp
-    VirtioGpuResource.cpp
-    VirtioGpuRingBlob.cpp
-    VirtioGpuTimelines.cpp
-    VsyncThread.cpp
     ChannelStream.cpp
-    DisplaySurface.cpp
-    DisplaySurfaceUser.cpp
+    ColorBuffer.cpp
+    ExternalObjectManager.cpp
+    FrameBuffer.cpp
+    GfxStreamAgents.cpp
+    GraphicsDriverLock.cpp
     Hwc2.cpp
     PostWorker.cpp
     PostWorkerGl.cpp
     ReadBuffer.cpp
     RenderChannelImpl.cpp
+    RenderControl.cpp
+    RendererImpl.cpp
+    RenderLibImpl.cpp
+    RenderThread.cpp
     RenderThreadInfo.cpp
-    RenderThreadInfoGl.cpp
+    RenderWindow.cpp
     RingStream.cpp
     SyncThread.cpp
-    RenderThread.cpp
-    RenderControl.cpp
-    RenderWindow.cpp
-    RenderLibImpl.cpp
-    RendererImpl.cpp
-    FrameBuffer.cpp
-    GraphicsDriverLock.cpp)
+    VirtioGpuContext.cpp
+    VirtioGpuFrontend.cpp
+    VirtioGpuPipe.cpp
+    VirtioGpuResource.cpp
+    VirtioGpuRingBlob.cpp
+    VirtioGpuTimelines.cpp
+    VsyncThread.cpp)
 if (APPLE)
     set(stream-server-core-platform-sources NativeSubWindow_cocoa.mm)
 elseif (WIN32)
@@ -83,21 +82,23 @@ add_library(
 target_link_libraries(
         gfxstream_backend_static
         PUBLIC
-        GLES_CM_translator_static
-        OpenGLESDispatch
-        renderControl_dec
-        gfxstream_backend_common
+        ${GFXSTREAM_BASE_LIB}
+        ${GFXSTREAM_HOST_COMMON_LIB}
+        apigen-codec-common
+        gfxstream_egl_headers
         gfxstream_features
+        gfxstream_host_backend
+        gfxstream_host_iostream
+        gfxstream_host_logging
+        gfxstream_host_snapshot
         gfxstream_host_tracing
+        gfxstream_openglesdispatch
+        gfxstream_utils
         gfxstream-gl-server
         gfxstream-vulkan-server
-        gfxstream_host_logging
-        gfxstream_egl_headers
-        gfxstream_host_snapshot
-        gfxstream_utils
-        apigen-codec-common
-        ${GFXSTREAM_HOST_COMMON_LIB}
-        ${GFXSTREAM_BASE_LIB})
+        GLES_CM_translator_static
+        renderControl_dec
+        )
 
 target_include_directories(
         gfxstream_backend_static
@@ -147,8 +148,8 @@ target_link_libraries(
     gfxstream_backend
     PUBLIC
     gfxstream_common_utils
-    gfxstream_backend_common
     gfxstream_features
+    gfxstream_host_backend
     gfxstream_host_tracing
     gfxstream_backend_static
     PRIVATE
