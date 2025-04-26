@@ -1,4 +1,4 @@
-// Copyright (C) 2016 The Android Open Source Project
+// Copyright 2025 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,19 +11,15 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #pragma once
 
-// Interface between android-emu non-base libraries and emugl
+#include <cstdint>
 
-#include "host-common/logging.h"
+typedef void* (*gfxstream_dma_get_host_addr_t)(uint64_t);
+typedef void (*gfxstream_dma_unlock_t)(uint64_t);
 
-typedef void (*gfxstream_logger_internal_t)(char severity, const char* file, unsigned int line,
-              int64_t timestamp_us, const char* message);
-
-#ifdef CONFIG_AEMU
-using emugl_logger_t = gfxstream_logger_t;
-using emugl_logger_struct = gfxstream_logger_t;
-#else
-using emugl_logger_t = gfxstream_logger_internal_t;
-using emugl_logger_struct = gfxstream_logger_internal_t;
-#endif
+typedef struct {
+    gfxstream_dma_get_host_addr_t get_host_addr;
+    gfxstream_dma_unlock_t unlock;
+} gfxstream_dma_ops;

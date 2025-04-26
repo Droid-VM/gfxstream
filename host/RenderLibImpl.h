@@ -16,8 +16,6 @@
 #include "render-utils/RenderLib.h"
 
 #include "aemu/base/Compiler.h"
-#include "host-common/vm_operations.h"
-#include "host-common/misc.h"
 
 #include <memory>
 
@@ -28,30 +26,27 @@ public:
     RenderLibImpl() = default;
 
     virtual void setRenderer(SelectedRenderer renderer) override;
-    virtual void setAvdInfo(bool phone, int api) override;
+    virtual void setGuestAndroidApiLevel(int api) override;
     virtual void getGlesVersion(int* maj, int* min) override;
-    virtual void setLogger(emugl_logger_struct logger) override;
-    virtual void setGLObjectCounter(
-            android::base::GLObjectCounter* counter) override;
-    virtual void setCrashReporter(emugl_crash_reporter_t reporter) override;
-    virtual void setFeatureController(emugl_feature_is_enabled_t featureController) override;
-    virtual void setSyncDevice(emugl_sync_create_timeline_t,
-                               emugl_sync_create_fence_t,
-                               emugl_sync_timeline_inc_t,
-                               emugl_sync_destroy_timeline_t,
-                               emugl_sync_register_trigger_wait_t,
-                               emugl_sync_device_exists_t) override;
+    virtual void setLogger(gfxstream_log_callback_t callback) override;
 
-    virtual void setDmaOps(emugl_dma_ops) override;
+    virtual void setSyncDevice(gfxstream_sync_create_timeline_t,
+                               gfxstream_sync_create_fence_t,
+                               gfxstream_sync_timeline_inc_t,
+                               gfxstream_sync_destroy_timeline_t,
+                               gfxstream_sync_register_trigger_wait_t,
+                               gfxstream_sync_device_exists_t) override;
 
-    virtual void setVmOps(const QAndroidVmOperations &vm_operations) override;
+    virtual void setDmaOps(gfxstream_dma_ops) override;
+
+    virtual void setVmOps(const gfxstream_vm_ops& vm_operations) override;
+
     virtual void setAddressSpaceDeviceControlOps(struct address_space_device_control_ops* ops) override;
 
-    virtual void setWindowOps(const QAndroidEmulatorWindowAgent &window_operations,
-                              const QAndroidMultiDisplayAgent &multi_display_operations) override;
+    virtual void setWindowOps(const gfxstream_window_ops& window_operations) override;
 
-    virtual void setUsageTracker(android::base::CpuUsage* cpuUsage,
-                                 android::base::MemoryTracker* memUsage) override;
+    virtual void setDisplayOps(const gfxstream_multi_display_ops& display_operations) override;
+
     virtual void setGrallocImplementation(GrallocImplementation gralloc) override;
 
     virtual bool getOpt(RenderOpt* opt) override;

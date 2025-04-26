@@ -21,7 +21,6 @@ extern "C" {
 #include <optional>
 
 #include "FrameBuffer.h"
-#include "GfxStreamAgents.h"
 #include "VirtioGpuFrontend.h"
 #include "aemu/base/Metrics.h"
 #include "aemu/base/system/System.h"
@@ -31,7 +30,6 @@ extern "C" {
 #include "gfxstream/host/logging.h"
 #include "host-common/address_space_device.h"
 #include "host-common/address_space_graphics.h"
-#include "host-common/GraphicsAgentFactory.h"
 #include "host-common/globals.h"
 #ifdef CONFIG_AEMU
 #include "host-common/opengles.h"
@@ -204,8 +202,6 @@ RendererPtr InitRenderer(uint32_t displayWidth,
         android::base::setEnvironmentVariable("ANDROID_EGL_ON_EGL", "1");
     }
 
-    android::featurecontrol::productFeatureOverride();
-
     auto androidHw = aemu_get_android_hw();
 
     androidHw->hw_gltransport_asg_writeBufferSize = 1048576;
@@ -213,18 +209,9 @@ RendererPtr InitRenderer(uint32_t displayWidth,
     androidHw->hw_gltransport_asg_dataRingSize = 524288;
     androidHw->hw_gltransport_drawFlushInterval = 10000;
 
-    // Make all the console agents available.
-#ifndef GFXSTREAM_MESON_BUILD
-    android::emulation::injectGraphicsAgents(android::emulation::GfxStreamGraphicsAgentFactory());
-#endif
-
     gfxstream::vk::vkDispatch(false /* don't use test ICD */);
 
     static gfxstream::RenderLibPtr sRendererLibrary = gfxstream::initLibrary();
-
-    sRendererLibrary->setWindowOps(*getGraphicsAgents()->emu, *getGraphicsAgents()->multi_display);
-
-    address_space_set_vm_operations(getGraphicsAgents()->vm);
 
     RendererPtr renderer = sRendererLibrary->initRenderer(displayWidth, displayHeight, features, true, enableEgl2egl);
     if (!renderer) {

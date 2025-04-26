@@ -19,9 +19,10 @@
 
 #include "OpenGLESDispatch/EGLDispatch.h"
 #include "gfxstream/host/Features.h"
+#include "gfxstream/host/guest_operations.h"
 #include "gfxstream/host/logging.h"
 #include "host-common/misc.h"
-#include "host-common/opengl/renderer_enums.h"
+#include "render-utils/renderer_enums.h"
 #include "host-common/opengl/misc.h"
 
 namespace gfxstream {
@@ -218,9 +219,7 @@ int EmulatedEglConfigList::chooseConfig(const EGLint* attribs,
         memcpy(&newAttribs[0], attribs, numAttribs * sizeof(EGLint));
     }
 
-    int apiLevel;
-    emugl::getAvdInfo(NULL, &apiLevel);
-
+    const int apiLevel = get_gfxstream_guest_android_api_level();
     if (!hasSurfaceType) {
         newAttribs.push_back(EGL_SURFACE_TYPE);
         newAttribs.push_back(0);

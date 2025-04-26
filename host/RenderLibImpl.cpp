@@ -16,14 +16,16 @@
 #include "FrameBuffer.h"
 #include "RendererImpl.h"
 #include "aemu/base/files/Stream.h"
+#include "gfxstream/host/display_operations.h"
+#include "gfxstream/host/dma_device.h"
+#include "gfxstream/host/guest_operations.h"
 #include "gfxstream/host/logging.h"
+#include "gfxstream/host/sync_device.h"
+#include "gfxstream/host/vm_operations.h"
+#include "gfxstream/host/window_operations.h"
 #include "host-common/address_space_device_control_ops.h"
-#include "host-common/crash_reporter.h"
-#include "host-common/dma_device.h"
-#include "host-common/emugl_vm_operations.h"
-#include "host-common/feature_control.h"
+#include "host-common/misc.h"
 #include "host-common/opengl/misc.h"
-#include "host-common/sync_device.h"
 
 #if GFXSTREAM_ENABLE_HOST_GLES
 #include "OpenGLESDispatch/DispatchTables.h"
@@ -36,99 +38,63 @@ void RenderLibImpl::setRenderer(SelectedRenderer renderer) {
     emugl::setRenderer(renderer);
 }
 
-void RenderLibImpl::setAvdInfo(bool phone, int api) {
-    emugl::setAvdInfo(phone, api);
+void RenderLibImpl::setGuestAndroidApiLevel(int api) {
+    set_gfxstream_guest_android_api_level(api);
 }
 
 void RenderLibImpl::getGlesVersion(int* maj, int* min) {
     emugl::getGlesVersion(maj, min);
 }
 
-void RenderLibImpl::setLogger(emugl_logger_struct logger) {
-#ifdef CONFIG_AEMU
-    set_gfxstream_logger(logger);
-
-    // TODO: move this into emu init.
+void RenderLibImpl::setLogger(gfxstream_log_callback_t callback) {
     gfxstream::host::SetGfxstreamLogCallback(
-        [](gfxstream::host::LogLevel level, const char* file, int line, const char* function, const char* message) {
-            char severity;
-            switch (level) {
-                case gfxstream::host::LogLevel::kFatal:
-                    severity = 'F';
-                    break;
-                case gfxstream::host::LogLevel::kError:
-                    severity = 'E';
-                    break;
-                case gfxstream::host::LogLevel::kWarning:
-                    severity = 'W';
-                    break;
-                case gfxstream::host::LogLevel::kInfo:
-                    severity = 'I';
-                    break;
-                case gfxstream::host::LogLevel::kDebug:
-                    severity = 'D';
-                    break;
-                case gfxstream::host::LogLevel::kVerbose:
-                    severity = 'V';
-                    break;
-            }
-            OutputLog(stderr, severity, file, line, /*timestamp_us=*/0, "%s", message);
+        [callback](gfxstream::host::LogLevel level, const char* file, int line, const char* function, const char* message) {
+            callback(static_cast<gfxstream_logging_level>(level), file, line, function, message);
         });
-#endif
-}
-
-void RenderLibImpl::setGLObjectCounter(
-        android::base::GLObjectCounter* counter) {
-    emugl::setGLObjectCounter(counter);
-}
-
-void RenderLibImpl::setCrashReporter(emugl_crash_reporter_t reporter) {
-    // set_emugl_crash_reporter(reporter);
-}
-
-void RenderLibImpl::setFeatureController(emugl_feature_is_enabled_t featureController) {
-    android::featurecontrol::setFeatureEnabledCallback(featureController);
 }
 
 void RenderLibImpl::setSyncDevice
-    (emugl_sync_create_timeline_t create_timeline,
-     emugl_sync_create_fence_t create_fence,
-     emugl_sync_timeline_inc_t timeline_inc,
-     emugl_sync_destroy_timeline_t destroy_timeline,
-     emugl_sync_register_trigger_wait_t register_trigger_wait,
-     emugl_sync_device_exists_t device_exists) {
-    emugl::set_emugl_sync_create_timeline(create_timeline);
-    emugl::set_emugl_sync_create_fence(create_fence);
-    emugl::set_emugl_sync_timeline_inc(timeline_inc);
-    emugl::set_emugl_sync_destroy_timeline(destroy_timeline);
-    emugl::set_emugl_sync_register_trigger_wait(register_trigger_wait);
-    emugl::set_emugl_sync_device_exists(device_exists);
+    (gfxstream_sync_create_timeline_t create_timeline,
+     gfxstream_sync_create_fence_t create_fence,
+     gfxstream_sync_timeline_inc_t timeline_inc,
+     gfxstream_sync_destroy_timeline_t destroy_timeline,
+     gfxstream_sync_register_trigger_wait_t register_trigger_wait,
+     gfxstream_sync_device_exists_t device_exists) {
+    set_gfxstream_sync_create_timeline(create_timeline);
+    set_gfxstream_sync_create_fence(create_fence);
+    set_gfxstream_sync_timeline_inc(timeline_inc);
+    set_gfxstream_sync_destroy_timeline(destroy_timeline);
+    set_gfxstream_sync_register_trigger_wait(register_trigger_wait);
+    set_gfxstream_sync_device_exists(device_exists);
 }
 
-void RenderLibImpl::setDmaOps(emugl_dma_ops ops) {
-    emugl::set_emugl_dma_get_host_addr(ops.get_host_addr);
-    emugl::set_emugl_dma_unlock(ops.unlock);
+void RenderLibImpl::setDmaOps(gfxstream_dma_ops ops) {
+    set_gfxstream_dma_get_host_addr(ops.get_host_addr);
+    set_gfxstream_dma_unlock(ops.unlock);
 }
 
-void RenderLibImpl::setVmOps(const QAndroidVmOperations &vm_operations) {
-    set_emugl_vm_operations(vm_operations);
-    address_space_set_vm_operations(&get_emugl_vm_operations());
+void RenderLibImpl::setVmOps(const gfxstream_vm_ops& ops) {
+    set_gfxstream_vm_operations(ops);
+
+    // TODO: remove in next change:
+    static const QAndroidVmOperations sAndroidOps = {
+        .mapUserBackedRam = ops.map_user_memory,
+        .unmapUserBackedRam = ops.unmap_user_memory,
+        .physicalMemoryGetAddr = ops.lookup_user_memory,
+    };
+    address_space_set_vm_operations(&sAndroidOps);
 }
 
 void RenderLibImpl::setAddressSpaceDeviceControlOps(struct address_space_device_control_ops* ops) {
     set_emugl_address_space_device_control_ops(ops);
 }
 
-void RenderLibImpl::setWindowOps(const QAndroidEmulatorWindowAgent &window_operations,
-                                 const QAndroidMultiDisplayAgent &multi_display_operations) {
-    emugl::set_emugl_window_operations(window_operations);
-    emugl::set_emugl_multi_display_operations(multi_display_operations);
+void RenderLibImpl::setWindowOps(const gfxstream_window_ops& window_operations) {
+    set_gfxstream_window_operations(window_operations);
 }
 
-void RenderLibImpl::setUsageTracker(android::base::CpuUsage* cpuUsage,
-                                    android::base::MemoryTracker* memUsage) {
-    emugl::setCpuUsage(cpuUsage);
-    emugl::setMemoryTracker(memUsage);
+void RenderLibImpl::setDisplayOps(const gfxstream_multi_display_ops& display_operations) {
+    set_gfxstream_multi_display_operations(display_operations);
 }
 
 void RenderLibImpl::setGrallocImplementation(GrallocImplementation gralloc) {
@@ -164,14 +130,13 @@ RendererPtr RenderLibImpl::initRenderer(int width, int height,
     return res;
 }
 
-static void impl_onLastCbRef(uint32_t handle) {
-    FrameBuffer* fb = FrameBuffer::getFB();
-    if (fb)
-        fb->onLastColorBufferRef(handle);
-}
-
 OnLastColorBufferRef RenderLibImpl::getOnLastColorBufferRef() {
-    return (OnLastColorBufferRef)impl_onLastCbRef;
+    return [](uint32_t handle) {
+        FrameBuffer* fb = FrameBuffer::getFB();
+        if (fb) {
+            fb->onLastColorBufferRef(handle);
+        }
+    };
 }
 
 }  // namespace gfxstream

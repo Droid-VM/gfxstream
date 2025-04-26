@@ -53,13 +53,13 @@
 #include "gl/glestranslator/EGL/EglGlobalInfo.h"
 #endif
 #include "gfxstream/host/Tracing.h"
+#include "gfxstream/host/display_operations.h"
+#include "gfxstream/host/guest_operations.h"
 #include "gfxstream/host/logging.h"
-#include "host-common/crash_reporter.h"
-#include "host-common/emugl_vm_operations.h"
-#include "host-common/feature_control.h"
+#include "gfxstream/host/vm_operations.h"
+#include "gfxstream/host/window_operations.h"
 #include "host-common/misc.h"
 #include "host-common/opengl/misc.h"
-#include "host-common/vm_operations.h"
 #include "render-utils/MediaNative.h"
 #include "vulkan/DisplayVk.h"
 #include "vulkan/PostWorkerVk.h"
@@ -103,59 +103,6 @@ using gl::YUVPlane;
 
 using vk::AstcEmulationMode;
 using vk::VkEmulation;
-
-// static std::string getTimeStampString() {
-//     const time_t timestamp = android::base::getUnixTimeUs();
-//     const struct tm *timeinfo = localtime(&timestamp);
-//     // Target format: 07-31 4:44:33
-//     char b[64];
-//     snprintf(
-//         b,
-//         sizeof(b) - 1,
-//         "%02u-%02u %02u:%02u:%02u",
-//         timeinfo->tm_mon + 1,
-//         timeinfo->tm_mday,
-//         timeinfo->tm_hour,
-//         timeinfo->tm_min,
-//         timeinfo->tm_sec);
-//     return std::string(b);
-// }
-
-// static unsigned int getUptimeMs() {
-//     return android::base::getUptimeMs();
-// }
-
-static void dumpPerfStats() {
-    // auto usage = System::get()->getMemUsage();
-    // std::string memoryStats =
-    //     emugl::getMemoryTracker()
-    //             ? emugl::getMemoryTracker()->printUsage()
-    //             : "";
-    // auto cpuUsage = emugl::getCpuUsage();
-    // std::string lastStats =
-    //     cpuUsage ? cpuUsage->printUsage() : "";
-    // printf("%s Uptime: %u ms Resident memory: %f mb %s \n%s\n",
-    //     getTimeStampString().c_str(), getUptimeMs(),
-    //     (float)usage.resident / 1048576.0f, lastStats.c_str(),
-    //     memoryStats.c_str());
-}
-
-class PerfStatThread : public android::base::Thread {
-public:
-    PerfStatThread(bool* perfStatActive) :
-      Thread(), m_perfStatActive(perfStatActive) {}
-
-    virtual intptr_t main() {
-      while (*m_perfStatActive) {
-        sleepMs(1000);
-        dumpPerfStats();
-      }
-      return 0;
-    }
-
-private:
-    bool* m_perfStatActive;
-};
 
 FrameBuffer* FrameBuffer::s_theFrameBuffer = NULL;
 HandleType FrameBuffer::s_nextHandle = 0;
@@ -573,8 +520,6 @@ FrameBuffer::FrameBuffer(int p_width, int p_height, const gfxstream::host::Featu
       m_windowHeight(p_height),
       m_useSubWindow(useSubWindow),
       m_fpsStats(getenv("SHOW_FPS_STATS") != nullptr),
-      m_perfStats(!android::base::getEnvironmentVariable("SHOW_PERF_STATS").empty()),
-      m_perfThread(new PerfStatThread(&m_perfStats)),
       m_readbackThread(
           [this](FrameBuffer::Readback&& readback) { return sendReadbackWorkerCmd(readback); }),
       m_refCountPipeEnabled(features.RefCountPipe.enabled),
@@ -591,14 +536,10 @@ FrameBuffer::FrameBuffer(int p_width, int p_height, const gfxstream::host::Featu
     }
 
     setDisplayPose(displayId, 0, 0, getWidth(), getHeight(), 0);
-    m_perfThread->start();
 }
 
 FrameBuffer::~FrameBuffer() {
     AutoLock fbLock(m_lock);
-
-    m_perfStats = false;
-    m_perfThread->wait(NULL);
 
     m_postThread.enqueue({PostCmd::Exit});
     m_postThread.join();
@@ -631,8 +572,6 @@ FrameBuffer::~FrameBuffer() {
     m_readbackThread.join();
 
     m_vsyncThread.reset();
-
-    delete m_perfThread;
 
     SyncThread::destroy();
 
@@ -781,7 +720,7 @@ std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
     std::future<void> res = std::async(std::launch::deferred, [] {});
     res.wait();
     if (shouldPostOnlyOnMainThread && (PostCmd::Screenshot == post.cmd) &&
-        emugl::get_emugl_window_operations().isRunningInUiThread()) {
+        get_gfxstream_window_operations().is_current_thread_ui_thread()) {
         post.cb->readToBytesScaled(post.screenshot.screenwidth, post.screenshot.screenheight,
                                    post.screenshot.format, post.screenshot.type,
                                    post.screenshot.rotation, post.screenshot.rect,
@@ -791,7 +730,7 @@ std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
             m_postThread.enqueue(Post(std::move(post)));
         if (!shouldPostOnlyOnMainThread ||
             (PostCmd::Screenshot == post.cmd &&
-             !emugl::get_emugl_window_operations().isRunningInUiThread())) {
+             !get_gfxstream_window_operations().is_current_thread_ui_thread())) {
             res = std::move(completeFuture);
         }
     }
@@ -803,13 +742,8 @@ void FrameBuffer::setPostCallback(Renderer::OnPostCallback onPost, void* onPostC
     AutoLock lock(m_lock);
     if (onPost) {
         uint32_t w, h;
-        if (!emugl::get_emugl_multi_display_operations().getMultiDisplay(displayId,
-                                                                         nullptr,
-                                                                         nullptr,
-                                                                         &w, &h,
-                                                                         nullptr,
-                                                                         nullptr,
-                                                                         nullptr)) {
+        if (!get_gfxstream_multi_display_operations().get_display_info(
+                displayId, nullptr, nullptr, &w, &h, nullptr, nullptr, nullptr)) {
             GFXSTREAM_ERROR("display %d not exist, cancelling OnPost callback", displayId);
             return;
         }
@@ -941,11 +875,6 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
     if (lockWatchdogId.has_value()) {
         m_healthMonitor->stopMonitoringTask(lockWatchdogId.value());
     }
-
-#if SNAPSHOT_PROFILE > 1
-    // printf("FrameBuffer::%s(): got lock at %lld ms\n", __func__,
-    //        (long long)System::get()->getProcessTimes().wallClockMs);
-#endif
 
     if (deleteExisting) {
         removeSubWindow_locked();
@@ -1207,9 +1136,7 @@ HandleType FrameBuffer::createColorBufferWithResourceHandleLocked(int p_width, i
     if (m_refCountPipeEnabled) {
         m_colorbuffers.try_emplace(handle, ColorBufferRef{std::move(cb), 1, false, 0});
     } else {
-        // Android master default api level is 1000
-        int apiLevel = 1000;
-        emugl::getAvdInfo(nullptr, &apiLevel);
+        const int apiLevel = get_gfxstream_guest_android_api_level();
         // pre-O and post-O use different color buffer memory management
         // logic
         if (apiLevel > 0 && apiLevel < 26) {
@@ -1473,6 +1400,9 @@ void FrameBuffer::cleanupProcGLObjects(uint64_t puid) {
             [puid, &renderThreadWithThisPuidExists](RenderThreadInfo* i) {
             if (i->m_puid == puid) {
                 renderThreadWithThisPuidExists = true;
+
+                bool shouldExit = false;
+                i->m_shouldExit.compare_exchange_strong(shouldExit, true);
             }
         });
         android::base::sleepUs(10000);
@@ -2027,8 +1957,8 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsi
 
     AutoLock mutex(m_lock);
     uint32_t w, h, cb, screenWidth, screenHeight;
-    if (!emugl::get_emugl_multi_display_operations().getMultiDisplay(
-            displayId, nullptr, nullptr, &w, &h, nullptr, nullptr, nullptr)) {
+    if (!get_gfxstream_multi_display_operations().get_display_info(displayId, nullptr, nullptr, &w,
+                                                                   &h, nullptr, nullptr, nullptr)) {
         GFXSTREAM_ERROR("Screenshot of invalid display %d", displayId);
         *width = 0;
         *height = 0;
@@ -2042,7 +1972,7 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsi
         *cPixels = 0;
         return -1;
     }
-    emugl::get_emugl_multi_display_operations().getDisplayColorBuffer(displayId, &cb);
+    get_gfxstream_multi_display_operations().get_display_color_buffer(displayId, &cb);
     if (displayId == 0) {
         cb = m_lastPostedColorBuffer;
     }
@@ -2179,8 +2109,8 @@ bool FrameBuffer::compose(uint32_t bufferSize, void* buffer, bool needPost) {
     }
 
 #ifdef CONFIG_AEMU
-    const auto& multiDisplay = emugl::get_emugl_multi_display_operations();
-    const bool is_pixel_fold = multiDisplay.isPixelFold();
+    const auto& multiDisplay = get_gfxstream_multi_display_operations();
+    const bool is_pixel_fold = multiDisplay.is_pixel_fold();
     if (needPost) {
         // AEMU with -no-window mode uses this code path.
         ComposeDevice* composeDevice = (ComposeDevice*)buffer;
@@ -2724,72 +2654,40 @@ const ProcessResources* FrameBuffer::getProcessResources(uint64_t puid) {
 }
 
 int FrameBuffer::createDisplay(uint32_t* displayId) {
-#ifdef CONFIG_AEMU
-    return emugl::get_emugl_multi_display_operations().createDisplay(displayId);
-#else
-    return 0;
-#endif
+    return get_gfxstream_multi_display_operations().create_display(displayId);
 }
 
 int FrameBuffer::createDisplay(uint32_t displayId) {
-#ifdef CONFIG_AEMU
-    return emugl::get_emugl_multi_display_operations().createDisplay(&displayId);
-#else
-    return 0;
-#endif
+    return get_gfxstream_multi_display_operations().create_display(&displayId);
 }
 
 int FrameBuffer::destroyDisplay(uint32_t displayId) {
-#ifdef CONFIG_AEMU
-    return emugl::get_emugl_multi_display_operations().destroyDisplay(displayId);
-#else
-    return 0;
-#endif
+    return get_gfxstream_multi_display_operations().destroy_display(displayId);
 }
 
 int FrameBuffer::setDisplayColorBuffer(uint32_t displayId, uint32_t colorBuffer) {
-#ifdef CONFIG_AEMU
-    return emugl::get_emugl_multi_display_operations().setDisplayColorBuffer(displayId,
+    return get_gfxstream_multi_display_operations().set_display_color_buffer(displayId,
                                                                              colorBuffer);
-#else
-    return 0;
-#endif
 }
 
 int FrameBuffer::getDisplayColorBuffer(uint32_t displayId, uint32_t* colorBuffer) {
-#ifdef CONFIG_AEMU
-    return emugl::get_emugl_multi_display_operations().getDisplayColorBuffer(displayId,
+    return get_gfxstream_multi_display_operations().get_display_color_buffer(displayId,
                                                                              colorBuffer);
-#else
-    return 0;
-#endif
 }
 
 int FrameBuffer::getColorBufferDisplay(uint32_t colorBuffer, uint32_t* displayId) {
-#ifdef CONFIG_AEMU
-    return emugl::get_emugl_multi_display_operations().getColorBufferDisplay(colorBuffer,
+    return get_gfxstream_multi_display_operations().get_color_buffer_display(colorBuffer,
                                                                              displayId);
-#else
-    return 0;
-#endif
 }
 
 int FrameBuffer::getDisplayPose(uint32_t displayId, int32_t* x, int32_t* y, uint32_t* w,
                                 uint32_t* h) {
-#ifdef CONFIG_AEMU
-    return emugl::get_emugl_multi_display_operations().getDisplayPose(displayId, x, y, w, h);
-#else
-    return 0;
-#endif
+    return get_gfxstream_multi_display_operations().get_display_pose(displayId, x, y, w, h);
 }
 
 int FrameBuffer::setDisplayPose(uint32_t displayId, int32_t x, int32_t y, uint32_t w, uint32_t h,
                                 uint32_t dpi) {
-#ifdef CONFIG_AEMU
-    return emugl::get_emugl_multi_display_operations().setDisplayPose(displayId, x, y, w, h, dpi);
-#else
-    return 0;
-#endif
+    return get_gfxstream_multi_display_operations().set_display_pose(displayId, x, y, w, h, dpi);
 }
 
 void FrameBuffer::sweepColorBuffersLocked() {
@@ -3032,7 +2930,7 @@ HandleType FrameBuffer::getEmulatedEglWindowSurfaceColorBufferHandle(HandleType 
 
 #ifdef CONFIG_AEMU
 void FrameBuffer::unregisterVulkanInstance(uint64_t id) const {
-    get_emugl_vm_operations().vulkanInstanceUnregister(id);
+    get_gfxstream_vm_operations().unregister_vulkan_instance(id);
 }
 
 void FrameBuffer::registerVulkanInstance(uint64_t id, const char* appName) const {
@@ -3049,7 +2947,7 @@ void FrameBuffer::registerVulkanInstance(uint64_t id, const char* appName) const
     } else if(appName) {
         process_name = std::string(appName);
     }
-    get_emugl_vm_operations().vulkanInstanceRegister(id, process_name.c_str());
+    get_gfxstream_vm_operations().register_vulkan_instance(id, process_name.c_str());
 }
 #endif
 

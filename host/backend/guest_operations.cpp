@@ -1,4 +1,4 @@
-// Copyright (C) 2016 The Android Open Source Project
+// Copyright (C) 2025 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,19 +11,22 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#pragma once
 
-// Interface between android-emu non-base libraries and emugl
+#include "gfxstream/host/guest_operations.h"
 
-#include "host-common/logging.h"
+namespace gfxstream {
+namespace {
 
-typedef void (*gfxstream_logger_internal_t)(char severity, const char* file, unsigned int line,
-              int64_t timestamp_us, const char* message);
+static int sGuestAndroidApiLevel = -1;
 
-#ifdef CONFIG_AEMU
-using emugl_logger_t = gfxstream_logger_t;
-using emugl_logger_struct = gfxstream_logger_t;
-#else
-using emugl_logger_t = gfxstream_logger_internal_t;
-using emugl_logger_struct = gfxstream_logger_internal_t;
-#endif
+}  // namespace
+
+void set_gfxstream_guest_android_api_level(int level) {
+    sGuestAndroidApiLevel = level;
+}
+
+int get_gfxstream_guest_android_api_level() {
+    return sGuestAndroidApiLevel;
+}
+
+}  // namespace gfxstream
