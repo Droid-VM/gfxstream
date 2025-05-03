@@ -1,6 +1,10 @@
 add_library(
     gfxstream_openglesdispatch.headers
     INTERFACE)
+target_link_libraries(
+    gfxstream_openglesdispatch.headers
+    INTERFACE
+    gfxstream_opengl_headers)
 target_include_directories(
     gfxstream_openglesdispatch.headers
     INTERFACE
@@ -22,7 +26,6 @@ if (NOT MSVC)
                            -fvisibility=default)
 endif()
 
-
 target_link_libraries(
     gfxstream_openglesdispatch
     PUBLIC
@@ -31,6 +34,5 @@ target_link_libraries(
     gles2_dec
     apigen-codec-common
     PRIVATE
-    aemu-base.headers
     EGL_translator_static)
 

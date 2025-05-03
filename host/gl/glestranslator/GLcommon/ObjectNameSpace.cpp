@@ -20,19 +20,11 @@
 
 #include "GLcommon/GLEScontext.h"
 #include "GLcommon/TranslatorIfaces.h"
-#include "aemu/base/containers/Lookup.h"
-#include "aemu/base/files/PathUtils.h"
+#include "gfxstream/containers/Lookup.h"
+#include "gfxstream/files/PathUtils.h"
 #include "aemu/base/files/StreamSerializing.h"
-#include "aemu/base/synchronization/Lock.h"
+#include "gfxstream/synchronization/Lock.h"
 #include "gfxstream/host/logging.h"
-#include "snapshot/TextureLoader.h"
-#include "snapshot/TextureSaver.h"
-
-using android::snapshot::ITextureSaver;
-using android::snapshot::ITextureLoader;
-using android::snapshot::ITextureSaverPtr;
-using android::snapshot::ITextureLoaderPtr;
-using android::snapshot::ITextureLoaderWPtr;
 
 NameSpace::NameSpace(NamedObjectType p_type, GlobalNameSpace *globalNameSpace,
         android::base::Stream* stream, const ObjectData::loadObject_t& loadObject) :
@@ -298,7 +290,7 @@ void GlobalNameSpace::preSaveAddEglImage(EglImage* eglImage) {
         GFXSTREAM_FATAL("Fatal: egl image with null texture object\n");
     }
     unsigned int globalName = eglImage->globalTexObj->getGlobalName();
-    android::base::AutoLock lock(m_lock);
+    gfxstream::base::AutoLock lock(m_lock);
 
     if (!globalName) {
         GFXSTREAM_DEBUG("%p: egl image %p has 0 texture object", this, eglImage);
@@ -315,7 +307,7 @@ void GlobalNameSpace::preSaveAddEglImage(EglImage* eglImage) {
 }
 
 void GlobalNameSpace::preSaveAddTex(TextureData* texture) {
-    android::base::AutoLock lock(m_lock);
+    gfxstream::base::AutoLock lock(m_lock);
     const auto& saveableTexIt = m_textureMap.find(texture->getGlobalName());
 
     if (!texture->getGlobalName()) {
@@ -334,7 +326,7 @@ void GlobalNameSpace::preSaveAddTex(TextureData* texture) {
 }
 
 void GlobalNameSpace::onSave(android::base::Stream* stream,
-                             const ITextureSaverPtr& textureSaver,
+                             const gfxstream::ITextureSaverPtr& textureSaver,
                              SaveableTexture::saver_t saver) {
 #if SNAPSHOT_PROFILE > 1
     int cleanTexs = 0;
@@ -361,7 +353,7 @@ void GlobalNameSpace::onSave(android::base::Stream* stream,
                 textureSaver->saveTexture(
                         tex.first,
                         [saver, &tex](android::base::Stream* stream,
-                                      ITextureSaver::Buffer* buffer) {
+                                      gfxstream::ITextureSaver::Buffer* buffer) {
                             if (!tex.second.get()) return;
                             saver(tex.second.get(), stream, buffer);
                         });
@@ -374,9 +366,9 @@ void GlobalNameSpace::onSave(android::base::Stream* stream,
 }
 
 void GlobalNameSpace::onLoad(android::base::Stream* stream,
-                             const ITextureLoaderWPtr& textureLoaderWPtr,
+                             const gfxstream::ITextureLoaderWPtr& textureLoaderWPtr,
                              SaveableTexture::creator_t creator) {
-    const ITextureLoaderPtr textureLoader = textureLoaderWPtr.lock();
+    const gfxstream::ITextureLoaderPtr textureLoader = textureLoaderWPtr.lock();
     assert(m_textureMap.size() == 0);
     if (!textureLoader->start()) {
         GFXSTREAM_FATAL("Texture file unsupported version or corrupted.\n");

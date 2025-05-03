@@ -6,7 +6,6 @@ target_link_libraries(
     INTERFACE
     renderdoc
     gfxstream_vulkan_headers
-    aemu-host-common.headers
     aemu-base.headers)
 
 add_library(gfxstream_utils OBJECT GfxApiLogger.cpp)
@@ -21,9 +20,9 @@ if (ENABLE_VKCEREAL_TESTS)
     target_link_libraries(
         gfxstream_utils_unittests
         PRIVATE
+        gfxstream_host_library
         gfxstream_host_logging
         gfxstream_utils
-        ${GFXSTREAM_HOST_COMMON_LIB}
         ${GFXSTREAM_BASE_LIB}
         renderdoc
         gtest_main

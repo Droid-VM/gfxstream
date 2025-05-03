@@ -15,12 +15,17 @@
  */
 
 #include "EglOsApi.h"
+
+#include <cstring>
+#include <memory>
+#include <vector>
+
 #include "GLcommon/GLLibrary.h"
 #include "ShaderCache.h"
-#include "aemu/base/SharedLibrary.h"
-#include "aemu/base/system/System.h"
+#include "gfxstream/SharedLibrary.h"
+#include "gfxstream/Strings.h"
 #include "gfxstream/host/logging.h"
-#include "host-common/opengl/misc.h"
+#include "gfxstream/system/System.h"
 
 #ifdef ANDROID
 #include <android/native_window.h>
@@ -38,9 +43,6 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
-#include <cstring>
-#include <memory>
-#include <vector>
 
 #define DEBUG 0
 #if DEBUG
@@ -138,6 +140,8 @@ static const char* kGLES2LibName = "libGLESv2.dylib";
       (EGLDEBUGPROCKHR callback, const EGLAttrib * attrib_list))               \
 
 namespace {
+
+using gfxstream::HasExtension;
 using namespace EglOS;
 
 class EglOsEglDispatcher {
@@ -149,12 +153,12 @@ public:
     EglOsEglDispatcher() {
         D("loading %s\n", kEGLLibName);
         char error[256];
-        mLib = android::base::SharedLibrary::open(kEGLLibName, error, sizeof(error));
+        mLib = gfxstream::base::SharedLibrary::open(kEGLLibName, error, sizeof(error));
         if (!mLib) {
 #ifdef __linux__
             GFXSTREAM_ERROR("%s: Could not open EGL library %s [%s]. Trying again with [%s]",
                             __FUNCTION__, kEGLLibName, error, kEGLLibNameAlt);
-            mLib = android::base::SharedLibrary::open(kEGLLibNameAlt, error, sizeof(error));
+            mLib = gfxstream::base::SharedLibrary::open(kEGLLibNameAlt, error, sizeof(error));
             if (!mLib) {
                 GFXSTREAM_ERROR("%s: Could not open EGL library %s [%s]", __FUNCTION__,
                                 kEGLLibNameAlt, error);
@@ -185,19 +189,19 @@ public:
     ~EglOsEglDispatcher() = default;
 
 private:
-    android::base::SharedLibrary* mLib = nullptr;
+    gfxstream::base::SharedLibrary* mLib = nullptr;
 };
 
 class EglOsGlLibrary : public GlLibrary {
 public:
     EglOsGlLibrary() {
         char error[256];
-        mLib = android::base::SharedLibrary::open(kGLES2LibName, error, sizeof(error));
+        mLib = gfxstream::base::SharedLibrary::open(kGLES2LibName, error, sizeof(error));
         if (!mLib) {
 #ifdef __linux__
             GFXSTREAM_ERROR("%s: Could not open GL library %s [%s]. Trying again with [%s]",
                             __FUNCTION__, kGLES2LibName, error, kGLES2LibNameAlt);
-            mLib = android::base::SharedLibrary::open(kGLES2LibNameAlt, error, sizeof(error));
+            mLib = gfxstream::base::SharedLibrary::open(kGLES2LibNameAlt, error, sizeof(error));
             if (!mLib) {
                 GFXSTREAM_ERROR("%s: Could not open GL library %s [%s]", __FUNCTION__,
                                 kGLES2LibNameAlt, error);
@@ -217,7 +221,7 @@ public:
     ~EglOsGlLibrary() = default;
 
 private:
-    android::base::SharedLibrary* mLib = nullptr;
+    gfxstream::base::SharedLibrary* mLib = nullptr;
 };
 
 class EglOsEglPixelFormat : public EglOS::PixelFormat {
@@ -337,7 +341,7 @@ private:
 };
 
 EglOsEglDisplay::EglOsEglDisplay(bool nullEgl) {
-    mVerbose = android::base::getEnvironmentVariable("ANDROID_EMUGL_VERBOSE") == "1";
+    mVerbose = gfxstream::base::getEnvironmentVariable("ANDROID_EMUGL_VERBOSE") == "1";
 
     if (nullEgl) {
 #ifdef EGL_ANGLE_platform_angle
@@ -357,7 +361,7 @@ EglOsEglDisplay::EglOsEglDisplay(bool nullEgl) {
 #else
         fprintf(stderr, "EGL Null display not compiled, falling back to default display\n");
 #endif
-    } else if (android::base::getEnvironmentVariable("ANDROID_EMUGL_EXPERIMENTAL_FAST_PATH") == "1") {
+    } else if (gfxstream::base::getEnvironmentVariable("ANDROID_EMUGL_EXPERIMENTAL_FAST_PATH") == "1") {
 #ifdef EGL_ANGLE_platform_angle
         const EGLAttrib attr[] = {
             EGL_PLATFORM_ANGLE_TYPE_ANGLE,
@@ -400,7 +404,7 @@ EglOsEglDisplay::EglOsEglDisplay(bool nullEgl) {
     mDispatcher.eglBindAPI(EGL_OPENGL_ES_API);
     CHECK_EGL_ERR
 
-    mHeadless = android::base::getEnvironmentVariable("ANDROID_EMU_HEADLESS") == "1";
+    mHeadless = gfxstream::base::getEnvironmentVariable("ANDROID_EMU_HEADLESS") == "1";
 
 #ifdef ANDROID
     mGlxDisplay = nullptr;
@@ -409,7 +413,7 @@ EglOsEglDisplay::EglOsEglDisplay(bool nullEgl) {
     else mGlxDisplay = getX11Api()->XOpenDisplay(0);
 #endif // __linux__
 
-    if (clientExts != nullptr && emugl::hasExtension(clientExts, "EGL_ANDROID_blob_cache")) {
+    if (clientExts != nullptr && HasExtension(clientExts, "EGL_ANDROID_blob_cache")) {
         mDispatcher.eglSetBlobCacheFuncsANDROID(mDisplay, SetBlob, GetBlob);
     }
 
@@ -626,13 +630,13 @@ EglOsEglDisplay::createContext(EGLint profileMask,
     // TODO (b/207426737): remove Imagination-specific workaround
     bool disable_robustness = vendor && (strcmp(vendor, "Imagination Technologies") == 0);
 
-    bool disableValidation = android::base::getEnvironmentVariable("ANDROID_EMUGL_EGL_VALIDATION") == "0";
-    if (exts != nullptr && emugl::hasExtension(exts, "EGL_KHR_create_context_no_error") && disableValidation) {
+    bool disableValidation = gfxstream::base::getEnvironmentVariable("ANDROID_EMUGL_EGL_VALIDATION") == "0";
+    if (exts != nullptr && HasExtension(exts, "EGL_KHR_create_context_no_error") && disableValidation) {
         attributes.push_back(EGL_CONTEXT_OPENGL_NO_ERROR_KHR);
         attributes.push_back(EGL_TRUE);
     }
 
-    if (exts != nullptr && emugl::hasExtension(exts, "EGL_EXT_create_context_robustness") && !disable_robustness) {
+    if (exts != nullptr && HasExtension(exts, "EGL_EXT_create_context_robustness") && !disable_robustness) {
         attributes.push_back(EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT);
         attributes.push_back(EGL_LOSE_CONTEXT_ON_RESET_EXT);
     }
@@ -685,7 +689,7 @@ Surface* EglOsEglDisplay::createWindowSurface(PixelFormat* pf,
     D("%s\n", __FUNCTION__);
     std::vector<EGLint> surface_attribs;
     auto exts = mDispatcher.eglQueryString(mDisplay, EGL_EXTENSIONS);
-    if (exts != nullptr && emugl::hasExtension(exts, "EGL_ANGLE_direct_composition")) {
+    if (exts != nullptr && HasExtension(exts, "EGL_ANGLE_direct_composition")) {
 #ifdef EGL_ANGLE_direct_composition
         surface_attribs.push_back(EGL_DIRECT_COMPOSITION_ANGLE);
         surface_attribs.push_back(EGL_TRUE);

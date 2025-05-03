@@ -4,11 +4,13 @@
 inc_host_backend = include_directories('include')
 
 files_lib_host_backend = files(
+  'address_space_operations.cpp',
   'display_operations.cpp',
   'display_surface.cpp',
   'display_surface_user.cpp',
   'dma_device.cpp',
   'guest_operations.cpp',
+  'renderer_operations.cpp',
   'sync_device.cpp',
   'vm_operations.cpp',
   'window_operations.cpp',

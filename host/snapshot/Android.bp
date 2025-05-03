@@ -6,12 +6,8 @@ package {
 cc_library_static {
     name: "libgfxstream_host_snapshot",
     defaults: ["gfxstream_defaults"],
-    srcs: [
-        "TextureLoader.cpp",
-        "TextureSaver.cpp",
-    ],
     static_libs: [
-        "gfxstream_base",
+        "libgfxstream_common_base",
     ],
     export_include_dirs: ["include"],
 }

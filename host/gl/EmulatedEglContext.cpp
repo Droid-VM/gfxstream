@@ -20,10 +20,8 @@
 #include "GLESVersionDetector.h"
 #include "OpenGLESDispatch/EGLDispatch.h"
 #include "OpenGLESDispatch/GLESv1Dispatch.h"
-#include "aemu/base/containers/SmallVector.h"
+#include "gfxstream/containers/SmallVector.h"
 #include "gfxstream/host/logging.h"
-#include "host-common/feature_control.h"
-#include "host-common/misc.h"
 
 namespace gfxstream {
 namespace gl {
@@ -56,7 +54,7 @@ std::unique_ptr<EmulatedEglContext> EmulatedEglContext::createImpl(
         minorVersion = 1;
     }
 
-    android::base::SmallFixedVector<EGLint, 7> contextAttribs = {
+    gfxstream::base::SmallFixedVector<EGLint, 7> contextAttribs = {
         EGL_CONTEXT_CLIENT_VERSION, majorVersion,
         EGL_CONTEXT_MINOR_VERSION_KHR, minorVersion,
     };

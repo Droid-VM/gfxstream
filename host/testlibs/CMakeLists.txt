@@ -21,14 +21,13 @@ add_library(
 target_link_libraries(
     OSWindow
     PRIVATE
-    aemu-base.headers
+    gfxstream_common_base
     gfxstream_egl_headers)
 target_include_directories(
     OSWindow
     PUBLIC
     .
     PRIVATE
-    ${GFXSTREAM_REPO_ROOT}/include
     ${GFXSTREAM_REPO_ROOT}/third-party/glm/include)
 
 if (LINUX)

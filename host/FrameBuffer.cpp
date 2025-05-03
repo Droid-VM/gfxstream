@@ -31,15 +31,15 @@
 #include "NativeSubWindow.h"
 #include "RenderThreadInfo.h"
 #include "SyncThread.h"
-#include "aemu/base/LayoutResolver.h"
-#include "aemu/base/Metrics.h"
-#include "aemu/base/SharedLibrary.h"
-#include "aemu/base/Tracing.h"
-#include "aemu/base/containers/Lookup.h"
+#include "gfxstream/LayoutResolver.h"
+#include "gfxstream/Metrics.h"
+#include "gfxstream/SharedLibrary.h"
+#include "gfxstream/Tracing.h"
+#include "gfxstream/containers/Lookup.h"
 #include "aemu/base/files/StreamSerializing.h"
-#include "aemu/base/memory/MemoryTracker.h"
-#include "aemu/base/synchronization/Lock.h"
-#include "aemu/base/system/System.h"
+#include "gfxstream/memory/MemoryTracker.h"
+#include "gfxstream/synchronization/Lock.h"
+#include "gfxstream/system/System.h"
 
 #if GFXSTREAM_ENABLE_HOST_GLES
 #include "GLESVersionDetector.h"
@@ -56,10 +56,9 @@
 #include "gfxstream/host/display_operations.h"
 #include "gfxstream/host/guest_operations.h"
 #include "gfxstream/host/logging.h"
+#include "gfxstream/host/renderer_operations.h"
 #include "gfxstream/host/vm_operations.h"
 #include "gfxstream/host/window_operations.h"
-#include "host-common/misc.h"
-#include "host-common/opengl/misc.h"
 #include "render-utils/MediaNative.h"
 #include "vulkan/DisplayVk.h"
 #include "vulkan/PostWorkerVk.h"
@@ -68,11 +67,10 @@
 
 namespace gfxstream {
 
-using android::base::AutoLock;
-using android::base::MetricEventVulkanOutOfMemory;
+using gfxstream::base::AutoLock;
+using gfxstream::base::MetricEventVulkanOutOfMemory;
 using android::base::Stream;
-using android::base::WorkerProcessingResult;
-using emugl::CreateHealthMonitor;
+using gfxstream::base::WorkerProcessingResult;
 using emugl::GfxApiLogger;
 using gfxstream::host::FeatureSet;
 
@@ -110,8 +108,8 @@ HandleType FrameBuffer::s_nextHandle = 0;
 // A condition variable needed to wait for framebuffer initialization.
 namespace {
 struct InitializedGlobals {
-    android::base::Lock lock;
-    android::base::ConditionVariable condVar;
+    gfxstream::base::Lock lock;
+    gfxstream::base::ConditionVariable condVar;
 };
 
 bool postOnlyOnMainThread() {
@@ -138,7 +136,7 @@ void FrameBuffer::waitUntilInitialized() {
     }
 
 #if SNAPSHOT_PROFILE > 1
-    const auto startTime = android::base::getHighResTimeUs();
+    const auto startTime = gfxstream::base::getHighResTimeUs();
 #endif
     {
         AutoLock l(sGlobals()->lock);
@@ -147,7 +145,7 @@ void FrameBuffer::waitUntilInitialized() {
     }
 #if SNAPSHOT_PROFILE > 1
     printf("Waited for FrameBuffer initialization for %.03f ms\n",
-           (android::base::getHighResTimeUs() - startTime) / 1000.0);
+           (gfxstream::base::getHighResTimeUs() - startTime) / 1000.0);
 #endif
 }
 
@@ -214,7 +212,7 @@ bool FrameBuffer::initialize(int width, int height, const gfxstream::host::Featu
 
     MaybeIncreaseFileDescriptorSoftLimit();
 
-    android::base::initializeTracing();
+    gfxstream::base::initializeTracing();
     gfxstream::host::InitializeTracing();
 
     //
@@ -230,7 +228,7 @@ bool FrameBuffer::initialize(int width, int height, const gfxstream::host::Featu
     GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DEFAULT_CATEGORY, "FrameBuffer::Init()");
 
     std::unique_ptr<emugl::RenderDocWithMultipleVkInstances> renderDocMultipleVkInstances = nullptr;
-    if (!android::base::getEnvironmentVariable("ANDROID_EMU_RENDERDOC").empty()) {
+    if (!gfxstream::base::getEnvironmentVariable("ANDROID_EMU_RENDERDOC").empty()) {
         SharedLibrary* renderdocLib = nullptr;
 #ifdef _WIN32
         renderdocLib = SharedLibrary::open(R"(C:\Program Files\RenderDoc\renderdoc.dll)");
@@ -262,8 +260,8 @@ bool FrameBuffer::initialize(int width, int height, const gfxstream::host::Featu
 
         gfxstream::host::BackendCallbacks callbacks{
             .registerProcessCleanupCallback =
-                [fb = fb.get()](void* key, std::function<void()> callback) {
-                    fb->registerProcessCleanupCallback(key, callback);
+                [fb = fb.get()](void* key, uint64_t contextId, std::function<void()> callback) {
+                    fb->registerProcessCleanupCallback(key, contextId, callback);
                 },
             .unregisterProcessCleanupCallback =
                 [fb = fb.get()](void* key) { fb->unregisterProcessCleanupCallback(key); },
@@ -339,10 +337,10 @@ bool FrameBuffer::initialize(int width, int height, const gfxstream::host::Featu
     vk::VkEmulation::Features vkEmulationFeatures = {
         .glInteropSupported = false,  // Set later.
         .deferredCommands =
-            android::base::getEnvironmentVariable("ANDROID_EMU_VK_DISABLE_DEFERRED_COMMANDS")
+            gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_DISABLE_DEFERRED_COMMANDS")
                 .empty(),
         .createResourceWithRequirements =
-            android::base::getEnvironmentVariable(
+            gfxstream::base::getEnvironmentVariable(
                 "ANDROID_EMU_VK_DISABLE_USE_CREATE_RESOURCES_WITH_REQUIREMENTS")
                 .empty(),
         .useVulkanComposition = fb->m_useVulkanComposition,
@@ -411,8 +409,8 @@ bool FrameBuffer::initialize(int width, int height, const gfxstream::host::Featu
 #endif
     }
 
-    if (android::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD") == "lavapipe"
-            || android::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD") == "swiftshader") {
+    if (gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD") == "lavapipe"
+            || gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD") == "swiftshader") {
         vulkanInteropSupported = false;
         GFXSTREAM_DEBUG("vk icd software rendering, disable interop");
     }
@@ -532,7 +530,7 @@ FrameBuffer::FrameBuffer(int p_width, int p_height, const gfxstream::host::Featu
     mDisplayConfigs[0] = {p_width, p_height, 160, 160};
     uint32_t displayId = 0;
     if (createDisplay(&displayId) < 0) {
-        ERR( "Failed to create default display");
+        GFXSTREAM_ERROR( "Failed to create default display");
     }
 
     setDisplayPose(displayId, 0, 0, getWidth(), getHeight(), 0);
@@ -1295,7 +1293,7 @@ bool FrameBuffer::closeColorBufferLocked(HandleType p_colorbuffer, bool forced) 
                 m_colorbuffers.erase(c);
                 deleted = true;
             } else {
-                c->second.closedTs = android::base::getUnixTimeUs();
+                c->second.closedTs = gfxstream::base::getUnixTimeUs();
                 m_colorBufferDelayedCloseList.push_back({c->second.closedTs, p_colorbuffer});
             }
         }
@@ -1315,7 +1313,7 @@ void FrameBuffer::decColorBufferRefCountNoDestroy(HandleType p_colorbuffer) {
     }
 
     if (--c->second.refcount == 0) {
-        c->second.closedTs = android::base::getUnixTimeUs();
+        c->second.closedTs = gfxstream::base::getUnixTimeUs();
         m_colorBufferDelayedCloseList.push_back({c->second.closedTs, p_colorbuffer});
     }
 }
@@ -1327,7 +1325,7 @@ void FrameBuffer::performDelayedColorBufferCloseLocked(bool forced) {
     // are quick.
     static constexpr uint64_t kColorBufferClosingDelayUs = 1000000LL;
 
-    const auto now = android::base::getUnixTimeUs();
+    const auto now = gfxstream::base::getUnixTimeUs();
     auto it = m_colorBufferDelayedCloseList.begin();
     while (it != m_colorBufferDelayedCloseList.end() &&
            (forced ||
@@ -1405,7 +1403,7 @@ void FrameBuffer::cleanupProcGLObjects(uint64_t puid) {
                 i->m_shouldExit.compare_exchange_strong(shouldExit, true);
             }
         });
-        android::base::sleepUs(10000);
+        gfxstream::base::sleepUs(10000);
     } while (renderThreadWithThisPuidExists);
 
 
@@ -1763,7 +1761,7 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer, Post::CompletionCall
     // output FPS and performance usage statistics
     //
     if (m_fpsStats) {
-        long long currTime = android::base::getHighResTimeUs() / 1000;
+        long long currTime = gfxstream::base::getHighResTimeUs() / 1000;
         m_statsNumFrames++;
         if (currTime - m_statsStartTime >= 1000) {
             if (m_fpsStats) {
@@ -1945,7 +1943,7 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsi
                                uint8_t* pixels, size_t* cPixels, int displayId, int desiredWidth,
                                int desiredHeight, int desiredRotation, Rect rect) {
 #ifdef CONFIG_AEMU
-   if (emugl::shouldSkipDraw()) {
+   if (get_gfxstream_should_skip_draw()) {
         *width = 0;
         *height = 0;
         *cPixels = 0;
@@ -2020,7 +2018,7 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsi
         return -2;
     }
     *cPixels = needed;
-    if (desiredRotation == SKIN_ROTATION_90 || desiredRotation == SKIN_ROTATION_270) {
+    if (desiredRotation == GFXSTREAM_ROTATION_90 || desiredRotation == GFXSTREAM_ROTATION_270) {
         std::swap(*width, *height);
         std::swap(screenWidth, screenHeight);
         std::swap(rect.size.w, rect.size.h);
@@ -2030,19 +2028,19 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsi
     if (useSnipping) {
         int x = 0, y = 0;
         switch (desiredRotation) {
-            case SKIN_ROTATION_0:
+            case GFXSTREAM_ROTATION_0:
                 x = rect.pos.x;
                 y = rect.pos.y;
                 break;
-            case SKIN_ROTATION_90:
+            case GFXSTREAM_ROTATION_90:
                 x = rect.pos.y;
                 y = rect.pos.x;
                 break;
-            case SKIN_ROTATION_180:
+            case GFXSTREAM_ROTATION_180:
                 x = screenWidth - rect.pos.x - rect.size.w;
                 y = rect.pos.y;
                 break;
-            case SKIN_ROTATION_270:
+            case GFXSTREAM_ROTATION_270:
                 x = rect.pos.y;
                 y = screenHeight - rect.pos.x - rect.size.h;
                 break;
@@ -2178,7 +2176,7 @@ AsyncResult FrameBuffer::composeWithCallback(uint32_t bufferSize, void* buffer,
     }
 }
 
-void FrameBuffer::onSave(Stream* stream, const android::snapshot::ITextureSaverPtr& textureSaver) {
+void FrameBuffer::onSave(Stream* stream, const ITextureSaverPtr& textureSaver) {
     // Things we do not need to snapshot:
     //     m_eglSurface
     //     m_eglContext
@@ -2247,7 +2245,7 @@ void FrameBuffer::onSave(Stream* stream, const android::snapshot::ITextureSaverP
 
     // We don't need to save |m_colorBufferCloseTsMap| here - there's enough
     // information to reconstruct it when loading.
-    uint64_t now = android::base::getUnixTimeUs();
+    uint64_t now = gfxstream::base::getUnixTimeUs();
 
     {
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
@@ -2312,7 +2310,7 @@ void FrameBuffer::onSave(Stream* stream, const android::snapshot::ITextureSaverP
 }
 
 bool FrameBuffer::onLoad(Stream* stream,
-                         const android::snapshot::ITextureLoaderPtr& textureLoader) {
+                         const ITextureLoaderPtr& textureLoader) {
     AutoLock lock(m_lock);
     // cleanups
     {
@@ -2426,7 +2424,7 @@ bool FrameBuffer::onLoad(Stream* stream,
             assert(m_colorbuffers.empty());
         }
 #ifdef SNAPSHOT_PROFILE
-        uint64_t texTime = android::base::getUnixTimeUs();
+        uint64_t texTime = gfxstream::base::getUnixTimeUs();
 #endif
 #if GFXSTREAM_ENABLE_HOST_GLES
         if (m_emulationGl) {
@@ -2437,7 +2435,7 @@ bool FrameBuffer::onLoad(Stream* stream,
 #endif
 #ifdef SNAPSHOT_PROFILE
         printf("Texture load time: %lld ms\n",
-               (long long)(android::base::getUnixTimeUs() - texTime) / 1000);
+               (long long)(gfxstream::base::getUnixTimeUs() - texTime) / 1000);
 #endif
     }
     // See comment about subwindow position in onSave().
@@ -2475,10 +2473,10 @@ bool FrameBuffer::onLoad(Stream* stream,
             auto contextHandle = context ? context->getHndl() : 0;
             return {contextHandle, std::move(context)};
         });
-    assert(!android::base::find(m_contexts, 0));
+    assert(!gfxstream::base::find(m_contexts, 0));
 #endif
 
-    auto now = android::base::getUnixTimeUs();
+    auto now = gfxstream::base::getUnixTimeUs();
     {
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
         m_guestManagedColorBufferLifetime = stream->getByte();
@@ -2615,12 +2613,11 @@ BufferPtr FrameBuffer::findBuffer(HandleType p_buffer) {
     }
 }
 
-void FrameBuffer::registerProcessCleanupCallback(void* key, std::function<void()> cb) {
+void FrameBuffer::registerProcessCleanupCallback(void* key, uint64_t contextId,
+                                                 std::function<void()> cb) {
     AutoLock mutex(m_lock);
-    RenderThreadInfo* tInfo = RenderThreadInfo::get();
-    if (!tInfo) return;
 
-    auto& callbackMap = m_procOwnedCleanupCallbacks[tInfo->m_puid];
+    auto& callbackMap = m_procOwnedCleanupCallbacks[contextId];
     if (!callbackMap.insert({key, std::move(cb)}).second) {
         GFXSTREAM_ERROR("%s: tried to override existing key %p ", __func__, key);
     }
@@ -2970,7 +2967,7 @@ void FrameBuffer::createSharedTrivialContext(EGLContext* contextOut, EGLSurface*
     if (!config) return;
 
     int maj, min;
-    emugl::getGlesVersion(&maj, &min);
+    get_gfxstream_gles_version(&maj, &min);
 
     const EGLint contextAttribs[] = {EGL_CONTEXT_MAJOR_VERSION_KHR, maj,
                                      EGL_CONTEXT_MINOR_VERSION_KHR, min, EGL_NONE};
@@ -3048,7 +3045,7 @@ HandleType FrameBuffer::createEmulatedEglContext(int config, HandleType shareCon
     }
 
     AutoLock mutex(m_lock);
-    android::base::AutoWriteLock contextLock(m_contextStructureLock);
+    gfxstream::base::AutoWriteLock contextLock(m_contextStructureLock);
     // Hold the ColorBuffer map lock so that the new handle won't collide with a ColorBuffer handle.
     AutoLock colorBufferMapLock(m_colorBufferMapLock);
 
@@ -3093,7 +3090,7 @@ void FrameBuffer::destroyEmulatedEglContext(HandleType contextHandle) {
     AutoLock mutex(m_lock);
     sweepColorBuffersLocked();
 
-    android::base::AutoWriteLock contextLock(m_contextStructureLock);
+    gfxstream::base::AutoWriteLock contextLock(m_contextStructureLock);
     m_contexts.erase(contextHandle);
     RenderThreadInfo* tinfo = RenderThreadInfo::get();
     uint64_t puid = tinfo->m_puid;
@@ -3256,7 +3253,7 @@ void FrameBuffer::drainGlRenderThreadContexts() {
     }
 
     AutoLock mutex(m_lock);
-    android::base::AutoWriteLock contextLock(m_contextStructureLock);
+    gfxstream::base::AutoWriteLock contextLock(m_contextStructureLock);
     for (const HandleType contextHandle : tinfo->m_contextSet) {
         m_contexts.erase(contextHandle);
     }
@@ -3369,11 +3366,11 @@ EGLContext FrameBuffer::getGlobalEGLContext() const {
 }
 
 EmulatedEglContextPtr FrameBuffer::getContext_locked(HandleType p_context) {
-    return android::base::findOrDefault(m_contexts, p_context);
+    return gfxstream::base::findOrDefault(m_contexts, p_context);
 }
 
 EmulatedEglWindowSurfacePtr FrameBuffer::getWindowSurface_locked(HandleType p_windowsurface) {
-    return android::base::findOrDefault(m_windows, p_windowsurface).first;
+    return gfxstream::base::findOrDefault(m_windows, p_windowsurface).first;
 }
 
 TextureDraw* FrameBuffer::getTextureDraw() const {
@@ -3410,7 +3407,7 @@ HandleType FrameBuffer::createEmulatedEglImage(HandleType contextHandle, EGLenum
 
     EmulatedEglContext* context = nullptr;
     if (contextHandle) {
-        android::base::AutoWriteLock contextLock(m_contextStructureLock);
+        gfxstream::base::AutoWriteLock contextLock(m_contextStructureLock);
 
         auto it = m_contexts.find(contextHandle);
         if (it == m_contexts.end()) {

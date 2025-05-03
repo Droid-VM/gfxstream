@@ -11,14 +11,15 @@ target_link_libraries(
     GLSnapshot
     ${GFXSTREAM_BASE_LIB}
     PRIVATE
+    gfxstream_common_base
     gfxstream_egl_headers
     gfxstream_host_backend
+    gfxstream_host_library
     gfxstream_host_logging
     )
 target_include_directories(
     gles2_dec
     PRIVATE
     ${GFXSTREAM_REPO_ROOT}
-    ${GFXSTREAM_REPO_ROOT}/include
     ${GFXSTREAM_REPO_ROOT}/host
     ${GFXSTREAM_REPO_ROOT}/host/apigen-codec-common)

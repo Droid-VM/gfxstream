@@ -16,23 +16,24 @@
 
 #pragma once
 
-#include "aemu/base/containers/HybridComponentManager.h"
-#include "aemu/base/synchronization/Lock.h"
-#include "snapshot/common.h"
+#include <unordered_map>
+#include <unordered_set>
+
+#include <GLES/gl.h>
+
 #include "GLcommon/GLBackgroundLoader.h"
 #include "GLcommon/NamedObject.h"
 #include "GLcommon/ObjectData.h"
 #include "GLcommon/SaveableTexture.h"
 #include "GLcommon/TranslatorIfaces.h"
+#include "gfxstream/containers/HybridComponentManager.h"
+#include "gfxstream/synchronization/Lock.h"
+#include "render-utils/snapshot_operations.h"
 
-#include <GLES/gl.h>
-#include <unordered_map>
-#include <unordered_set>
-
-typedef android::base::HybridComponentManager<10000, ObjectLocalName, NamedObjectPtr> NamesMap;
 typedef std::unordered_map<ObjectLocalName, ObjectDataPtr> ObjectDataMap;
-typedef android::base::HybridComponentManager<10000, unsigned int, ObjectLocalName> GlobalToLocalNamesMap;
-typedef android::base::HybridComponentManager<10000, ObjectLocalName, bool> BoundAtLeastOnceMap;
+typedef gfxstream::base::HybridComponentManager<10000, ObjectLocalName, NamedObjectPtr> NamesMap;
+typedef gfxstream::base::HybridComponentManager<10000, unsigned int, ObjectLocalName> GlobalToLocalNamesMap;
+typedef gfxstream::base::HybridComponentManager<10000, ObjectLocalName, bool> BoundAtLeastOnceMap;
 
 class GlobalNameSpace;
 
@@ -143,10 +144,10 @@ public:
     void preSaveAddEglImage(EglImage* eglImage);
     void preSaveAddTex(TextureData* texture);
     void onSave(android::base::Stream* stream,
-                const android::snapshot::ITextureSaverPtr& textureSaver,
+                const gfxstream::ITextureSaverPtr& textureSaver,
                 SaveableTexture::saver_t saver);
     void onLoad(android::base::Stream* stream,
-                const android::snapshot::ITextureLoaderWPtr& textureLoaderWPtr,
+                const gfxstream::ITextureLoaderWPtr& textureLoaderWPtr,
                 SaveableTexture::creator_t creator);
     void postLoad(android::base::Stream* stream);
     const SaveableTexturePtr& getSaveableTextureFromLoad(unsigned int oldGlobalName);
@@ -162,7 +163,7 @@ public:
 
 private:
 
-    android::base::Lock m_lock;
+    gfxstream::base::Lock m_lock;
     // m_textureMap is only used when saving / loading a snapshot
     // It is empty in all other situations
     SaveableTextureMap m_textureMap;

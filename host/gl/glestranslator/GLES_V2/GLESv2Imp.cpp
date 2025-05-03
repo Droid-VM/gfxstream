@@ -44,12 +44,11 @@
 #include "SamplerData.h"
 #include "ShaderParser.h"
 #include "TransformFeedbackData.h"
-#include "aemu/base/system/System.h"
+#include "gfxstream/system/System.h"
 #include "gfxstream/host/logging.h"
-#include "host-common/crash_reporter.h"
 
 #ifdef _MSC_VER
-#include "aemu/base/msvc.h"
+#include "gfxstream/msvc.h"
 #else
 #include <sys/time.h>
 #endif
@@ -403,12 +402,7 @@ static void blitFromCurrentReadBufferANDROID(EGLImage image) {
     GET_CTX()
     unsigned int imagehndl = SafeUIntFromPointer(image);
     ImagePtr img = s_eglIface->getEGLImage(imagehndl);
-    if (!img ||
-        !ctx->shareGroup().get()) {
-        // emugl_crash_reporter(
-        //         "FATAL: blitFromCurrentReadBufferANDROID: "
-        //         "image (%p) or share group (%p) not found",
-        //         img.get(), ctx->shareGroup().get());
+    if (!img || !ctx->shareGroup().get()) {
         return;
     }
 
@@ -1150,7 +1144,7 @@ GL_APICALL GLuint GL_APIENTRY glCreateShader(GLenum type){
     if (!shaderParserInitialized) {
         shaderParserInitialized = true;
         sDebugPrintShaders =
-            android::base::getEnvironmentVariable(
+            gfxstream::base::getEnvironmentVariable(
                 "ANDROID_EMUGL_SHADER_PRINT") == "1";
 
         auto& gl = ctx->dispatcher();
@@ -4607,7 +4601,7 @@ glTestHostDriverPerformance(GLuint count,
 
     uint32_t drawCount = 0;
 
-    auto cpuTimeStart = android::base::cpuTime();
+    auto cpuTimeStart = gfxstream::base::cpuTime();
 
 fprintf(stderr, "%s: transform loc %d\n", __func__, transformLoc);
 fprintf(stderr, "%s: begin count %d\n", __func__, count);
@@ -4620,7 +4614,7 @@ fprintf(stderr, "%s: begin count %d\n", __func__, count);
 
     gl->glFinish();
 
-    auto cpuTime = android::base::cpuTime() - cpuTimeStart;
+    auto cpuTime = gfxstream::base::cpuTime() - cpuTimeStart;
 
     *duration_us = cpuTime.wall_time_us;
     *duration_cpu_us = cpuTime.usageUs();

@@ -28,11 +28,11 @@
 #include "TextureDraw.h"
 #include "TextureResize.h"
 #include "gl/YUVConverter.h"
-#include "host-common/opengl/misc.h"
+#include "gfxstream/host/renderer_operations.h"
 
 #define DEBUG_CB_FBO 0
 
-using android::base::ManagedDescriptor;
+using gfxstream::base::ManagedDescriptor;
 
 namespace gfxstream {
 namespace gl {
@@ -337,7 +337,7 @@ std::unique_ptr<ColorBufferGl> ColorBufferGl::create(EGLDisplay p_display, int p
     }
 
     // desktop GL only: use GL_UNSIGNED_INT_8_8_8_8_REV for faster readback.
-    if (emugl::getRenderer() == SELECTED_RENDERER_HOST) {
+    if (get_gfxstream_renderer() == SELECTED_RENDERER_HOST) {
 #define GL_UNSIGNED_INT_8_8_8_8           0x8035
 #define GL_UNSIGNED_INT_8_8_8_8_REV       0x8367
         cb->m_asyncReadbackType = GL_UNSIGNED_INT_8_8_8_8_REV;
@@ -519,8 +519,8 @@ bool ColorBufferGl::readPixelsScaled(int width, int height, GLenum p_format, GLe
         // other formats are optional.
         bool needConvert4To3Channel =
                 p_format == GL_RGB && p_type == GL_UNSIGNED_BYTE &&
-                (emugl::getRenderer() == SELECTED_RENDERER_SWIFTSHADER_INDIRECT ||
-                    emugl::getRenderer() == SELECTED_RENDERER_ANGLE_INDIRECT);
+                (get_gfxstream_renderer() == SELECTED_RENDERER_SWIFTSHADER_INDIRECT ||
+                    get_gfxstream_renderer() == SELECTED_RENDERER_ANGLE_INDIRECT);
         std::vector<uint8_t> tmpPixels;
         void* readPixelsDst = pixels;
         if (needConvert4To3Channel) {
@@ -564,6 +564,10 @@ bool ColorBufferGl::readPixelsYUVCached(int x, int y, int width, int height, voi
     }
 
     waitSync();
+
+    if (!m_yuv_converter) {
+        return false;
+    }
 
 #if DEBUG_CB_FBO
     fprintf(stderr, "%s %d request width %d height %d\n", __func__, __LINE__,

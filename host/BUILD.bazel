@@ -18,6 +18,10 @@ cc_library(
     copts = ["-fno-exceptions"],
     includes = ["."],
     visibility = [":__subpackages__"],
+    deps = [
+        "//host/health:gfxstream_host_health",
+        "//host/snapshot:gfxstream_host_snapshot",
+    ],
 )
 
 cc_library(
@@ -41,7 +45,6 @@ cc_test(
     deps = [
         ":gfxstream-compressedTextures",
         "@aemu//base:aemu-base",
-        "@aemu//host-common:logging",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -71,7 +74,6 @@ objc_library(
     ],
     deps = [
         ":gfxstream_backend_headers",
-        "//:gfxstream-gl-host-common-headers",
         "//common/opengl:gfxstream_opengl_headers",
     ],
 )
@@ -136,12 +138,11 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":gfxstream_backend_headers",
-        "//:gfxstream-gl-host-common-headers",
+        "//common/base:gfxstream_common_base",
         "//host/apigen-codec-common",
         "//host/backend:gfxstream_host_backend",
         "//host/features:gfxstream_features",
         "//host/gl:EGL_translator_static",
-        "//host/gl:gfxstream-gl-host-common",
         "//host/gl:gfxstream-gl-server",
         "//host/gl:gl-common-headers",
         "//host/gl:gl_headers",
@@ -149,15 +150,14 @@ cc_library(
         "//host/gl:gles2_dec",
         "//host/gl/OpenGLESDispatch:gfxstream_host_openglesdispatch",
         "//host/gl/glestranslator/GLES_CM:GLES_CM_translator_static",
+        "//host/health:gfxstream_host_health",
         "//host/logging:gfxstream_host_logging",
         "//host/renderControl_dec",
-        "//host/snapshot:aemu-snapshot",
+        "//host/snapshot:gfxstream_host_snapshot",
         "//host/tracing:gfxstream_host_tracing",
         "//host/vulkan:gfxstream-vulkan-server",
         "@aemu//base:aemu-base",
         "@aemu//base:aemu-base-metrics",
-        "@aemu//host-common:aemu-host-common",
-        "@aemu//host-common:logging",
     ] + select({
         "@platforms//os:macos": [
             ":gfxstream_backend_static-darwin",
@@ -186,12 +186,9 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":gfxstream_backend_static",
-        "//:gfxstream-gl-host-common-headers",
         "//common/utils:gfxstream_common_utils",
-        "//host/gl:gfxstream-gl-host-common",
         "@aemu//base:aemu-base",
         "@aemu//base:aemu-base-metrics",
-        "@aemu//host-common:aemu-host-common-product-feature-override",
     ],
 )
 
@@ -206,12 +203,9 @@ cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":gfxstream_backend_static",
-        "//:gfxstream-gl-host-common-headers",
         "//common/utils:gfxstream_common_utils",
-        "//host/gl:gfxstream-gl-host-common",
         "@aemu//base:aemu-base",
         "@aemu//base:aemu-base-metrics",
-        "@aemu//host-common:aemu-host-common-product-feature-override",
     ],
 )
 

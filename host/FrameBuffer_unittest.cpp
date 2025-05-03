@@ -16,14 +16,13 @@
 
 #include <gtest/gtest.h>
 
-#include "aemu/base/files/PathUtils.h"
+#include "aemu/base/files/MemStream.h"
 #include "aemu/base/files/StdioStream.h"
-#include "aemu/base/system/System.h"
-#include "aemu/base/testing/TestSystem.h"
+#include "gfxstream/files/PathUtils.h"
 #include "gfxstream/host/display_operations.h"
 #include "gfxstream/host/window_operations.h"
-#include "snapshot/TextureLoader.h"
-#include "snapshot/TextureSaver.h"
+#include "gfxstream/system/System.h"
+#include "gfxstream/testing/TestSystem.h"
 #include "tests/GLSnapshotTesting.h"
 #include "tests/GLTestUtils.h"
 #include "tests/Standalone.h"
@@ -32,7 +31,7 @@
 #endif
 
 #ifdef _MSC_VER
-#include "aemu/base/msvc.h"
+#include "gfxstream/msvc.h"
 #else
 #include <sys/time.h>
 #endif
@@ -41,8 +40,6 @@ namespace gfxstream {
 namespace {
 
 using android::base::StdioStream;
-using android::snapshot::TextureLoader;
-using android::snapshot::TextureSaver;
 using gl::EGLDispatch;
 using gl::EmulatedEglConfigList;
 using gl::GLESApi_3_0;
@@ -99,9 +96,9 @@ class FrameBufferTest : public ::testing::Test {
         // Snapshots
         mTestSystem.getTempRoot()->makeSubDir("Snapshots");
         mSnapshotPath = mTestSystem.getTempRoot()->makeSubPath("Snapshots");
-        mTimeStamp = std::to_string(android::base::getUnixTimeUs());
-        mSnapshotFile = android::base::pj({mSnapshotPath, std::string("snapshot_") + mTimeStamp + ".snap"});
-        mTextureFile = android::base::pj({mSnapshotPath,  std::string("textures_") + mTimeStamp + ".stex"});
+        mTimeStamp = std::to_string(gfxstream::base::getUnixTimeUs());
+        mSnapshotFile = gfxstream::base::pj({mSnapshotPath, std::string("snapshot_") + mTimeStamp + ".snap"});
+        mTextureFile = gfxstream::base::pj({mSnapshotPath,  std::string("textures_") + mTimeStamp + ".stex"});
     }
 
     virtual void TearDown() override {
@@ -116,12 +113,10 @@ class FrameBufferTest : public ::testing::Test {
     void saveSnapshot() {
         std::unique_ptr<StdioStream> m_stream(new StdioStream(
                     android_fopen(mSnapshotFile.c_str(), "wb"), StdioStream::kOwner));
-        std::shared_ptr<TextureSaver> m_texture_saver(new TextureSaver(StdioStream(
-                        android_fopen(mTextureFile.c_str(), "wb"), StdioStream::kOwner)));
-        mFb->onSave(m_stream.get(), m_texture_saver);
+        mSnapshotTextureSaverLoader = std::make_shared<InMemoryTextureSaverLoader>();
+        mFb->onSave(m_stream.get(), mSnapshotTextureSaverLoader);
 
         m_stream->close();
-        m_texture_saver->done();
     }
 
     void loadSnapshot() {
@@ -130,12 +125,9 @@ class FrameBufferTest : public ::testing::Test {
 
         std::unique_ptr<StdioStream> m_stream(new StdioStream(
                     android_fopen(mSnapshotFile.c_str(), "rb"), StdioStream::kOwner));
-        std::shared_ptr<TextureLoader> m_texture_loader(
-                new TextureLoader(StdioStream(android_fopen(mTextureFile.c_str(), "rb"),
-                        StdioStream::kOwner)));
-        mFb->onLoad(m_stream.get(), m_texture_loader);
+
+        mFb->onLoad(m_stream.get(), mSnapshotTextureSaverLoader);
         m_stream->close();
-        m_texture_loader->join();
     }
 
     bool mUseSubWindow = false;
@@ -143,12 +135,15 @@ class FrameBufferTest : public ::testing::Test {
     FrameBuffer* mFb = nullptr;
     RenderThreadInfo* mRenderThreadInfo = nullptr;
 
+
+    std::shared_ptr<InMemoryTextureSaverLoader> mSnapshotTextureSaverLoader;
+
     int mWidth = 256;
     int mHeight = 256;
     int mXOffset= 400;
     int mYOffset= 400;
 
-    android::base::TestSystem mTestSystem;
+    gfxstream::base::TestSystem mTestSystem;
     std::string mSnapshotPath;
     std::string mTimeStamp;
     std::string mSnapshotFile;
@@ -634,7 +629,7 @@ TEST_F(FrameBufferTest, DrawCallRate) {
 
     uint32_t drawCount = 0;
 
-    auto cpuTimeStart = android::base::cpuTime();
+    auto cpuTimeStart = gfxstream::base::cpuTime();
 
 fprintf(stderr, "%s: transform loc %d\n", __func__, transformLoc);
 
@@ -647,7 +642,7 @@ fprintf(stderr, "%s: transform loc %d\n", __func__, transformLoc);
 
     gl->glFinish();
 
-    auto cpuTime = android::base::cpuTime() - cpuTimeStart;
+    auto cpuTime = gfxstream::base::cpuTime() - cpuTimeStart;
 
     uint64_t duration_us = cpuTime.wall_time_us;
     // uint64_t duration_cpu_us = cpuTime.usageUs();

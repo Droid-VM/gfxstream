@@ -22,10 +22,9 @@
 #include "ColorBuffer.h"
 #include "FrameBuffer.h"
 #include "RenderThreadInfo.h"
-#include "aemu/base/Tracing.h"
+#include "gfxstream/Tracing.h"
 #include "gfxstream/host/logging.h"
 #include "gfxstream/host/window_operations.h"
-#include "host-common/misc.h"
 #include "vulkan/VkCommonOperations.h"
 
 namespace gfxstream {

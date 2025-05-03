@@ -19,21 +19,15 @@
 #include "aemu/base/files/Stream.h"
 #include "gfxstream/host/Features.h"
 #include "render-utils/Renderer.h"
+#include "render-utils/address_space_operations.h"
 #include "render-utils/display_operations.h"
 #include "render-utils/dma_device.h"
 #include "render-utils/gralloc_enums.h"
 #include "render-utils/logging_operations.h"
-#include "render-utils/render_api_types.h"
 #include "render-utils/renderer_enums.h"
 #include "render-utils/sync_device.h"
 #include "render-utils/vm_operations.h"
 #include "render-utils/window_operations.h"
-
-extern "C" {
-
-struct address_space_device_control_ops;
-
-} // extern "C"
 
 namespace gfxstream {
 
@@ -57,7 +51,7 @@ public:
 
     virtual void setGuestAndroidApiLevel(int api) = 0;
 
-    // Get the GLES major/minor version determined by libOpenglRender.
+    // Get the GLES major/minor version determined.
     virtual void getGlesVersion(int* maj, int* min) = 0;
 
     virtual void setLogger(gfxstream_log_callback_t callback) = 0;

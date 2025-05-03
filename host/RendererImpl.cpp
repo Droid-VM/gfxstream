@@ -23,10 +23,10 @@
 #include "GraphicsDriverLock.h"
 #include "RenderChannelImpl.h"
 #include "RenderThread.h"
-#include "aemu/base/system/System.h"
-#include "aemu/base/threads/WorkerThread.h"
+#include "gfxstream/system/System.h"
+#include "gfxstream/threads/WorkerThread.h"
 #include "gfxstream/host/logging.h"
-#include "snapshot/common.h"
+#include "gfxstream/host/renderer_operations.h"
 
 #if GFXSTREAM_ENABLE_HOST_GLES
 #include "gl/EmulatedEglFenceSync.h"
@@ -63,7 +63,7 @@ class RendererImpl::ProcessCleanupThread {
 public:
     ProcessCleanupThread()
         : mCleanupWorker([](Cmd cmd) {
-            using android::base::WorkerProcessingResult;
+            using gfxstream::base::WorkerProcessingResult;
             struct {
                 WorkerProcessingResult operator()(CleanProcessResources resources) {
                     FrameBuffer::getFB()->cleanupProcGLObjects(resources.puid);
@@ -108,7 +108,7 @@ private:
     using Cmd = std::variant<CleanProcessResources, Exit>;
     DISALLOW_COPY_AND_ASSIGN(ProcessCleanupThread);
 
-    android::base::WorkerThread<Cmd> mCleanupWorker;
+    gfxstream::base::WorkerThread<Cmd> mCleanupWorker;
 };
 
 RendererImpl::RendererImpl() {
@@ -127,15 +127,6 @@ RendererImpl::~RendererImpl() {
 
 bool RendererImpl::initialize(int width, int height, const gfxstream::host::FeatureSet& features,
                               bool useSubWindow, bool egl2egl) {
-#ifdef CONFIG_AEMU
-    if (android::base::getEnvironmentVariable("ANDROID_EMUGL_VERBOSE") == "1") {
-        set_gfxstream_enable_verbose_logs();
-    }
-    if (android::base::getEnvironmentVariable("ANDROID_EMUGL_LOG_COLORS") == "1") {
-        set_gfxstream_enable_log_colors();
-    }
-#endif
-
     if (mRenderWindow) {
         return false;
     }
@@ -164,7 +155,7 @@ bool RendererImpl::initialize(int width, int height, const gfxstream::host::Feat
 }
 
 void RendererImpl::stop(bool wait) {
-    android::base::AutoLock lock(mChannelsLock);
+    std::unique_lock<std::mutex> lock(mChannelsMutex);
     mStopped = true;
     auto channels = std::move(mChannels);
     lock.unlock();
@@ -190,7 +181,7 @@ void RendererImpl::stop(bool wait) {
     for (const auto& c : mStoppedChannels) {
         c->renderThread()->waitForFinished();
         {
-            android::base::AutoLock driverLock(*graphicsDriverLock());
+            gfxstream::base::AutoLock driverLock(*graphicsDriverLock());
             c->renderThread()->sendExitSignal();
             c->renderThread()->wait();
         }
@@ -206,18 +197,18 @@ void RendererImpl::stop(bool wait) {
 
 void RendererImpl::finish() {
     {
-        android::base::AutoLock lock(mChannelsLock);
+        std::lock_guard<std::mutex> lock(mChannelsMutex);
         mRenderWindow->setPaused(true);
     }
     cleanupRenderThreads();
     {
-        android::base::AutoLock lock(mChannelsLock);
+        std::lock_guard<std::mutex> lock(mChannelsMutex);
         mRenderWindow->setPaused(false);
     }
 }
 
 void RendererImpl::cleanupRenderThreads() {
-    android::base::AutoLock lock(mChannelsLock);
+    std::unique_lock<std::mutex> lock(mChannelsMutex);
     const auto channels = std::move(mChannels);
     assert(mChannels.empty());
     lock.unlock();
@@ -231,7 +222,7 @@ void RendererImpl::cleanupRenderThreads() {
     for (const auto& c : channels) {
         c->renderThread()->waitForFinished();
         {
-            android::base::AutoLock driverLock(*graphicsDriverLock());
+            gfxstream::base::AutoLock driverLock(*graphicsDriverLock());
             c->renderThread()->sendExitSignal();
             c->renderThread()->wait();
         }
@@ -250,7 +241,7 @@ RenderChannelPtr RendererImpl::createRenderChannel(
     const auto channel =
         std::make_shared<RenderChannelImpl>(loadStream, virtioGpuContextId);
     {
-        android::base::AutoLock lock(mChannelsLock);
+        std::lock_guard<std::mutex> lock(mChannelsMutex);
 
         if (mStopped) {
             return nullptr;
@@ -295,7 +286,7 @@ void* RendererImpl::addressSpaceGraphicsConsumerCreate(
     auto thread = new RenderThread(context, loadStream, callbacks, contextId,
                                    capsetId, std::move(nameOpt));
     thread->start();
-    android::base::AutoLock lock(mAddressSpaceRenderThreadLock);
+    std::lock_guard<std::mutex> lock(mAddressSpaceRenderThreadMutex);
     mAddressSpaceRenderThreads.emplace(thread);
     return (void*)thread;
 }
@@ -303,13 +294,13 @@ void* RendererImpl::addressSpaceGraphicsConsumerCreate(
 void RendererImpl::addressSpaceGraphicsConsumerDestroy(void* consumer) {
     RenderThread* thread = (RenderThread*)consumer;
     {
-        android::base::AutoLock lock(mAddressSpaceRenderThreadLock);
+        std::lock_guard<std::mutex> lock(mAddressSpaceRenderThreadMutex);
         mAddressSpaceRenderThreads.erase(thread);
     }
 
     thread->waitForFinished();
     {
-        android::base::AutoLock driverLock(*graphicsDriverLock());
+        gfxstream::base::AutoLock driverLock(*graphicsDriverLock());
         thread->sendExitSignal();
         thread->wait();
     }
@@ -338,7 +329,7 @@ void RendererImpl::addressSpaceGraphicsConsumerRegisterPostLoadRenderThread(void
 
 void RendererImpl::pauseAllPreSave() {
     {
-        android::base::AutoLock lock(mChannelsLock);
+        std::lock_guard<std::mutex> lock(mChannelsMutex);
         if (mStopped) {
             return;
         }
@@ -347,7 +338,7 @@ void RendererImpl::pauseAllPreSave() {
         }
     }
     {
-        android::base::AutoLock lock(mAddressSpaceRenderThreadLock);
+        std::lock_guard<std::mutex> lock(mAddressSpaceRenderThreadMutex);
         for (const auto& thread : mAddressSpaceRenderThreads) {
             thread->pausePreSnapshot();
         }
@@ -357,13 +348,13 @@ void RendererImpl::pauseAllPreSave() {
 
 void RendererImpl::resumeAll() {
     {
-        android::base::AutoLock lock(mAddressSpaceRenderThreadLock);
+        std::lock_guard<std::mutex> lock(mAddressSpaceRenderThreadMutex);
         for (const auto t : mAdditionalPostLoadRenderThreads) {
             t->resume();
         }
     }
     {
-        android::base::AutoLock lock(mChannelsLock);
+        std::lock_guard<std::mutex> lock(mChannelsMutex);
         if (mStopped) {
             return;
         }
@@ -380,7 +371,7 @@ void RendererImpl::resumeAll() {
 }
 
 void RendererImpl::save(android::base::Stream* stream,
-                        const android::snapshot::ITextureSaverPtr& textureSaver) {
+                        const ITextureSaverPtr& textureSaver) {
     stream->putByte(mStopped);
     if (mStopped) {
         return;
@@ -391,16 +382,16 @@ void RendererImpl::save(android::base::Stream* stream,
 }
 
 bool RendererImpl::load(android::base::Stream* stream,
-                        const android::snapshot::ITextureLoaderPtr& textureLoader) {
+                        const ITextureLoaderPtr& textureLoader) {
 
 #ifdef SNAPSHOT_PROFILE
-    android::base::System::Duration startTime =
-            android::base::System::get()->getUnixTimeUs();
+    gfxstream::base::System::Duration startTime =
+            gfxstream::base::System::get()->getUnixTimeUs();
 #endif
     waitForProcessCleanup();
 #ifdef SNAPSHOT_PROFILE
     printf("Previous session cleanup time: %lld ms\n",
-           (long long)(android::base::System::get()
+           (long long)(gfxstream::base::System::get()
                                ->getUnixTimeUs() -
                        startTime) /
                    1000);
@@ -675,32 +666,13 @@ struct AndroidVirtioGpuOps* RendererImpl::getVirtioGpuOps() {
     return &sVirtioGpuOps;
 }
 
-void RendererImpl::snapshotOperationCallback(int op, int stage) {
-    using namespace android::snapshot;
-    switch (op) {
-        case SNAPSHOTTER_OPERATION_LOAD:
-            if (stage == SNAPSHOTTER_STAGE_START) {
-#ifdef SNAPSHOT_PROFILE
-             android::base::System::Duration startTime =
-                     android::base::System::get()->getUnixTimeUs();
-#endif
-                mRenderWindow->setPaused(true);
-                cleanupRenderThreads();
-#ifdef SNAPSHOT_PROFILE
-                printf("Previous session suspend time: %lld ms\n",
-                       (long long)(android::base::System::get()
-                                           ->getUnixTimeUs() -
-                                   startTime) /
-                               1000);
-#endif
-            }
-            if (stage == SNAPSHOTTER_STAGE_END) {
-                mRenderWindow->setPaused(false);
-            }
-            break;
-        default:
-            break;
-    }
+void RendererImpl::preLoad() {
+    mRenderWindow->setPaused(true);
+    cleanupRenderThreads();
+}
+
+void RendererImpl::postLoad() {
+    mRenderWindow->setPaused(false);
 }
 
 void RendererImpl::setVsyncHz(int vsyncHz) {
@@ -736,6 +708,14 @@ const void* RendererImpl::getGles2Dispatch() {
 #else
     return nullptr;
 #endif
+}
+
+void RendererImpl::setShouldSkipDraw(bool skip) {
+    set_gfxstream_should_skip_draw(skip);
+}
+
+bool RendererImpl::getShouldSkipDraw() const {
+    return get_gfxstream_should_skip_draw();
 }
 
 }  // namespace gfxstream

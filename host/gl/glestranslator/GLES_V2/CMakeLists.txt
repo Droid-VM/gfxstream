@@ -17,6 +17,4 @@ target_link_libraries(
     GLES_V2_translator_static PRIVATE
     GLcommon
     apigen-codec-common
-    aemu-base.headers
-    aemu-host-common.headers
     gfxstream_host_logging)

@@ -30,21 +30,22 @@
 #include "OpenGLESDispatch/EGLDispatch.h"
 #include "RenderThreadInfo.h"
 #include "RenderThreadInfoGl.h"
+#include "RenderThreadInfoVk.h"
 #include "SyncThread.h"
-#include "aemu/base/Tracing.h"
+#include "gfxstream/Tracing.h"
 #include "compressedTextureFormats/AstcCpuDecompressor.h"
-#include "gfxstream/host/Tracing.h"
 #include "gfxstream/host/logging.h"
-#include "host-common/misc.h"
-#include "host-common/opengl/misc.h"
+#include "gfxstream/host/guest_operations.h"
+#include "gfxstream/host/renderer_operations.h"
 #include "gfxstream/host/sync_device.h"
+#include "gfxstream/host/Tracing.h"
 #include "vulkan/VkCommonOperations.h"
 #include "vulkan/VkDecoderGlobalState.h"
 
 namespace gfxstream {
 
-using android::base::AutoLock;
-using android::base::Lock;
+using gfxstream::base::AutoLock;
+using gfxstream::base::Lock;
 using gl::EmulatedEglFenceSync;
 using gl::GLES_DISPATCH_MAX_VERSION_2;
 using gl::GLES_DISPATCH_MAX_VERSION_3_0;
@@ -144,17 +145,17 @@ public:
         int newLockState = --lockState;
         if (mEnabled && newLockState == 0) mGrallocColorBufferLock.unlockRead();
     }
-    android::base::ReadWriteLock mGrallocColorBufferLock;
+    gfxstream::base::ReadWriteLock mGrallocColorBufferLock;
 private:
     bool mEnabled;
     std::atomic<int> lockState;
     DISALLOW_COPY_ASSIGN_AND_MOVE(GrallocSync);
 };
 
-class GrallocSyncPostLock : public android::base::AutoWriteLock {
+class GrallocSyncPostLock : public gfxstream::base::AutoWriteLock {
 public:
     GrallocSyncPostLock(GrallocSync& grallocsync) :
-        android::base::AutoWriteLock(grallocsync.mGrallocColorBufferLock) { }
+        gfxstream::base::AutoWriteLock(grallocsync.mGrallocColorBufferLock) { }
 };
 
 static GrallocSync* sGrallocSync() {
@@ -504,7 +505,7 @@ static EGLint rcGetGLString(EGLenum name, void* buffer, EGLint bufferSize) {
         glStr += kAsyncSwapStrV2;
         glStr += " "; // for compatibility with older system images
         // Only enable EGL_KHR_wait_sync (and above) for host gpu.
-        if (emugl::getRenderer() == SELECTED_RENDERER_HOST) {
+        if (get_gfxstream_renderer() == SELECTED_RENDERER_HOST) {
             glStr += kAsyncSwapStrV3;
             glStr += " ";
             glStr += kAsyncSwapStrV4;
@@ -1241,6 +1242,10 @@ static void rcSetPuid(uint64_t puid) {
 
     RenderThreadInfo *tInfo = RenderThreadInfo::get();
     tInfo->m_puid = puid;
+    auto* renderThreadInfoVk = vk::RenderThreadInfoVk::get();
+    if (renderThreadInfoVk) {
+        renderThreadInfoVk->ctx_id = puid;
+    }
 }
 
 static int rcCompose(uint32_t bufferSize, void* buffer) {
@@ -1477,16 +1482,16 @@ static int32_t rcMapGpaToBufferHandle2(uint32_t bufferHandle,
 }
 
 static void rcFlushWindowColorBufferAsyncWithFrameNumber(uint32_t windowSurface, uint32_t frameNumber) {
-    android::base::traceCounter("gfxstreamFrameNumber", (int64_t)frameNumber);
+    gfxstream::base::traceCounter("gfxstreamFrameNumber", (int64_t)frameNumber);
     rcFlushWindowColorBufferAsync(windowSurface);
 }
 
 static void rcSetTracingForPuid(uint64_t puid, uint32_t enable, uint64_t time) {
     if (enable) {
-        android::base::setGuestTime(time);
-        android::base::enableTracing();
+        gfxstream::base::setGuestTime(time);
+        gfxstream::base::enableTracing();
     } else {
-        android::base::disableTracing();
+        gfxstream::base::disableTracing();
     }
 }
 
