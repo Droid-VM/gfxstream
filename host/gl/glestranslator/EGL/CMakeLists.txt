@@ -47,9 +47,8 @@ target_link_libraries(
     EGL_translator_static
     PUBLIC
     GLcommon
-    apigen-codec-common
+    gfxstream_host_decoder_common
     PRIVATE
-    aemu-base.headers
     gfxstream_common_utils
     gfxstream_host_backend
     )

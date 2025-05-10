@@ -12,8 +12,8 @@ endif()
 target_link_libraries(
     OpenglRender_vulkan_cereal
     PUBLIC
-    aemu-base.headers
     gfxstream_features
+    gfxstream_host_backend
     gfxstream_host_logging
     gfxstream_host_health
     gfxstream_vulkan_headers

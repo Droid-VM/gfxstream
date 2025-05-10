@@ -30,13 +30,12 @@
 #include "RenderControl.h"
 #endif
 #include "RenderThreadInfo.h"
-#include "RingStream.h"
 #include "VkDecoderContext.h"
-#include "apigen-codec-common/ChecksumCalculatorThreadInfo.h"
-#include "aemu/base/files/StreamSerializing.h"
+#include "gfxstream/host/ChecksumCalculatorThreadInfo.h"
 #include "gfxstream/HealthMonitor.h"
-#include "gfxstream/host/logging.h"
 #include "gfxstream/Metrics.h"
+#include "gfxstream/host/logging.h"
+#include "gfxstream/host/stream_utils.h"
 #include "gfxstream/synchronization/Lock.h"
 #include "gfxstream/synchronization/MessageChannel.h"
 #include "gfxstream/system/System.h"
@@ -73,7 +72,7 @@ static constexpr int kMinThreadsToRunUnlimited = 5;
 static gfxstream::base::Lock sThreadRunLimiter;
 
 RenderThread::RenderThread(RenderChannelImpl* channel,
-                           android::base::Stream* loadStream,
+                           gfxstream::Stream* load,
                            uint32_t virtioGpuContextId)
     : gfxstream::base::Thread(gfxstream::base::ThreadFlags::MaskSignals, 2 * 1024 * 1024,
                             "RenderThread"),
@@ -81,11 +80,11 @@ RenderThread::RenderThread(RenderChannelImpl* channel,
       mRunInLimitedMode(gfxstream::base::getCpuCoreCount() < kMinThreadsToRunUnlimited),
       mContextId(virtioGpuContextId)
 {
-    if (loadStream) {
-        const bool success = loadStream->getByte();
+    if (load) {
+        const bool success = load->getByte();
         if (success) {
             mStream.emplace(0);
-            android::base::loadStream(loadStream, &*mStream);
+            loadStream(load, &*mStream);
             mState = SnapshotState::StartLoading;
         } else {
             mFinished.store(true, std::memory_order_relaxed);
@@ -93,22 +92,17 @@ RenderThread::RenderThread(RenderChannelImpl* channel,
     }
 }
 
-RenderThread::RenderThread(
-        struct asg_context context,
-        android::base::Stream* loadStream,
-        android::emulation::asg::ConsumerCallbacks callbacks,
-        uint32_t contextId, uint32_t capsetId,
-        std::optional<std::string> nameOpt)
+RenderThread::RenderThread(const AsgConsumerCreateInfo& info, Stream* load)
     : gfxstream::base::Thread(gfxstream::base::ThreadFlags::MaskSignals, 2 * 1024 * 1024,
-                            std::move(nameOpt)),
-      mRingStream(
-          new RingStream(context, callbacks, kStreamBufferSize)),
-      mContextId(contextId), mCapsetId(capsetId) {
-    if (loadStream) {
-        const bool success = loadStream->getByte();
+                              info.virtioGpuContextName ? *info.virtioGpuContextName : ""),
+      mRingStream(new RingStream(info, kStreamBufferSize)),
+      mContextId(info.virtioGpuContextId ? *info.virtioGpuContextId : 0),
+      mCapsetId(info.virtioGpuCapsetId ? *info.virtioGpuCapsetId : 0) {
+    if (load) {
+        const bool success = load->getByte();
         if (success) {
             mStream.emplace(0);
-            android::base::loadStream(loadStream, &*mStream);
+            loadStream(load, &*mStream);
             mState = SnapshotState::StartLoading;
         } else {
             mFinished.store(true, std::memory_order_relaxed);
@@ -147,14 +141,14 @@ void RenderThread::resume() {
     waitForSnapshotCompletion(&lock);
 
     mNeedReloadProcessResources = true;
-    mStream.clear();
+    mStream.reset();
     mState = SnapshotState::Empty;
     if (mChannel) mChannel->resume();
     if (mRingStream) mRingStream->resume();
     mSnapshotSignal.broadcastAndUnlock(&lock);
 }
 
-void RenderThread::save(android::base::Stream* stream) {
+void RenderThread::save(gfxstream::Stream* stream) {
     bool success;
     {
         AutoLock lock(mLock);
@@ -168,7 +162,7 @@ void RenderThread::save(android::base::Stream* stream) {
     if (success) {
         assert(mStream);
         stream->putByte(1);
-        android::base::saveStream(stream, *mStream);
+        saveStream(stream, *mStream);
     } else {
         stream->putByte(0);
     }
@@ -242,6 +236,12 @@ void RenderThread::sendExitSignal() {
     }
     mCanExit.store(true, std::memory_order_relaxed);
     mExitSignal.broadcastAndUnlock(&lock);
+}
+
+void RenderThread::addressSpaceGraphicsReloadRingConfig() {
+    if (mRingStream) {
+        mRingStream->reloadRingConfig();
+    }
 }
 
 void RenderThread::setFinished() {

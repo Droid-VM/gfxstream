@@ -17,11 +17,11 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
-#include "aemu/base/containers/SmallVector.h"
-#include "aemu/base/files/Stream.h"
-#include "aemu/base/threads/Thread.h"
+#include "render-utils/stream.h"
+#include "render-utils/small_vector.h"
 
 namespace gfxstream {
 
@@ -33,37 +33,56 @@ class ITextureSaver {
     ITextureSaver(ITextureSaver&) = delete;
     ITextureSaver& operator=(ITextureSaver&) = delete;
 
-    using Buffer = android::base::SmallVector<unsigned char>;
-    using saver_t = std::function<void(android::base::Stream*, Buffer*)>;
+    using Buffer = SmallVector<unsigned char>;
+    using saver_t = std::function<void(gfxstream::Stream*, Buffer*)>;
 
     // Save texture to a stream as well as update the index
     virtual void saveTexture(uint32_t texId, const saver_t& saver) = 0;
-    virtual bool hasError() const = 0;
-    virtual uint64_t diskSize() const = 0;
-    virtual bool compressed() const = 0;
-    virtual bool getDuration(uint64_t* duration) = 0;
 };
 
 class ITextureLoader {
   public:
     ITextureLoader() = default;
-    virtual ~ITextureLoader() = default;
+    virtual ~ITextureLoader() { join(); }
 
     ITextureLoader(ITextureLoader&) = delete;
     ITextureLoader& operator=(ITextureLoader&) = delete;
 
-    using LoaderThreadPtr = std::shared_ptr<android::base::InterruptibleThread>;
-    using loader_t = std::function<void(android::base::Stream*)>;
-
     virtual bool start() = 0;
+
+    using loader_t = std::function<void(gfxstream::Stream*)>;
+
     // Move file position to texId and trigger loader
     virtual void loadTexture(uint32_t texId, const loader_t& loader) = 0;
-    virtual void acquireLoaderThread(LoaderThreadPtr thread) = 0;
-    virtual bool hasError() const = 0;
-    virtual uint64_t diskSize() const = 0;
-    virtual bool compressed() const = 0;
-    virtual void join() = 0;
-    virtual void interrupt() = 0;
+
+    // Callbacks to interact with any async use of this ITextureLoader
+    // by the Gfxstream renderer.
+    struct AsyncUseCallbacks {
+        // A callback to interrupt any async use of this ITextureLoader
+        // by the Gfxstream renderer.
+        std::function<void()> interrupt;
+        // A callback to wait until any async use of this ITextureLoader
+        // by the Gfxstream renderer has completed.
+        std::function<void()> join;
+    };
+    void setAsyncUseCallbacks(AsyncUseCallbacks callbacks) {
+        mAsyncUseCallbacks = callbacks;
+    }
+
+    virtual void interrupt() {
+        if (mAsyncUseCallbacks) {
+            mAsyncUseCallbacks->interrupt();
+        }
+    }
+
+    virtual void join() {
+        if (mAsyncUseCallbacks) {
+            mAsyncUseCallbacks->join();
+        }
+    }
+
+  private:
+    std::optional<AsyncUseCallbacks> mAsyncUseCallbacks;
 };
 
 using ITextureSaverPtr = std::shared_ptr<ITextureSaver>;

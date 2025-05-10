@@ -16,20 +16,20 @@
 #ifndef TRANSLATOR_IFACES_H
 #define TRANSLATOR_IFACES_H
 
-#include "aemu/base/containers/SmallVector.h"
-#include "aemu/base/files/Stream.h"
+#include <memory>
+#include <unordered_map>
+#include <functional>
+
+#include "render-utils/stream.h"
 #include "GLcommon/GLutils.h"
 #include "GLcommon/ShareGroup.h"
+#include "render-utils/small_vector.h"
 
 #include <EGL/egl.h>
 #include <GLES/gl.h>
 #include <GLES2/gl2.h>
 #include <GLES3/gl3.h>
 #include <string.h>
-
-#include <memory>
-#include <unordered_map>
-#include <functional>
 
 extern "C" {
 
@@ -95,7 +95,7 @@ namespace android_studio {
 
 typedef struct {
     void (*initGLESx)(bool isGles2Gles);
-    GLEScontext*                                    (*createGLESContext)(int majorVersion, int minorVersion, GlobalNameSpace* globalNameSpace, android::base::Stream* stream);
+    GLEScontext*                                    (*createGLESContext)(int majorVersion, int minorVersion, GlobalNameSpace* globalNameSpace, gfxstream::Stream* stream);
     void                                            (*initContext)(GLEScontext*, ShareGroupPtr, bool, bool);
     void                                            (*setMaxGlesVersion)(GLESVersion);
     void                                            (*deleteGLESContext)(GLEScontext*);
@@ -110,7 +110,7 @@ typedef struct {
     void                                            (*deleteSync)(GLsync);
     void                                            (*preSaveTexture)();
     void                                            (*postSaveTexture)();
-    void                                            (*saveTexture)(SaveableTexture*, android::base::Stream*, android::base::SmallVector<unsigned char>* buffer);
+    void                                            (*saveTexture)(SaveableTexture*, gfxstream::Stream*, gfxstream::SmallVector<unsigned char>* buffer);
     SaveableTexture* (*createTexture)(GlobalNameSpace*,
                                       std::function<void(SaveableTexture*)>&&);
     void                                            (*restoreTexture)(SaveableTexture*);

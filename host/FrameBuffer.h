@@ -31,7 +31,7 @@
 #include "Compositor.h"
 #include "gfxstream/host/display.h"
 #include "gfxstream/host/display_surface.h"
-#include "ExternalObjectManager.h"
+#include "gfxstream/host/external_object_manager.h"
 #include "Hwc2.h"
 #include "PostCommands.h"
 #include "PostWorker.h"
@@ -43,7 +43,7 @@
 #include "gfxstream/HealthMonitor.h"
 #include "gfxstream/Metrics.h"
 #include "gfxstream/ThreadAnnotations.h"
-#include "aemu/base/files/Stream.h"
+#include "render-utils/stream.h"
 #include "gfxstream/synchronization/Lock.h"
 #include "gfxstream/synchronization/MessageChannel.h"
 #include "gfxstream/threads/Thread.h"
@@ -388,9 +388,9 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
 
     ~FrameBuffer();
 
-    void onSave(android::base::Stream* stream,
+    void onSave(gfxstream::Stream* stream,
                 const ITextureSaverPtr& textureSaver);
-    bool onLoad(android::base::Stream* stream,
+    bool onLoad(gfxstream::Stream* stream,
                 const ITextureLoaderPtr& textureLoader);
 
     // lock and unlock handles (EmulatedEglContext, ColorBuffer, EmulatedEglWindowSurface)

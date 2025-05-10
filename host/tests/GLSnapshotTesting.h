@@ -21,7 +21,6 @@
 #include "InMemoryTextureSaverLoader.h"
 #include "OpenGLTestContext.h"
 #include "gfxstream/system/System.h"
-#include "gfxstream/testing/TestSystem.h"
 #include "render-utils/snapshot_operations.h"
 
 // Clashes with X11's `None`  preprocessor...
@@ -204,12 +203,12 @@ class SnapshotTest : public gfxstream::gl::GLTest {
     void SetUp() override;
 
     // Mimics FrameBuffer.onSave, with fewer objects to manage.
-    void saveSnapshot(android::base::Stream* stream,
+    void saveSnapshot(gfxstream::Stream* stream,
                       const ITextureSaverPtr& textureSaver);
 
     // Mimics FrameBuffer.onLoad, with fewer objects to manage.
     // Assumes that a valid display is present.
-    void loadSnapshot(android::base::Stream* stream,
+    void loadSnapshot(gfxstream::Stream* stream,
                       const ITextureLoaderPtr& textureLoader);
 
     // Performs a teardown and reset of graphics objects in preparation for
@@ -220,10 +219,6 @@ class SnapshotTest : public gfxstream::gl::GLTest {
     // To verify that state has been reset to some default before the load,
     // assertions can be performed in |preloadCheck|.
     void doSnapshot(std::function<void()> preloadCheck);
-
-protected:
-    gfxstream::base::TestSystem mTestSystem;
-    std::string mSnapshotPath = {};
 };
 
 // SnapshotPreserveTest - A helper class building on SnapshotTest for granular

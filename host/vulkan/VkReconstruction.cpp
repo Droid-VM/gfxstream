@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #include "VkReconstruction.h"
 
 #include <string.h>
@@ -55,7 +56,7 @@ void VkReconstruction::clear() {
     mApiCallManager.clear();
 }
 
-void VkReconstruction::saveReplayBuffers(android::base::Stream* stream) {
+void VkReconstruction::saveReplayBuffers(gfxstream::Stream* stream) {
     DEBUG_RECON("start")
 
 #if DEBUG_RECONSTRUCTION
@@ -102,18 +103,18 @@ void VkReconstruction::saveReplayBuffers(android::base::Stream* stream) {
     DEBUG_RECON("created handle buffer size: %zu trace: %zu", createdHandleBuffer.size(),
                 apiTraceBuffer.size());
 
-    android::base::saveBuffer(stream, createdHandleBuffer);
-    android::base::saveBuffer(stream, apiTraceBuffer);
+    gfxstream::saveBuffer(stream, createdHandleBuffer);
+    gfxstream::saveBuffer(stream, apiTraceBuffer);
 }
 
 /*static*/
-void VkReconstruction::loadReplayBuffers(android::base::Stream* stream,
+void VkReconstruction::loadReplayBuffers(gfxstream::Stream* stream,
                                          std::vector<uint64_t>* outHandleBuffer,
                                          std::vector<uint8_t>* outDecoderBuffer) {
     DEBUG_RECON("starting to unpack decoder replay buffer");
 
-    android::base::loadBuffer(stream, outHandleBuffer);
-    android::base::loadBuffer(stream, outDecoderBuffer);
+    gfxstream::loadBuffer(stream, outHandleBuffer);
+    gfxstream::loadBuffer(stream, outDecoderBuffer);
 
     DEBUG_RECON("finished unpacking decoder replay buffer");
 }
@@ -192,6 +193,10 @@ void VkReconstruction::forEachHandleAddApi(const uint64_t* toProcess, uint32_t c
     if (state == VkReconstruction::CREATED) {
         mGraph.associateWithApiCall(toProcess, count, apiHandle);
     }
+}
+
+void VkReconstruction::removeDescendantsOfHandle(const uint64_t handle) {
+    mGraph.removeDescendantsOfHandle(handle);
 }
 
 void VkReconstruction::addHandleDependency(const uint64_t* handles, uint32_t count,

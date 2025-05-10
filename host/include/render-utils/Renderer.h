@@ -13,20 +13,17 @@
 // limitations under the License.
 #pragma once
 
-
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 
-#include "aemu/base/files/Stream.h"
-#include "aemu/base/ring_buffer.h"
 #include "render-utils/RenderChannel.h"
 #include "render-utils/address_space_graphics_types.h"
 #include "render-utils/render_api_platform_types.h"
 #include "render-utils/snapshot_operations.h"
+#include "render-utils/stream.h"
 #include "render-utils/virtio_gpu_ops.h"
-
 
 namespace android_studio {
 class EmulatorGLESUsages;
@@ -70,7 +67,7 @@ typedef enum {
 // and is able to create individual render channels for that window.
 //
 class Renderer {
-public:
+  public:
     // createRenderChannel - create a separate channel for the rendering data.
     // This call instantiates a new object that waits for the serialized data
     // from the guest, deserializes it, executes the passed GL commands and
@@ -79,23 +76,22 @@ public:
     //   asynchronously on its own thread. |loadStream| can be used right after
     //   the call as all the required data is copied here synchronously.
     virtual RenderChannelPtr createRenderChannel(
-            android::base::Stream* loadStream = nullptr,
+            gfxstream::Stream* loadStream = nullptr,
             uint32_t virtioGpuContextId = -1) = 0;
 
     // analog of createRenderChannel, but for the address space graphics device
     virtual void* addressSpaceGraphicsConsumerCreate(
-        struct asg_context,
-        android::base::Stream* loadStream,
-        android::emulation::asg::ConsumerCallbacks,
-        uint32_t contextId, uint32_t capsetId,
-        std::optional<std::string> nameOpt) = 0;
+        const AsgConsumerCreateInfo& info,
+        gfxstream::Stream* loadStream) = 0;
     virtual void addressSpaceGraphicsConsumerDestroy(void*) = 0;
     virtual void addressSpaceGraphicsConsumerPreSave(void* consumer) = 0;
     virtual void addressSpaceGraphicsConsumerSave(
             void* consumer,
-            android::base::Stream* stream) = 0;
+            gfxstream::Stream* stream) = 0;
     virtual void addressSpaceGraphicsConsumerPostSave(void* consumer) = 0;
     virtual void addressSpaceGraphicsConsumerRegisterPostLoadRenderThread(
+            void* consumer) = 0;
+    virtual void addressSpaceGraphicsConsumerReloadRingConfig(
             void* consumer) = 0;
 
     // getHardwareStrings - describe the GPU hardware and driver.
@@ -286,10 +282,10 @@ public:
     virtual void resumeAll() = 0;
 
     virtual void save(
-            android::base::Stream* stream,
+            gfxstream::Stream* stream,
             const ITextureSaverPtr& textureSaver) = 0;
     virtual bool load(
-            android::base::Stream* stream,
+            gfxstream::Stream* stream,
             const ITextureLoaderPtr& textureLoader) = 0;
 
     // Fill GLES usage protobuf

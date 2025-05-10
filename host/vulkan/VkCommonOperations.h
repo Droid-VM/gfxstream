@@ -28,7 +28,7 @@
 #include "DebugUtilsHelper.h"
 #include "DeviceLostHelper.h"
 #include "DisplayVk.h"
-#include "ExternalObjectManager.h"
+#include "gfxstream/host/external_object_manager.h"
 #include "FrameworkFormats.h"
 #include "gfxstream/Optional.h"
 #include "gfxstream/ThreadAnnotations.h"
@@ -472,6 +472,8 @@ class VkEmulation {
 
 #ifdef _WIN32
         PFN_vkGetMemoryWin32HandleKHR getMemoryHandleFunc = nullptr;
+#elif defined(__ANDROID__)
+        PFN_vkGetMemoryAndroidHardwareBufferANDROID getMemoryHandleFunc = nullptr;
 #else
         PFN_vkGetMemoryFdKHR getMemoryHandleFunc = nullptr;
 #endif

@@ -17,9 +17,8 @@
 #include <optional>
 #include <vector>
 
-#include "aemu/base/ring_buffer.h"
-#include "aemu/base/threads/FunctorThread.h"
 #include "gfxstream/host/address_space_device.h"
+#include "gfxstream/host/address_space_graphics_types.h"
 #include "gfxstream/host/address_space_service.h"
 #include "gfxstream/synchronization/MessageChannel.h"
 #include "render-utils/address_space_graphics_types.h"
@@ -43,23 +42,23 @@ class AddressSpaceGraphicsContext : public AddressSpaceDeviceContext {
     AddressSpaceGraphicsContext(const struct AddressSpaceCreateInfo& create);
     ~AddressSpaceGraphicsContext();
 
-    static void setConsumer(android::emulation::asg::ConsumerInterface);
+    static void setConsumer(ConsumerInterface);
     static void clear();
 
     void perform(AddressSpaceDevicePingInfo* info) override;
     AddressSpaceDeviceType getDeviceType() const override;
 
-    void save(android::base::Stream* stream) const override;
-    bool load(android::base::Stream* stream) override;
+    void save(gfxstream::Stream* stream) const override;
+    bool load(gfxstream::Stream* stream) override;
 
     void preSave() const override;
     void postSave() const override;
 
     static void globalStatePreSave();
-    static void globalStateSave(android::base::Stream*);
+    static void globalStateSave(gfxstream::Stream*);
     static void globalStatePostSave();
 
-    static bool globalStateLoad(android::base::Stream*,
+    static bool globalStateLoad(gfxstream::Stream*,
                                 const std::optional<AddressSpaceDeviceLoadResources>& resources);
 
     enum AllocType {
@@ -69,11 +68,8 @@ class AddressSpaceGraphicsContext : public AddressSpaceDeviceContext {
     };
 
   private:
-    void saveRingConfig(android::base::Stream* stream, const struct asg_ring_config& config) const;
-    void saveAllocation(android::base::Stream* stream, const Allocation& alloc) const;
-
-    void loadRingConfig(android::base::Stream* stream, struct asg_ring_config& config);
-    void loadAllocation(android::base::Stream* stream, Allocation& alloc);
+    void saveAllocation(gfxstream::Stream* stream, const Allocation& alloc) const;
+    void loadAllocation(gfxstream::Stream* stream, Allocation& alloc);
 
     // For consumer communication
     enum ConsumerCommand {
@@ -85,25 +81,22 @@ class AddressSpaceGraphicsContext : public AddressSpaceDeviceContext {
     };
 
     // For ConsumerCallbacks
-    int onUnavailableRead();
+    AsgOnUnavailableReadStatus onUnavailableRead();
 
     // Data layout
     uint32_t mVersion = 1;
     Allocation mRingAllocation;
     Allocation mBufferAllocation;
     Allocation mCombinedAllocation;
-    struct asg_context mHostContext = {};
 
     // Consumer storage
-    android::emulation::asg::ConsumerCallbacks mConsumerCallbacks;
-    android::emulation::asg::ConsumerInterface mConsumerInterface;
+    ConsumerCallbacks mConsumerCallbacks;
+    ConsumerInterface mConsumerInterface;
     void* mCurrentConsumer = 0;
 
     // Communication with consumer
     mutable gfxstream::base::MessageChannel<ConsumerCommand, 4> mConsumerMessages;
     uint32_t mExiting = 0;
-    // For onUnavailableRead
-    uint32_t mUnavailableReadCount = 0;
 
     struct VirtioGpuInfo {
         uint32_t contextId = 0;
@@ -111,8 +104,6 @@ class AddressSpaceGraphicsContext : public AddressSpaceDeviceContext {
         std::optional<std::string> name;
     };
     std::optional<VirtioGpuInfo> mVirtioGpuInfo;
-    // To save the ring config if it is cleared on hostmem map
-    struct asg_ring_config mSavedConfig;
 };
 
 }  // namespace host

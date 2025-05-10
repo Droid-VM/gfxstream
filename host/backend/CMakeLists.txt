@@ -18,8 +18,13 @@ if (NOT TARGET gfxstream_host_backend)
         display_surface.cpp
         display_surface_user.cpp
         dma_device.cpp
+        external_object_manager.cpp
+        file_stream.cpp
+        graphics_driver_lock.cpp
         guest_operations.cpp
+        mem_stream.cpp
         renderer_operations.cpp
+        stream_utils.cpp
         sync_device.cpp
         vm_operations.cpp
         window_operations.cpp

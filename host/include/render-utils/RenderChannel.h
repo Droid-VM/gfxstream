@@ -13,18 +13,13 @@
 // limitations under the License.
 #pragma once
 
-#include "aemu/base/EnumFlags.h"
-#include "aemu/base/containers/SmallVector.h"
-#include "aemu/base/files/Stream.h"
-#include "aemu/base/containers/BufferQueue.h"
-
 #include <functional>
 #include <memory>
 
-namespace gfxstream {
+#include "render-utils/stream.h"
+#include "render-utils/small_vector.h"
 
-// Turn the RenderChannel::State enum into flags.
-using namespace ::android::base::EnumFlags;
+namespace gfxstream {
 
 // RenderChannel - For each guest-to-host renderer connection, this provides
 // an interface for the guest side to interact with the corresponding renderer
@@ -39,14 +34,14 @@ using namespace ::android::base::EnumFlags;
 //       when the channel's state has changed due to a host thread event.
 //
 class RenderChannel {
-public:
+  public:
     // A type used to pass byte packets between the guest and the
     // RenderChannel instance. Experience has shown that using a
     // SmallFixedVector<char, N> instance instead of a std::vector<char>
     // avoids a lot of un-necessary heap allocations. The current size
     // of 512 was selected after profiling existing traffic, including
     // the one used in protocol-heavy benchmark like Antutu3D.
-    using Buffer = android::base::SmallFixedVector<char, 512>;
+    using Buffer = SmallFixedVector<char, 512>;
 
     // Bit-flags for the channel state.
     // |CanRead| means there is data from the host to read.
@@ -60,7 +55,13 @@ public:
         Stopped = 1 << 2,
     };
 
-    using IoResult = android::base::BufferQueueResult;
+    enum class IoResult {
+        Ok = 0,
+        TryAgain = 1,
+        Error = 2,
+        Timeout = 3,
+    };
+
     using Duration = uint64_t;
 
     // Type of a callback used to tell the guest when the RenderChannel
@@ -114,9 +115,9 @@ public:
     virtual void stop() = 0;
 
     // Callback function when snapshotting the virtual machine.
-    virtual void onSave(android::base::Stream* stream) = 0;
+    virtual void onSave(gfxstream::Stream* stream) = 0;
 
-protected:
+  protected:
     ~RenderChannel() = default;
 };
 

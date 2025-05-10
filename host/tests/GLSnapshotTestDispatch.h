@@ -18,8 +18,7 @@
 
 #include "InMemoryTextureSaverLoader.h"
 #include "OpenGLESDispatch/OpenGLDispatchLoader.h"
-#include "aemu/base/files/MemStream.h"
-#include "gfxstream/testing/TestSystem.h"
+#include "gfxstream/host/mem_stream.h"
 
 namespace gfxstream {
 namespace gl {
@@ -66,9 +65,7 @@ protected:
 
     int mLoadCount = 0;
 
-    gfxstream::base::TestSystem mTestSystem;
-
-    std::unique_ptr<android::base::MemStream> mStream;
+    std::unique_ptr<gfxstream::MemStream> mStream;
     std::shared_ptr<InMemoryTextureSaverLoader> mTextureSaverLoader;
 };
 

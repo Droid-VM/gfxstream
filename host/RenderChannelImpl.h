@@ -13,7 +13,7 @@
 // limitations under the License.
 #pragma once
 
-#include "aemu/base/containers/BufferQueue.h"
+#include "gfxstream/host/buffer_queue.h"
 #include "render-utils/RenderChannel.h"
 #include "RendererImpl.h"
 
@@ -21,14 +21,12 @@ namespace gfxstream {
 
 class RenderThread;
 
-using android::base::BufferQueue;
-
 // Implementation of the RenderChannel interface that connects a guest
 // client thread (really an AndroidPipe implementation) to a host
 // RenderThread instance.
 class RenderChannelImpl final : public RenderChannel {
-public:
-    explicit RenderChannelImpl(android::base::Stream* loadStream = nullptr,
+  public:
+    explicit RenderChannelImpl(gfxstream::Stream* loadStream = nullptr,
                                uint32_t contextId = -1);
     ~RenderChannelImpl();
 
@@ -68,7 +66,7 @@ public:
     virtual void stop() override final;
 
     // Callback function when snapshotting the virtual machine.
-    virtual void onSave(android::base::Stream* stream) override;
+    virtual void onSave(gfxstream::Stream* stream) override;
 
     /////////////////////////////////////////////////////////////////
     // These functions are called from the host render thread or renderer.
@@ -104,7 +102,7 @@ public:
     // Resume the normal operation after saving or loading a snapshot.
     void resume();
 
-private:
+  private:
     void updateStateLocked();
     void notifyStateChangeLocked();
 
@@ -113,11 +111,11 @@ private:
 
     // A single lock to protect the state and the two buffer queues at the
     // same time. NOTE: This needs to appear before the BufferQueue instances.
-    mutable android::base::Lock mLock;
+    mutable gfxstream::base::Lock mLock;
     State mState = State::Empty;
     State mWantedEvents = State::Empty;
-    BufferQueue<RenderChannel::Buffer> mFromGuest;
-    BufferQueue<RenderChannel::Buffer> mToGuest;
+    gfxstream::BufferQueue<RenderChannel::Buffer> mFromGuest;
+    gfxstream::BufferQueue<RenderChannel::Buffer> mToGuest;
 };
 
 }  // namespace gfxstream

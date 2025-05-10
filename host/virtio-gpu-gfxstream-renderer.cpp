@@ -112,7 +112,7 @@ ParseGfxstreamFeatures(const int rendererFlags,
         &features, VulkanShaderFloat16Int8, true);
     GFXSTREAM_SET_FEATURE_ON_CONDITION(
         &features, VulkanSnapshots,
-        android::base::getEnvironmentVariable("ANDROID_GFXSTREAM_CAPTURE_VK_SNAPSHOT") == "1");
+        gfxstream::base::getEnvironmentVariable("ANDROID_GFXSTREAM_CAPTURE_VK_SNAPSHOT") == "1");
 
     for (const std::string& rendererFeature : gfxstream::Split(rendererFeatures, ",")) {
         if (rendererFeature.empty()) continue;
@@ -184,19 +184,19 @@ RendererPtr InitRenderer(uint32_t displayWidth,
     GFXSTREAM_DEBUG("Initializing renderer with width:%u height:%u renderer-flags:0x%x",
                     displayWidth, displayHeight, rendererFlags);
 
-    if (android::base::getEnvironmentVariable("ANDROID_GFXSTREAM_EGL") == "1") {
-        android::base::setEnvironmentVariable("ANDROID_EGL_ON_EGL", "1");
-        android::base::setEnvironmentVariable("ANDROID_EMUGL_LOG_PRINT", "1");
-        android::base::setEnvironmentVariable("ANDROID_EMUGL_VERBOSE", "1");
+    if (gfxstream::base::getEnvironmentVariable("ANDROID_GFXSTREAM_EGL") == "1") {
+        gfxstream::base::setEnvironmentVariable("ANDROID_EGL_ON_EGL", "1");
+        gfxstream::base::setEnvironmentVariable("ANDROID_EMUGL_LOG_PRINT", "1");
+        gfxstream::base::setEnvironmentVariable("ANDROID_EMUGL_VERBOSE", "1");
     }
-    android::base::setEnvironmentVariable("ANDROID_EMU_HEADLESS", "1");
+    gfxstream::base::setEnvironmentVariable("ANDROID_EMU_HEADLESS", "1");
 
-    const bool egl2eglByEnv = android::base::getEnvironmentVariable("ANDROID_EGL_ON_EGL") == "1";
+    const bool egl2eglByEnv = gfxstream::base::getEnvironmentVariable("ANDROID_EGL_ON_EGL") == "1";
     const bool egl2eglByFlag = rendererFlags & STREAM_RENDERER_FLAGS_USE_EGL_BIT;
     const bool enableEgl2egl = egl2eglByFlag || egl2eglByEnv;
     if (enableEgl2egl) {
-        android::base::setEnvironmentVariable("ANDROID_GFXSTREAM_EGL", "1");
-        android::base::setEnvironmentVariable("ANDROID_EGL_ON_EGL", "1");
+        gfxstream::base::setEnvironmentVariable("ANDROID_GFXSTREAM_EGL", "1");
+        gfxstream::base::setEnvironmentVariable("ANDROID_EGL_ON_EGL", "1");
     }
 
     gfxstream::vk::vkDispatch(false /* don't use test ICD */);
@@ -211,16 +211,10 @@ RendererPtr InitRenderer(uint32_t displayWidth,
 
     // TODO: move this into a proper function in address_space_device_control_ops.
     gfxstream::host::AddressSpaceGraphicsContext::setConsumer(
-        android::emulation::asg::ConsumerInterface{
-            .create = [renderer](struct asg_context context,
-                                 android::base::Stream* loadStream,
-                                 android::emulation::asg::ConsumerCallbacks callbacks,
-                                 uint32_t contextId,
-                                 uint32_t capsetId,
-                                 std::optional<std::string> nameOpt) {
-                return renderer->addressSpaceGraphicsConsumerCreate(
-                    context, loadStream, callbacks, contextId, capsetId, std::move(nameOpt));
-                },
+        gfxstream::ConsumerInterface{
+            .create = [renderer](const gfxstream::AsgConsumerCreateInfo& info, gfxstream::Stream* loadStream) {
+                return renderer->addressSpaceGraphicsConsumerCreate(info, loadStream);
+            },
             .destroy = [renderer](void* consumer) {
                 renderer->addressSpaceGraphicsConsumerDestroy(consumer);
             },
@@ -230,7 +224,7 @@ RendererPtr InitRenderer(uint32_t displayWidth,
             .globalPreSave = [renderer]() {
                 renderer->pauseAllPreSave();
             },
-            .save = [renderer](void* consumer, android::base::Stream* stream) {
+            .save = [renderer](void* consumer, gfxstream::Stream* stream) {
                 renderer->addressSpaceGraphicsConsumerSave(consumer, stream);
             },
             .globalPostSave = [renderer]() {
@@ -243,6 +237,9 @@ RendererPtr InitRenderer(uint32_t displayWidth,
                 renderer->addressSpaceGraphicsConsumerRegisterPostLoadRenderThread(consumer);
             },
             .globalPreLoad = [renderer]() {
+            },
+            .reloadRingConfig = [renderer](void* consumer) {
+                renderer->addressSpaceGraphicsConsumerReloadRingConfig(consumer);
             },
         });
 

@@ -23,21 +23,21 @@ target_include_directories(
     GLcommon PUBLIC
     ${GFXSTREAM_REPO_ROOT}
     ${GFXSTREAM_REPO_ROOT}/host
-    ${GFXSTREAM_REPO_ROOT}/host/apigen-codec-common
+    ${GFXSTREAM_REPO_ROOT}/host/gfxstream_host_decoder_common
     ${GFXSTREAM_REPO_ROOT}/host/gl/glestranslator/GLcommon/include)
 target_link_libraries(
     GLcommon
     PUBLIC
-    aemu-base.headers
     gfxstream_backend_headers
     gfxstream_common_base
     gfxstream_egl_headers
     gfxstream_etc_headers
+    gfxstream_host_backend
     gfxstream_host_library
     gfxstream_host_logging
     gfxstream_host_snapshot.headers
     gfxstream_openglesdispatch
-    gfxstream-compressedTextures
+    gfxstream_host_compressed_textures
     PRIVATE
     gfxstream_etc)
 if (NOT MSVC)

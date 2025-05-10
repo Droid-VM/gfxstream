@@ -1,15 +1,26 @@
 add_library(
     GLES_CM_translator_static
-    CoreProfileEngine.cpp GLEScmContext.cpp GLEScmImp.cpp GLEScmUtils.cpp
+    CoreProfileEngine.cpp
+    GLEScmContext.cpp
+    GLEScmImp.cpp
+    GLEScmUtils.cpp
     GLEScmValidate.cpp)
 if (NOT MSVC)
-    target_compile_options(GLES_CM_translator_static PRIVATE -fvisibility=hidden)
+    target_compile_options(
+        GLES_CM_translator_static
+        PRIVATE
+        -fvisibility=hidden)
 endif()
-target_compile_options(GLES_CM_translator_static PRIVATE -Wno-macro-redefined)
+target_compile_options(
+    GLES_CM_translator_static
+    PRIVATE
+    -Wno-macro-redefined)
 target_link_libraries(
-    GLES_CM_translator_static PRIVATE
+    GLES_CM_translator_static
+    PRIVATE
     GLcommon
-    apigen-codec-common
+    gfxstream_host_decoder_common
+    gfxstream_host_backend
     gfxstream_host_logging
     gfxstream_host_snapshot.headers
     gfxstream_egl_headers)
@@ -18,4 +29,4 @@ target_include_directories(
     ${GFXSTREAM_REPO_ROOT}
     ${GFXSTREAM_REPO_ROOT}/host/
     ${GFXSTREAM_REPO_ROOT}/host/gl/glestranslator/include
-    ${GFXSTREAM_REPO_ROOT}/third-party/glm/include)
+    ${GFXSTREAM_REPO_ROOT}/third_party/glm/include)

@@ -23,7 +23,7 @@
 #include <vector>
 
 #include "FrameBuffer.h"
-#include "GraphicsDriverLock.h"
+#include "gfxstream/host/graphics_driver_lock.h"
 #include "RenderThreadInfoVk.h"
 #include "TrivialStream.h"
 #include "VkAndroidNativeBuffer.h"
@@ -37,12 +37,12 @@
 #include "VulkanBoxedHandles.h"
 #include "VulkanDispatch.h"
 #include "VulkanStream.h"
-#include "aemu/base/files/Stream.h"
+#include "render-utils/stream.h"
 #include "common/goldfish_vk_deepcopy.h"
 #include "common/goldfish_vk_dispatch.h"
 #include "common/goldfish_vk_marshaling.h"
 #include "common/goldfish_vk_reserved_marshaling.h"
-#include "compressedTextureFormats/AstcCpuDecompressor.h"
+#include "gfxstream/host/AstcCpuDecompressor.h"
 #include "gfxstream/containers/Lookup.h"
 #include "gfxstream/host/Tracing.h"
 #include "gfxstream/host/logging.h"
@@ -90,7 +90,7 @@ using emugl::GfxApiLogger;
 using gfxstream::ExternalObjectManager;
 using gfxstream::VulkanInfo;
 
-// TODO(b/261477138): Move to a shared aemu definition
+// TODO(b/261477138): Move to a shared definition
 #define __ALIGN_MASK(x, mask) (((x) + (mask)) & ~(mask))
 #define __ALIGN(x, a) __ALIGN_MASK(x, (__typeof__(x))(a)-1)
 
@@ -314,7 +314,7 @@ class VkDecoderGlobalState::Impl {
         stateBlock->deviceDispatch->vkDestroyCommandPool(stateBlock->device, stateBlock->commandPool, nullptr);
     }
 
-    void save(android::base::Stream* stream) {
+    void save(gfxstream::Stream* stream) {
         GFXSTREAM_DEBUG("VulkanSnapshots save (begin)");
         std::lock_guard<std::mutex> lock(mMutex);
 
@@ -584,7 +584,7 @@ class VkDecoderGlobalState::Impl {
         GFXSTREAM_DEBUG("VulkanSnapshots save (end)");
     }
 
-    void load(android::base::Stream* stream, GfxApiLogger& gfxLogger,
+    void load(gfxstream::Stream* stream, GfxApiLogger& gfxLogger,
               HealthMonitor<>* healthMonitor) {
         // assume that we already destroyed all instances
         // from FrameBuffer's onLoad method.
@@ -7924,16 +7924,17 @@ class VkDecoderGlobalState::Impl {
 
 #include "VkSubDecoder.cpp"
 
-    void on_vkQueueFlushCommandsGOOGLE(gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo*,
-                                       VkQueue queue, VkCommandBuffer boxed_commandBuffer,
-                                       VkDeviceSize dataSize, const void* pData,
-                                       const VkDecoderContext& context) {
+    void on_vkQueueFlushCommandsGOOGLE(gfxstream::base::BumpPool* pool,
+                                       VkSnapshotApiCallInfo* snapshotApiCallInfo, VkQueue queue,
+                                       VkCommandBuffer boxed_commandBuffer, VkDeviceSize dataSize,
+                                       const void* pData, const VkDecoderContext& context) {
         (void)queue;
 
         VkCommandBuffer commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
         VulkanDispatch* vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
         VulkanMemReadingStream* readStream = readstream_VkCommandBuffer(boxed_commandBuffer);
-        subDecode(readStream, vk, boxed_commandBuffer, commandBuffer, dataSize, pData, context);
+        subDecode(readStream, vk, snapshotApiCallInfo, boxed_commandBuffer, commandBuffer, dataSize,
+                  pData, context);
     }
 
     void on_vkQueueFlushCommandsFromAuxMemoryGOOGLE(gfxstream::base::BumpPool* pool,
@@ -9637,9 +9638,9 @@ const gfxstream::host::FeatureSet& VkDecoderGlobalState::getFeatures() const { r
 
 bool VkDecoderGlobalState::vkCleanupEnabled() const { return mImpl->vkCleanupEnabled(); }
 
-void VkDecoderGlobalState::save(android::base::Stream* stream) { mImpl->save(stream); }
+void VkDecoderGlobalState::save(gfxstream::Stream* stream) { mImpl->save(stream); }
 
-void VkDecoderGlobalState::load(android::base::Stream* stream, GfxApiLogger& gfxLogger,
+void VkDecoderGlobalState::load(gfxstream::Stream* stream, GfxApiLogger& gfxLogger,
                                 HealthMonitor<>* healthMonitor) {
     mImpl->load(stream, gfxLogger, healthMonitor);
 }
