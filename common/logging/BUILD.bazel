@@ -1,0 +1,16 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(
+    default_visibility = ["//:gfxstream"],
+)
+
+cc_library(
+    name = "gfxstream_common_logging",
+    srcs = [
+        "logging.cpp",
+    ],
+    hdrs = [
+        "include/gfxstream/common/logging.h",
+    ],
+    strip_include_prefix = "include",
+)

@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 inc_cereal = include_directories('cereal')
 inc_cereal_common = include_directories('cereal/common')
@@ -78,15 +78,15 @@ lib_vulkan_server = static_library(
     inc_host_include,
     inc_host_iostream,
     inc_host_library,
-    inc_host_logging,
+    inc_common_logging,
     inc_host_metrics,
+    inc_host_renderdoc,
     inc_host_snapshot,
     inc_host_tracing,
     inc_include,
     inc_renderdoc_external,
     inc_root,
     inc_stream_servers,
-    inc_utils,
     inc_vulkan_headers,
     inc_vulkan_server,
   ],
@@ -99,8 +99,8 @@ lib_vulkan_server = static_library(
     lib_host_health,
     lib_host_iostream,
     lib_host_library,
-    lib_host_logging,
-    lib_host_logging,
+    lib_common_logging,
+    lib_common_logging,
     lib_host_metrics,
     lib_host_snapshot,
     lib_host_tracing,

@@ -1,4 +1,16 @@
-add_subdirectory(logging)
+# Copyright 2025 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 add_library(
         gfxstream_backend_headers
@@ -19,15 +31,32 @@ add_subdirectory(snapshot)
 add_subdirectory(tracing)
 add_subdirectory(decoder_common)
 add_subdirectory(compressed_textures)
+add_subdirectory(renderdoc)
 
-# GL
+add_library(
+    gfxstream_backend.headers
+    INTERFACE
+    )
+target_link_libraries(
+    gfxstream_backend.headers
+    INTERFACE
+    gfxstream_features.headers
+    gfxstream_host_decoder_common
+    gfxstream_host_health
+    gfxstream_host_snapshot.headers
+    gfxstream_host_renderdoc
+    )
+target_include_directories(
+    gfxstream_backend.headers
+    INTERFACE
+    include
+    )
+
+
 add_subdirectory(gl)
-
-# Vulkan
+add_subdirectory(renderControl_dec)
 add_subdirectory(vulkan)
 
-# RenderControl decoder
-add_subdirectory(renderControl_dec)
 
 if(CONFIG_AEMU)
     add_compile_definitions(GFXSTREAM_BUILD_WITH_SNAPSHOT_SUPPORT)
@@ -70,22 +99,7 @@ else()
     set(stream-server-core-platform-sources NativeSubWindow_x11.cpp)
 endif()
 
-add_library(
-    gfxstream_backend.headers
-    INTERFACE
-    )
-target_link_libraries(
-    gfxstream_backend.headers
-    INTERFACE
-    gfxstream_features.headers
-    gfxstream_host_health
-    gfxstream_host_snapshot.headers
-    )
-target_include_directories(
-    gfxstream_backend.headers
-    INTERFACE
-    include
-    )
+
 
 
 # Compile everything as a static library first so that unit tests can call non-exported functions
@@ -111,12 +125,12 @@ target_link_libraries(
         gfxstream_host_health
         gfxstream_host_iostream
         gfxstream_host_library
-        gfxstream_host_logging
+        gfxstream_common_logging
         gfxstream_host_metrics
+        gfxstream_host_renderdoc
         gfxstream_host_snapshot.headers
         gfxstream_host_tracing
         gfxstream_openglesdispatch
-        gfxstream_utils
         gfxstream-gl-server
         gfxstream-vulkan-server
         GLES_CM_translator_static
@@ -399,6 +413,6 @@ endfunction()
 endif()
 if (WIN32)
     set(BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}")
-    configure_file(../cmake/SetWin32TestEnvironment.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/SetWin32TestEnvironment.cmake @ONLY)
+    configure_file(../toolchain/cmake/SetWin32TestEnvironment.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/SetWin32TestEnvironment.cmake @ONLY)
     set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES ${CMAKE_CURRENT_BINARY_DIR}/SetWin32TestEnvironment.cmake)
 endif()

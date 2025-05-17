@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 #===============#
 # Configuration #
@@ -94,7 +94,6 @@ inc_root = include_directories('../')
 inc_gfxstream_include = []
 # Included by all host component builds. Leave empty for future build updates.
 inc_include = include_directories()
-inc_utils = include_directories('../utils/include')
 
 if host_machine.system() == 'qnx'
   inc_gfxstream_include = [inc_qnx_headers, inc_gfxstream_include]
@@ -123,13 +122,13 @@ inc_host_include = include_directories('include')
 
 inc_gl_common = include_directories('gl/glestranslator/GLcommon/include')
 
-subdir('logging')
 subdir('metrics')
 subdir('features')
 subdir('iostream')
 subdir('health')
 subdir('library')
 subdir('tracing')
+subdir('renderdoc')
 subdir('snapshot')
 subdir('decoder_common')
 subdir('address_space')
@@ -150,13 +149,13 @@ inc_gfxstream_backend = [
   inc_host_include,
   inc_host_iostream,
   inc_host_library,
-  inc_host_logging,
+  inc_common_logging,
   inc_host_metrics,
+  inc_host_renderdoc,
   inc_host_snapshot,
   inc_host_tracing,
   inc_include,
   inc_root,
-  inc_utils,
 ]
 
 link_gfxstream_backend = [
@@ -169,7 +168,7 @@ link_gfxstream_backend = [
   lib_host_health,
   lib_host_iostream,
   lib_host_library,
-  lib_host_logging,
+  lib_common_logging,
   lib_host_metrics,
   lib_host_snapshot,
   lib_host_tracing,

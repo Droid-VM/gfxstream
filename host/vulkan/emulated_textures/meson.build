@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 files_emulated_textures = files(
   'AstcTexture.cpp',
@@ -20,14 +20,14 @@ lib_emulated_textures = static_library(
     inc_common_base,
     inc_gfxstream_include,
     inc_host_compressed_textures,
+    inc_host_decoder_common,
     inc_host_health,
     inc_host_include,
-    inc_host_logging,
+    inc_common_logging,
     inc_host_metrics,
     inc_include,
     inc_root,
     inc_stream_servers,
-    inc_utils,
     inc_vulkan_headers,
     inc_vulkan_server,
   ],
@@ -35,7 +35,7 @@ lib_emulated_textures = static_library(
     lib_common_base,
     lib_host_compressed_textures,
     lib_host_health,
-    lib_host_logging,
+    lib_common_logging,
     lib_host_metrics,
   ],
 )

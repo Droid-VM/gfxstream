@@ -1,5 +1,5 @@
 # Copyright 2025 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 inc_host_address_space = include_directories('include')
 
@@ -13,6 +13,6 @@ files_lib_host_address_space = files(
 lib_host_address_space = static_library(
   'host_address_space',
   files_lib_host_address_space,
-  include_directories: [inc_host_address_space, inc_common_base, inc_gfxstream_server, inc_host_logging],
-  link_with: [lib_common_base, lib_host_logging],
+  include_directories: [inc_host_address_space, inc_common_base, inc_gfxstream_server, inc_common_logging],
+  link_with: [lib_common_base, lib_common_logging],
 )

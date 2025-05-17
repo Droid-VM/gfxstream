@@ -44,11 +44,11 @@
 #include "common/goldfish_vk_reserved_marshaling.h"
 #include "gfxstream/host/AstcCpuDecompressor.h"
 #include "gfxstream/containers/Lookup.h"
+#include "gfxstream/host/RenderDoc.h"
 #include "gfxstream/host/Tracing.h"
-#include "gfxstream/host/logging.h"
+#include "gfxstream/common/logging.h"
 #include "gfxstream/host/address_space_operations.h"
 #include "gfxstream/host/vm_operations.h"
-#include "utils/RenderDoc.h"
 #include "vk_util.h"
 #include "vulkan/emulated_textures/AstcTexture.h"
 #include "vulkan/emulated_textures/CompressedImageInfo.h"
@@ -86,7 +86,7 @@ using gfxstream::base::MetricEventVulkanOutOfMemory;
 using gfxstream::base::Optional;
 using gfxstream::base::SharedMemory;
 using gfxstream::base::StaticLock;
-using emugl::GfxApiLogger;
+using gfxstream::host::GfxApiLogger;
 using gfxstream::ExternalObjectManager;
 using gfxstream::VulkanInfo;
 
@@ -1882,10 +1882,19 @@ class VkDecoderGlobalState::Impl {
             if (privateDataFeatures != nullptr) {
                 privateDataFeatures->privateData = VK_TRUE;
             } else {
-                // Insert into device create info chain
-                forceEnablePrivateData.pNext = const_cast<void*>(createInfoFiltered.pNext);
-                createInfoFiltered.pNext = &forceEnablePrivateData;
-                privateDataFeatures = &forceEnablePrivateData;
+                VkPhysicalDeviceVulkan13Features* vkPhysicalDeviceVulkan13Features =
+                    vk_find_struct<VkPhysicalDeviceVulkan13Features>(&createInfoFiltered);
+                if (vkPhysicalDeviceVulkan13Features == nullptr) {
+                    // Insert into device create info chain
+                    forceEnablePrivateData.pNext = const_cast<void*>(createInfoFiltered.pNext);
+                    createInfoFiltered.pNext = &forceEnablePrivateData;
+                    privateDataFeatures = &forceEnablePrivateData;
+                } else {
+                    // Attempted to add VkPhysicalDevicePrivateDataFeatures but
+                    // VkPhysicalDeviceVulkan13Features is already present which will result in
+                    // a spec violation
+                    vkPhysicalDeviceVulkan13Features->privateData = VK_TRUE;
+                }
             }
         }
 
@@ -2336,6 +2345,7 @@ class VkDecoderGlobalState::Impl {
         return vk->vkGetPhysicalDeviceSparseImageFormatProperties(
             physicalDevice, format, type, samples, usage, tiling, pPropertyCount, pProperties);
     }
+
     void on_vkGetPhysicalDeviceSparseImageFormatProperties2(
         gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo,
         VkPhysicalDevice boxed_physicalDevice,
@@ -2348,9 +2358,10 @@ class VkDecoderGlobalState::Impl {
 
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
-        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2(
-            physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2(physicalDevice, pFormatInfo,
+                                                                   pPropertyCount, pProperties);
     }
+
     void on_vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
         gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo,
         VkPhysicalDevice boxed_physicalDevice,
@@ -2363,8 +2374,76 @@ class VkDecoderGlobalState::Impl {
 
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
-        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
-            physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR(physicalDevice, pFormatInfo,
+                                                                      pPropertyCount, pProperties);
+    }
+
+    void on_vkGetDeviceImageMemoryRequirements(gfxstream::base::BumpPool* pool,
+                                               VkSnapshotApiCallInfo* snapshotInfo,
+                                               VkDevice boxed_device,
+                                               const VkDeviceImageMemoryRequirements* pInfo,
+                                               VkMemoryRequirements2* pMemoryRequirements) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto vk = dispatch_VkDevice(boxed_device);
+
+        if (vk->vkGetDeviceImageMemoryRequirements) {
+            vk->vkGetDeviceImageMemoryRequirements(device, pInfo, pMemoryRequirements);
+        } else if (vk->vkGetDeviceImageMemoryRequirementsKHR) {
+            vk->vkGetDeviceImageMemoryRequirementsKHR(device, pInfo, pMemoryRequirements);
+        } else {
+            GFXSTREAM_FATAL("%s: function implementation cannot be found!");
+        }
+
+        const VkFormat format = pInfo->pCreateInfo->format;
+        bool needDecompression = gfxstream::vk::isEtc2(format) || gfxstream::vk::isAstc(format);
+        if (!needDecompression) {
+            // No modifications needed
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mMutex);
+
+        auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+        if (!deviceInfo) {
+            GFXSTREAM_ERROR("%s: Failed to find device: %p", __func__, device);
+            return;
+        }
+
+        needDecompression = deviceInfo->needEmulatedDecompression(format);
+        if (!needDecompression) {
+            // No modifications needed
+            return;
+        }
+
+        // Create CompressedImageInfo on the fly to get requirements to use when creating the image
+        CompressedImageInfo cmpInfo =
+            CompressedImageInfo(device, *pInfo->pCreateInfo, deviceInfo->decompPipelines.get());
+        {
+            VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo);
+            VkImage tempImage;
+            VkResult createRes = vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
+            if (createRes != VK_SUCCESS) {
+                GFXSTREAM_ERROR("%s: Failed to find device: %p", __func__, device);
+                return;
+            }
+
+            cmpInfo.setOutputImage(tempImage);
+            cmpInfo.createCompressedMipmapImages(vk, decompInfo);
+        }
+
+        pMemoryRequirements->memoryRequirements = cmpInfo.getMemoryRequirements();
+        cmpInfo.destroy(vk);
+
+        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
+        if (!physicalDeviceInfo) {
+            GFXSTREAM_ERROR("Failed to find physical device info for physical device:%p",
+                            deviceInfo->physicalDevice);
+            return;
+        }
+
+        auto& physicalDeviceMemHelper = physicalDeviceInfo->memoryPropertiesHelper;
+        physicalDeviceMemHelper->transformToGuestMemoryRequirements(
+            &pMemoryRequirements->memoryRequirements);
     }
 
     void destroyDeviceWithExclusiveInfo(VkDevice device, DeviceInfo& deviceInfo,
@@ -6901,15 +6980,15 @@ class VkDecoderGlobalState::Impl {
             // finish the after-dispatch operations. vkWaitForFences is skipped, as it can deadlock.
             if (canDispatch) {
                 VkResult result =
-                    vk->vkWaitForFences(device, 1, &usedFence, VK_TRUE, /* 1 sec */ 1000000000L);
+                    vk->vkWaitForFences(device, 1, &usedFence, VK_TRUE, /* 5 sec */ 5000000000L);
                 if (result != VK_SUCCESS) {
-                    GFXSTREAM_ERROR("vkWaitForFences failed: %s [%d]", string_VkResult(result),
-                                    result);
-                    return result;
-                }
-
-                for (HandleType cb : releasedColorBuffers) {
-                    m_vkEmulation->getCallbacks().flushColorBuffer(cb);
+                    // This may cause presentation issues, but no need to return a failure
+                    GFXSTREAM_ERROR("Cannot sync colorbuffers, vkWaitForFences failed: %s [%d]",
+                                    string_VkResult(result), result);
+                } else {
+                    for (HandleType cb : releasedColorBuffers) {
+                        m_vkEmulation->getCallbacks().flushColorBuffer(cb);
+                    }
                 }
             } else {
                 GFXSTREAM_ERROR(
@@ -9364,7 +9443,7 @@ class VkDecoderGlobalState::Impl {
 
     VulkanDispatch* m_vk;
     VkEmulation* m_vkEmulation;
-    emugl::RenderDocWithMultipleVkInstances* mRenderDocWithMultipleVkInstances = nullptr;
+    gfxstream::host::RenderDocWithMultipleVkInstances* mRenderDocWithMultipleVkInstances = nullptr;
     bool mSnapshotsEnabled = false;
     bool mBatchedDescriptorSetUpdateEnabled = false;
     bool mDisableSparseBindingSupport = false;
@@ -9864,6 +9943,20 @@ void VkDecoderGlobalState::on_vkGetPhysicalDeviceSparseImageFormatProperties2KHR
         VkPhysicalDevice physicalDevice, const VkPhysicalDeviceSparseImageFormatInfo2* pFormatInfo,
         uint32_t* pPropertyCount, VkSparseImageFormatProperties2* pProperties) {
     mImpl->on_vkGetPhysicalDeviceSparseImageFormatProperties2KHR(pool, snapshotInfo, physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+}
+
+void VkDecoderGlobalState::on_vkGetDeviceImageMemoryRequirements(
+    gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo, VkDevice device,
+    const VkDeviceImageMemoryRequirements* pInfo, VkMemoryRequirements2* pMemoryRequirements) {
+    mImpl->on_vkGetDeviceImageMemoryRequirements(pool, snapshotInfo, device, pInfo,
+                                                 pMemoryRequirements);
+}
+
+void VkDecoderGlobalState::on_vkGetDeviceImageMemoryRequirementsKHR(
+    gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo, VkDevice device,
+    const VkDeviceImageMemoryRequirements* pInfo, VkMemoryRequirements2* pMemoryRequirements) {
+    mImpl->on_vkGetDeviceImageMemoryRequirements(pool, snapshotInfo, device, pInfo,
+                                                 pMemoryRequirements);
 }
 
 void VkDecoderGlobalState::on_vkDestroyDevice(gfxstream::base::BumpPool* pool,

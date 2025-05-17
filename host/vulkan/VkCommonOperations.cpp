@@ -36,7 +36,7 @@
 #include "gfxstream/synchronization/Lock.h"
 #include "gfxstream/system/System.h"
 #include "common/goldfish_vk_dispatch.h"
-#include "gfxstream/host/logging.h"
+#include "gfxstream/common/logging.h"
 #include "gfxstream/host/vm_operations.h"
 
 #ifdef _WIN32
@@ -1837,7 +1837,7 @@ const gfxstream::host::BackendCallbacks& VkEmulation::getCallbacks() const { ret
 
 AstcEmulationMode VkEmulation::getAstcLdrEmulationMode() const { return mAstcLdrEmulationMode; }
 
-emugl::RenderDocWithMultipleVkInstances* VkEmulation::getRenderDoc() {
+gfxstream::host::RenderDocWithMultipleVkInstances* VkEmulation::getRenderDoc() {
     return mGuestRenderDoc.get();
 }
 

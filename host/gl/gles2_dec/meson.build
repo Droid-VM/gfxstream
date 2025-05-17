@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 files_lib_gles2_dec = files(
   'gles2_dec.cpp',
@@ -20,7 +20,7 @@ lib_gles2_dec = static_library(
     inc_host_backend,
     inc_host_iostream,
     inc_host_library,
-    inc_host_logging,
+    inc_common_logging,
     inc_include,
   ],
   link_with: [
@@ -28,6 +28,6 @@ lib_gles2_dec = static_library(
     lib_gl_snapshot,
     lib_host_backend,
     lib_host_iostream,
-    lib_host_logging,
+    lib_common_logging,
   ],
 )

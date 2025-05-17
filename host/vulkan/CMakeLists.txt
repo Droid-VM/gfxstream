@@ -1,3 +1,17 @@
+# Copyright 2025 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 add_subdirectory(cereal)
 add_subdirectory(emulated_textures)
 
@@ -43,16 +57,16 @@ target_link_libraries(gfxstream-vulkan-server PUBLIC
         gfxstream_host_decoder_common
         emulated_textures
         gfxstream_common_base
+        gfxstream_common_logging
         gfxstream_features
         gfxstream_host_backend
         gfxstream_host_health
         gfxstream_host_iostream
         gfxstream_host_library
-        gfxstream_host_logging
+        gfxstream_host_renderdoc
         gfxstream_host_snapshot.headers
         gfxstream_host_tracing
         gfxstream_openglesdispatch.headers
-        gfxstream_utils
         gfxstream_vulkan_headers
         gfxstream_host_compressed_textures
         OpenglRender_vulkan_cereal
@@ -94,5 +108,4 @@ target_include_directories(gfxstream-vulkan-server
                            ${GFXSTREAM_REPO_ROOT}/host/tracing
                            ${GFXSTREAM_REPO_ROOT}/host/vulkan
                            ${GFXSTREAM_REPO_ROOT}/host/vulkan/cereal/common
-                           ${GFXSTREAM_REPO_ROOT}/host/gfxstream_host_decoder_common
                            ${GFXSTREAM_REPO_ROOT}/third_party/glm/include)

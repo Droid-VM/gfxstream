@@ -34,7 +34,7 @@
 #include "gfxstream/host/ChecksumCalculatorThreadInfo.h"
 #include "gfxstream/HealthMonitor.h"
 #include "gfxstream/Metrics.h"
-#include "gfxstream/host/logging.h"
+#include "gfxstream/common/logging.h"
 #include "gfxstream/host/stream_utils.h"
 #include "gfxstream/synchronization/Lock.h"
 #include "gfxstream/synchronization/MessageChannel.h"
@@ -45,7 +45,7 @@ namespace gfxstream {
 
 using gfxstream::base::AutoLock;
 using gfxstream::base::EventHangMetadata;
-using emugl::GfxApiLogger;
+using gfxstream::host::GfxApiLogger;
 using vk::VkDecoderContext;
 
 struct RenderThread::SnapshotObjects {

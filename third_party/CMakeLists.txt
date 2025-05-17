@@ -1,3 +1,17 @@
+# Copyright 2025 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Configure and add `astc-encoder`, if needed
 if (ASTC_CPU_DECODING)
     set(DECOMPRESSOR ON)   # Disable compression code
@@ -44,21 +58,6 @@ if(NOT TARGET gtest_main AND ENABLE_VKCEREAL_TESTS)
         add_library(gtest_main ALIAS PkgConfig::gtest_main)
         add_library(gmock ALIAS PkgConfig::gmock)
         add_library(gmock_main ALIAS PkgConfig::gmock_main)
-    endif()
-endif()
-
-if(NOT TARGET gfxstream_vulkan_headers)
-    if(DEPENDENCY_RESOLUTION STREQUAL "AOSP")
-        set(GFXSTREAM_PROTOCOLS_PATH ${PROJECT_SOURCE_DIR}/../../../external/gfxstream-protocols)
-        if(EXISTS ${GFXSTREAM_PROTOCOLS_PATH})
-            add_subdirectory(${GFXSTREAM_PROTOCOLS_PATH} gfxstream-protocols)
-        endif()
-    elseif(DEPENDENCY_RESOLUTION STREQUAL "SYSTEM")
-        find_package(Vulkan 1.2.198 REQUIRED)
-        add_library(gfxstream_vulkan_headers INTERFACE)
-        target_include_directories(gfxstream_vulkan_headers INTERFACE ${Vulkan_INCLUDE_DIRS})
-        target_compile_definitions(gfxstream_vulkan_headers
-                                   INTERFACE VK_GFXSTREAM_STRUCTURE_TYPE_EXT)
     endif()
 endif()
 
@@ -133,27 +132,6 @@ if(GFXSTREAM_ENABLE_HOST_TRACING)
     endif()
 endif()
 
-if(NOT TARGET libdrm_headers)
-    if(DEPENDENCY_RESOLUTION STREQUAL "AOSP")
-        set(LIBDRM_PATH ${PROJECT_SOURCE_DIR}/../../../external/libdrm)
-        if(NOT EXISTS ${LIBDRM_PATH})
-            message(FATAL_ERROR "LIBDRM is not found.")
-        endif()
-        add_library(libdrm_headers INTERFACE)
-        target_include_directories(libdrm_headers INTERFACE ${LIBDRM_PATH}/include/drm)
-    elseif(DEPENDENCY_RESOLUTION STREQUAL "SYSTEM")
-        find_package(PkgConfig REQUIRED)
-        pkg_search_module(drm REQUIRED IMPORTED_TARGET GLOBAL libdrm)
-        add_library(libdrm_headers ALIAS PkgConfig::drm)
-    endif()
-endif()
-
-if(NOT TARGET gfxstream_vulkan_headers)
-    message(FATAL_ERROR "The dependency gfxstream_vulkan_headers not found")
-endif()
 if(NOT TARGET flatbuffers)
     message(FATAL_ERROR "The dependency flatbuffers not found.")
-endif()
-if(NOT TARGET libdrm_headers)
-    message(FATAL_ERROR "The dependency libdrm_headers not found.")
 endif()

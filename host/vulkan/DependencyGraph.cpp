@@ -32,6 +32,14 @@ namespace vk {
 
 #endif
 
+void DependencyGraph::removeGrandChildren(const NodeId id) {
+    auto* nd = getDepNode(id);
+    if (!nd) return;
+    for (auto child : nd->childNodeIds) {
+        removeDescendantsOfHandle(child);
+    }
+}
+
 void DependencyGraph::removeDescendantsOfHandle(const NodeId id) {
     auto* nd = getDepNode(id);
     if (nd) {
@@ -176,6 +184,7 @@ void DependencyGraph::addDep(NodeId child_id, NodeId parent_id) {
         case Tag_VkImage:
         case Tag_VkBuffer:
         case Tag_VkBufferView:
+        case Tag_VkPipeline:
         case Tag_VkSampler:
         case Tag_VkDescriptorSet:
         case Tag_VkDescriptorPool:

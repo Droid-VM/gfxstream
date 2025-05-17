@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #pragma once
 
 #include <atomic>
@@ -24,9 +25,9 @@
 #include "VulkanHandleMapping.h"
 #include "VulkanHandles.h"
 #include "gfxstream/HealthMonitor.h"
+#include "gfxstream/host/GfxApiLogger.h"
 #include "render-utils/stream.h"
 #include "common/goldfish_vk_marshaling.h"
-#include "utils/GfxApiLogger.h"
 
 namespace gfxstream {
 namespace vk {
@@ -59,6 +60,7 @@ class VkReconstruction {
     void addHandles(const uint64_t* toAdd, uint32_t count);
     void removeHandles(const uint64_t* toRemove, uint32_t count, bool recursive = true);
 
+    void removeGrandChildren(const uint64_t handle);
     void removeDescendantsOfHandle(const uint64_t handle);
 
     void forEachHandleAddApi(const uint64_t* toProcess, uint32_t count,

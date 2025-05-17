@@ -33,7 +33,7 @@
 #include "gfxstream/synchronization/Lock.h"
 #include "gfxstream/Metrics.h"
 #include "gfxstream/threads/Thread.h"
-#include "gfxstream/host/logging.h"
+#include "gfxstream/common/logging.h"
 
 using gfxstream::base::EventHangMetadata;
 using gfxstream::base::getCurrentThreadId;
@@ -60,7 +60,6 @@ static std::chrono::nanoseconds kTimeEpsilon(1);
 // with client defined tasks. At some pre-defined interval, it will periodically consume
 // all logged events to assess whether the system is hanging on any task. Via the
 // MetricsLogger, it will log hang and unhang events when it detects tasks hanging/resuming.
-// Design doc: http://go/gfxstream-health-monitor
 template <class Clock = steady_clock>
 class HealthMonitor : public gfxstream::base::Thread {
    public:

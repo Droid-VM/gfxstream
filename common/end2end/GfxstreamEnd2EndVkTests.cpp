@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <log/log.h>
-
 #include <atomic>
 #include <thread>
 
@@ -1869,7 +1867,7 @@ TEST_P(GfxstreamEnd2EndVkTest, AcquireImageAndroidWithFenceAndSemaphore) {
     DoAcquireImageAndroidWithSync(/*withFence=*/true, /*withSemaphore=*/true);
 }
 
-VKAPI_ATTR void VKAPI_CALL MemoryReportCallback(const VkDeviceMemoryReportCallbackDataEXT*, void*) {
+VKAPI_ATTR void VKAPI_CALL MemoryReportCallback(const vkhpp::DeviceMemoryReportCallbackDataEXT*, void*) {
     // Unused
 }
 

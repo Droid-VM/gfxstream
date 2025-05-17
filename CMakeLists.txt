@@ -1,3 +1,17 @@
+# Copyright 2025 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 cmake_policy(SET CMP0048 NEW)
 # Set this policy to allow gfxstream to modify the passed in targets like
 # ${GFXSTREAM_HOST_COMMON_LIB}.
@@ -91,7 +105,6 @@ elseif(QNX)
     # TODO(jsimonot): fix build error
     # add_compile_definitions(VK_USE_PLATFORM_SCREEN_QNX)
 elseif(UNIX)
-    # TODO(kaiyili, b/179477624): Add Linux specific Vulkan platform macro definitions
     # Use X11 version of EGL platform specific definitions.
     add_compile_definitions(USE_X11)
 elseif(WIN32)
@@ -148,22 +161,13 @@ endif()
 
 set(EXTRA_SUBDIR_TEST_INCLUDE_FILES)
 
-add_subdirectory(common)
-
-# Third party dependencies
 add_subdirectory(third_party)
-
-# Backends######################################################################
-
-add_subdirectory(utils)
+add_subdirectory(common)
+add_subdirectory(codegen)
 add_subdirectory(host)
 
-# Protocols and associated code generators######################################
-
-add_subdirectory(codegen)
-
 if (ENABLE_VKCEREAL_TESTS)
-    list(APPEND EXTRA_SUBDIR_TEST_INCLUDE_FILES ${CMAKE_SOURCE_DIR}/cmake/test_properties.cmake)
+    list(APPEND EXTRA_SUBDIR_TEST_INCLUDE_FILES ${CMAKE_SOURCE_DIR}/toolchain/cmake/test_properties.cmake)
 endif()
 
-include(cmake/SetSubdirectorProperties.cmake)
+include(toolchain/cmake/SetSubdirectorProperties.cmake)

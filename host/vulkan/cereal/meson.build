@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 files_lib_cereal = files(
   'common/goldfish_vk_extension_structs.cpp',
@@ -29,13 +29,13 @@ lib_vulkan_cereal = static_library(
     inc_common_base,
     inc_gfxstream_server,
     inc_host_backend,
+    inc_host_decoder_common,
     inc_host_features,
     inc_host_health,
-    inc_host_logging,
+    inc_common_logging,
     inc_host_metrics,
     inc_include,
     inc_stream_servers,
-    inc_utils,
     inc_vulkan_headers,
     inc_vulkan_server,
   ],
@@ -44,7 +44,7 @@ lib_vulkan_cereal = static_library(
     lib_host_backend,
     lib_host_features,
     lib_host_health,
-    lib_host_logging,
+    lib_common_logging,
     lib_host_metrics,
   ],
 )
