@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 
 inc_gl_server = include_directories('.')
 inc_gl_snapshot = include_directories('glsnapshot')
@@ -65,6 +65,7 @@ lib_gl_server = static_library(
     inc_host_renderdoc,
     inc_host_snapshot,
     inc_include,
+    inc_opengl_headers,
     inc_renderdoc_external,
     inc_stream_servers,
     inc_vulkan_headers,

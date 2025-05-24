@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 
 files_lib_gles2_dec = files(
   'gles2_dec.cpp',
@@ -22,6 +22,7 @@ lib_gles2_dec = static_library(
     inc_host_library,
     inc_common_logging,
     inc_include,
+    inc_opengl_headers,
   ],
   link_with: [
     lib_common_base,

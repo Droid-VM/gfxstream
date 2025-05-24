@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 
 files_lib_glesv2_translator = files(
   'ANGLEShaderParser.cpp',
@@ -28,6 +28,7 @@ lib_glesv2_translator = static_library(
     inc_common_logging,
     inc_host_snapshot,
     inc_include,
+    inc_opengl_headers,
     inc_stream_servers,
   ],
   link_with: [
