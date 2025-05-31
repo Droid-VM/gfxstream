@@ -15,6 +15,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(
+    default_applicable_licenses = ["//:gfxstream_license"],
     default_visibility = ["//:gfxstream"],
 )
 
@@ -53,5 +54,6 @@ cc_library(
     strip_include_prefix = "include",
     deps = [
         "//common/logging:gfxstream_common_logging",
+        "//third_party/opengl:gfxstream_egl_headers",
     ],
 )

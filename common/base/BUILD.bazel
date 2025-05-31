@@ -1,15 +1,19 @@
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test", "objc_library")
 
 package(
+    default_applicable_licenses = ["//:gfxstream_license"],
     default_visibility = ["//:gfxstream"],
 )
 
 cc_library(
     name = "gfxstream_common_base_headers",
-    hdrs = glob([
-        "include/**/*.h",
-        "include/**/*.hpp",
-    ]),
+    hdrs = glob(
+        [
+            "include/**/*.h",
+            "include/**/*.hpp",
+        ],
+        exclude = ["include/gfxstream/testing/**"],
+    ),
     defines = select({
         "@platforms//os:windows": [
             "WIN32_LEAN_AND_MEAN",
@@ -17,9 +21,7 @@ cc_library(
         "//conditions:default": [],
     }),
     strip_include_prefix = "include",
-    deps = [
-        "@com_google_absl//absl/strings:str_format",
-    ] + select({
+    deps = select({
         "@platforms//os:windows": [
             "//common/base/windows:gfxstream_common_base_windows_compat_hdrs",
         ],
@@ -33,7 +35,7 @@ objc_library(
         "system-native-mac.mm",
     ],
     sdk_frameworks = [
-        "IOkit",
+        "IOKit",
         "AppKit",
     ],
     target_compatible_with = [
@@ -72,12 +74,20 @@ cc_library(
             "Thread_pthread.cpp",
         ],
     }),
+    hdrs = glob(
+        [
+            "include/**/*.h",
+            "include/**/*.hpp",
+        ],
+        exclude = ["include/gfxstream/testing/**"],
+    ),
     defines = select({
         "@platforms//os:windows": [
             "WIN32_LEAN_AND_MEAN",
         ],
         "//conditions:default": [],
     }),
+    includes = ["include"],
     linkopts = select({
         "@platforms//os:linux": [
             "-ldl",
@@ -93,6 +103,7 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+    strip_include_prefix = "include",
     deps = [
         ":gfxstream_common_base_headers",
     ] + select({
@@ -104,6 +115,22 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+cc_library(
+    name = "gfxstream_common_base_testing",
+    testonly = True,
+    hdrs = glob([
+        "include/gfxstream/testing/*.h",
+    ]),
+    includes = [
+        "include",
+    ],
+    deps = [
+        ":gfxstream_common_base",
+        ":gfxstream_common_base_headers",
+        "@com_google_googletest//:gtest",
+    ],
 )
 
 cc_test(
@@ -128,10 +155,9 @@ cc_test(
         "-undefined error",
     ],
     deps = [
-        "gfxstream_common_base",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
+        ":gfxstream_common_base",
+        ":gfxstream_common_base_testing",
+        "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
 )

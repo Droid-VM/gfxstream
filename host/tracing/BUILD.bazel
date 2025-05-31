@@ -1,12 +1,15 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(
+    default_applicable_licenses = ["//:gfxstream_license"],
     default_visibility = ["//:gfxstream"],
 )
 
 cc_library(
     name = "gfxstream_host_tracing",
-    srcs = ["Tracing.cpp"] + glob(["include/**/*.h"]),
+    srcs = ["Tracing.cpp"],
+    hdrs = glob(["include/**/*.h"]),
     copts = ["-fno-exceptions"],
     includes = ["include"],
+    strip_include_prefix = "include",
 )

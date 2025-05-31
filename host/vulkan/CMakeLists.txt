@@ -44,11 +44,12 @@ add_library(gfxstream-vulkan-server
             VkEmulatedPhysicalDeviceQueue.cpp
             VkFormatUtils.cpp
             VkReconstruction.cpp
+            VkUtils.cpp
             VulkanBoxedHandles.cpp
             VulkanDispatch.cpp
             VulkanHandleMapping.cpp
             VulkanStream.cpp
-            vk_util.cpp)
+            )
 set_source_files_properties(VkDecoder.cpp PROPERTIES COMPILE_FLAGS -Wno-unused-variable)
 set_source_files_properties(VkSubDecoder.cpp PROPERTIES COMPILE_FLAGS -Wno-unused-variable)
 set_source_files_properties(VkDecoderSnapshot.cpp PROPERTIES COMPILE_FLAGS -Wno-unused-variable)
@@ -105,6 +106,7 @@ target_include_directories(gfxstream-vulkan-server
                            PRIVATE
                            ${GFXSTREAM_REPO_ROOT}
                            ${GFXSTREAM_REPO_ROOT}/host
+                           ${GFXSTREAM_REPO_ROOT}/host/gl
                            ${GFXSTREAM_REPO_ROOT}/host/tracing
                            ${GFXSTREAM_REPO_ROOT}/host/vulkan
                            ${GFXSTREAM_REPO_ROOT}/host/vulkan/cereal/common

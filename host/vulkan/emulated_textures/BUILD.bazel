@@ -1,6 +1,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(
+    default_applicable_licenses = ["//:gfxstream_license"],
     default_visibility = ["//:gfxstream"],
 )
 
@@ -10,11 +11,13 @@ cc_library(
         "AstcTexture.cpp",
         "CompressedImageInfo.cpp",
         "GpuDecompressionPipeline.cpp",
+        "shaders/DecompressionShaders.h",
     ],
-    hdrs = glob([
-        "**/*.h",
-        "**/*.inl",
-    ]),
+    hdrs = [
+        "AstcTexture.h",
+        "CompressedImageInfo.h",
+        "GpuDecompressionPipeline.h",
+    ],
     defines = [
         "VK_GFXSTREAM_STRUCTURE_TYPE_EXT",
         "VK_GOOGLE_gfxstream",
@@ -29,13 +32,17 @@ cc_library(
         "@platforms//os:linux": [],
         "//conditions:default": [],
     }),
+    textual_hdrs = glob([
+        "**/*.inl",
+    ]),
     visibility = ["//visibility:public"],
     deps = [
+        "//common/base:gfxstream_common_base",
         "//common/logging:gfxstream_common_logging",
         "//host:gfxstream_host_headers",
         "//host/compressed_textures:gfxstream_host_compressed_textures",
         "//host/health:gfxstream_host_health",
-        "//host/vulkan:gfxstream_vulkan_headers",
+        "//host/vulkan:gfxstream_vulkan_server_headers",
         "//host/vulkan/cereal:gfxstream_vulkan_cereal",
         "//third_party/vulkan:gfxstream_vulkan_headers",
     ],

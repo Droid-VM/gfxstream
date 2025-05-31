@@ -1,6 +1,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(
+    default_applicable_licenses = ["//:gfxstream_license"],
     default_visibility = ["//:gfxstream"],
 )
 
@@ -10,6 +11,7 @@ cc_library(
     copts = ["-fno-exceptions"],
     includes = ["include"],
     deps = [
+        "//common/logging:gfxstream_common_logging",
         "//host:gfxstream_backend_headers",
     ],
 )

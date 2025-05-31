@@ -1,6 +1,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_shared_library")
 
 package(
+    default_applicable_licenses = ["//:gfxstream_license"],
     default_visibility = ["//:gfxstream"],
 )
 
@@ -19,9 +20,12 @@ cc_library(
         "-Wl,-rpath,'$$ORIGIN'",
     ],
     deps = [
+        "//common/logging:gfxstream_common_logging",
         "//guest/GLESv1_enc:gfxstream_guest_glesv1_entries",
+        "//guest/GLESv1_enc:gfxstream_guest_glesv1encoder",
         "//guest/OpenglSystemCommon:gfxstream_guest_openglsystemcommon",
         "//guest/egl:gfxstream_guest_egl_headers",
+        "//third_party/opengl:gfxstream_opengl_headers",
     ],
 )
 
