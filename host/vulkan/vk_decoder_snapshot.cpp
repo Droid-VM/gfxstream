@@ -41,6 +41,7 @@
 #include "vulkan_handle_mapping.h"
 
 namespace gfxstream {
+namespace host {
 namespace vk {
 
 class VkDecoderSnapshot::Impl {
@@ -6906,4 +6907,5 @@ void VkDecoderSnapshot::vkTraceAsyncGOOGLE(gfxstream::base::BumpPool* pool,
 #endif
 
 }  // namespace vk
+}  // namespace host
 }  // namespace gfxstream
