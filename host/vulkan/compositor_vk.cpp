@@ -186,21 +186,13 @@ CompositorVk::~CompositorVk() {
         gfxstream::base::AutoLock lock(*m_vkQueueLock);
         VK_CHECK(vk_util::waitForVkQueueIdleWithRetry(m_vk, m_vkQueue));
     }
-    if (m_defaultImage.m_vkImageView != VK_NULL_HANDLE) {
-        m_vk.vkDestroyImageView(m_vkDevice, m_defaultImage.m_vkImageView, nullptr);
-    }
-    if (m_defaultImage.m_vkImage != VK_NULL_HANDLE) {
-        m_vk.vkDestroyImage(m_vkDevice, m_defaultImage.m_vkImage, nullptr);
-    }
-    if (m_defaultImage.m_vkImageMemory != VK_NULL_HANDLE) {
-        m_vk.vkFreeMemory(m_vkDevice, m_defaultImage.m_vkImageMemory, nullptr);
-    }
+    destroyImage(m_defaultImage);
+    destroyImage(m_screenMaskImage);
+    destroyUniformBufferStorage(m_uniformStorage);
+    destroyUniformBufferStorage(m_uniformStorageOnDemand);
+
     m_vk.vkDestroyDescriptorPool(m_vkDevice, m_vkDescriptorPool, nullptr);
-    if (m_uniformStorage.m_vkDeviceMemory != VK_NULL_HANDLE) {
-        m_vk.vkUnmapMemory(m_vkDevice, m_uniformStorage.m_vkDeviceMemory);
-    }
-    m_vk.vkDestroyBuffer(m_vkDevice, m_uniformStorage.m_vkBuffer, nullptr);
-    m_vk.vkFreeMemory(m_vkDevice, m_uniformStorage.m_vkDeviceMemory, nullptr);
+    m_vk.vkDestroyDescriptorPool(m_vkDevice, m_vkDescriptorPoolOnDemand, nullptr);
     m_vk.vkFreeMemory(m_vkDevice, m_vertexVkDeviceMemory, nullptr);
     m_vk.vkDestroyBuffer(m_vkDevice, m_vertexVkBuffer, nullptr);
     m_vk.vkFreeMemory(m_vkDevice, m_indexVkDeviceMemory, nullptr);
@@ -218,6 +210,9 @@ CompositorVk::~CompositorVk() {
     m_vk.vkDestroySampler(m_vkDevice, m_defaultSampler, nullptr);
     m_vk.vkDestroyCommandPool(m_vkDevice, m_vkCommandPool, nullptr);
     for (PerFrameResources& frameResources : m_frameResources) {
+        m_vk.vkDestroyFence(m_vkDevice, frameResources.m_vkFence, nullptr);
+    }
+    for (PerFrameResources& frameResources : m_frameResourcesOnDemand) {
         m_vk.vkDestroyFence(m_vkDevice, frameResources.m_vkFence, nullptr);
     }
 }
@@ -490,13 +485,19 @@ void CompositorVk::setUpDescriptorSets() {
     VK_CHECK(
         m_vk.vkCreateDescriptorPool(m_vkDevice, &descriptorPoolCi, nullptr, &m_vkDescriptorPool));
 
-    VkDeviceSize uniformBufferOffset = 0;
-    auto allocateFrameDescriptorSetsForLayout = [&](VkDescriptorSetLayout layout) {
+    //TODO(b/389646068): Refactor on demand rendering and avoid using a separate descriptor pool
+    VK_CHECK(
+        m_vk.vkCreateDescriptorPool(m_vkDevice, &descriptorPoolCi, nullptr, &m_vkDescriptorPoolOnDemand));
+
+    auto allocateFrameDescriptorSetsForLayout = [&](VkDescriptorPool pool,
+                                                             VkDescriptorSetLayout layout,
+                                                             UniformBufferStorage& uniformStorage,
+                                                             VkDeviceSize& bufferOffset) {
         const std::vector<VkDescriptorSetLayout> frameDescriptorSetLayouts(descriptorSetsPerFrame,
                                                                            layout);
         const VkDescriptorSetAllocateInfo frameDescriptorSetAllocInfo = {
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = m_vkDescriptorPool,
+            .descriptorPool = pool,
             .descriptorSetCount = descriptorSetsPerFrame,
             .pSetLayouts = frameDescriptorSetLayouts.data(),
         };
@@ -506,37 +507,55 @@ void CompositorVk::setUpDescriptorSets() {
         VK_CHECK(m_vk.vkAllocateDescriptorSets(m_vkDevice, &frameDescriptorSetAllocInfo,
                                                frameDescriptorSets.data()));
 
-        // TODO(b/389646068): combine descriptor updates
+        std::vector<VkDescriptorBufferInfo> bufferInfos;
+        std::vector<VkWriteDescriptorSet> descriptorSetWrites;
+        bufferInfos.resize(descriptorSetsPerFrame);
+        descriptorSetWrites.resize(descriptorSetsPerFrame);
         for (uint32_t layerIndex = 0; layerIndex < descriptorSetsPerFrame; ++layerIndex) {
-            const VkDescriptorBufferInfo bufferInfo = {
-                .buffer = m_uniformStorage.m_vkBuffer,
-                .offset = uniformBufferOffset,
+            bufferInfos[layerIndex] = {
+                .buffer = uniformStorage.m_vkBuffer,
+                .offset = bufferOffset,
                 .range = sizeof(UniformBufferBinding),
             };
-            const VkWriteDescriptorSet descriptorSetWrite = {
+            descriptorSetWrites[layerIndex] = {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet = frameDescriptorSets[layerIndex],
                 .dstBinding = 1,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
                 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .pBufferInfo = &bufferInfo,
+                .pBufferInfo = &bufferInfos[layerIndex],
             };
-            m_vk.vkUpdateDescriptorSets(m_vkDevice, 1, &descriptorSetWrite, 0, nullptr);
-
-            uniformBufferOffset += m_uniformStorage.m_stride;
+            bufferOffset += uniformStorage.m_stride;
         }
+
+        m_vk.vkUpdateDescriptorSets(m_vkDevice, descriptorSetsPerFrame, descriptorSetWrites.data(), 0, nullptr);
 
         return frameDescriptorSets;
     };
 
+    VkDeviceSize uniformBufferOffset = 0;
     for (uint32_t frameIndex = 0; frameIndex < m_maxFramesInFlight; ++frameIndex) {
         PerFrameResources& frameResources =
             *const_cast<PerFrameResources*>(&m_frameResources[frameIndex]);
 
         for (const auto& [format, res] : m_perSamplerRes) {
-            frameResources.m_layerDescriptorSets[format] =
-                allocateFrameDescriptorSetsForLayout(res.m_vkDescriptorSetLayout);
+            frameResources.m_layerDescriptorSets[format] = allocateFrameDescriptorSetsForLayout(
+                m_vkDescriptorPool, res.m_vkDescriptorSetLayout, m_uniformStorage,
+                uniformBufferOffset);
+        }
+    }
+
+    VkDeviceSize uniformBufferOffsetOnDemand = 0;
+    for (uint32_t frameIndex = 0; frameIndex < m_maxFramesInFlight; ++frameIndex) {
+        PerFrameResources& frameResourcesOnDemand =
+            *const_cast<PerFrameResources*>(&m_frameResourcesOnDemand[frameIndex]);
+
+        for (const auto& [format, res] : m_perSamplerRes) {
+            frameResourcesOnDemand.m_layerDescriptorSets[format] =
+                allocateFrameDescriptorSetsForLayout(
+                    m_vkDescriptorPoolOnDemand, res.m_vkDescriptorSetLayout,
+                    m_uniformStorageOnDemand, uniformBufferOffsetOnDemand);
         }
     }
 }
@@ -567,9 +586,25 @@ void CompositorVk::setUpFences() {
 
         frameResources.m_vkFence = fence;
     }
+
+    for (uint32_t frameIndex = 0; frameIndex < m_maxFramesInFlight; ++frameIndex) {
+        PerFrameResources& frameResourcesOnDemand = m_frameResourcesOnDemand[frameIndex];
+
+        const VkFenceCreateInfo fenceCi = {
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        };
+
+        VkFence fence;
+        VK_CHECK(m_vk.vkCreateFence(m_vkDevice, &fenceCi, nullptr, &fence));
+
+        frameResourcesOnDemand.m_vkFence = fence;
+    }
 }
 
-void CompositorVk::setUpDefaultImage() {
+CompositorVkBase::Image CompositorVk::createImage(uint32_t width, uint32_t height,
+                                                  const uint8_t* rgbaData,
+                                                  const std::string& debugName) {
+    GFXSTREAM_VERBOSE("%s: %s with size %d x %d", __func__, debugName.c_str(), width, height);
     const VkImageCreateInfo imageCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .pNext = nullptr,
@@ -578,8 +613,8 @@ void CompositorVk::setUpDefaultImage() {
         .format = VK_FORMAT_R8G8B8A8_UNORM,
         .extent =
             {
-                .width = 2,
-                .height = 2,
+                .width = width,
+                .height = height,
                 .depth = 1,
             },
         .mipLevels = 1,
@@ -643,16 +678,10 @@ void CompositorVk::setUpDefaultImage() {
     VkImageView imageView = VK_NULL_HANDLE;
     VK_CHECK(m_vk.vkCreateImageView(m_vkDevice, &imageViewCreateInfo, nullptr, &imageView));
 
-    const std::vector<uint8_t> pixels = {
-        0xFF, 0x00, 0xFF, 0xFF,  //
-        0xFF, 0x00, 0xFF, 0xFF,  //
-        0xFF, 0x00, 0xFF, 0xFF,  //
-        0xFF, 0x00, 0xFF, 0xFF,  //
-    };
     VkBuffer stagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory stagingBufferMemory = VK_NULL_HANDLE;
     std::tie(stagingBuffer, stagingBufferMemory) =
-        createStagingBufferWithData(pixels.data(), pixels.size());
+        createStagingBufferWithData(rgbaData, width * height * 4);
 
     runSingleTimeCommands(m_vkQueue, m_vkQueueLock, [&, this](const VkCommandBuffer& cmdBuff) {
         const VkImageMemoryBarrier toTransferDstImageBarrier = {
@@ -702,8 +731,8 @@ void CompositorVk::setUpDefaultImage() {
                 },
             .imageExtent =
                 {
-                    .width = 2,
-                    .height = 2,
+                    .width = width,
+                    .height = height,
                     .depth = 1,
                 },
         };
@@ -743,9 +772,37 @@ void CompositorVk::setUpDefaultImage() {
     m_vk.vkDestroyBuffer(m_vkDevice, stagingBuffer, nullptr);
     m_vk.vkFreeMemory(m_vkDevice, stagingBufferMemory, nullptr);
 
-    m_defaultImage.m_vkImage = image;
-    m_defaultImage.m_vkImageView = imageView;
-    m_defaultImage.m_vkImageMemory = imageMemory;
+    m_debugUtilsHelper.addDebugLabel(image, "CompositorVk::image %s", debugName.c_str());
+    m_debugUtilsHelper.addDebugLabel(imageView, "CompositorVk::imageView %s", debugName.c_str());
+    m_debugUtilsHelper.addDebugLabel(imageMemory, "CompositorVk::imageMemory %s",
+                                     debugName.c_str());
+
+    // Encapsulate the created vulkan objects into an Image instance
+    Image img;
+    img.m_vkImage = image;
+    img.m_vkImageView = imageView;
+    img.m_vkImageMemory = imageMemory;
+    return img;
+}
+
+void CompositorVk::setUpDefaultImage() {
+    destroyImage(m_defaultImage);
+
+    const std::array<uint8_t, 16> pixels = {
+        0xFF, 0x00, 0xFF, 0xFF,  //
+        0xFF, 0x00, 0xFF, 0xFF,  //
+        0xFF, 0x00, 0xFF, 0xFF,  //
+        0xFF, 0x00, 0xFF, 0xFF,  //
+    };
+    m_defaultImage = createImage(2, 2, pixels.data(), "defaultImage");
+}
+
+void CompositorVk::setUpScreenMaskImage(uint32_t width, uint32_t height, const uint8_t* rgbaData) {
+    gfxstream::base::AutoLock lock(mMaskLock);
+    destroyImage(m_screenMaskImage);
+    if (rgbaData) {
+        m_screenMaskImage = createImage(width, height, rgbaData, "screenMask");
+    }
 }
 
 void CompositorVk::setUpFrameResourceFutures() {
@@ -757,19 +814,48 @@ void CompositorVk::setUpFrameResourceFutures() {
 
         m_availableFrameResources.push_back(std::move(availableFrameResourceFuture));
     }
+    for (uint32_t frameIndex = 0; frameIndex < m_maxFramesInFlight; ++frameIndex) {
+        std::shared_future<PerFrameResources*> availableFrameResourceFuture =
+            std::async(std::launch::deferred, [this, frameIndex] {
+                return &m_frameResourcesOnDemand[frameIndex];
+            }).share();
+        m_availableFrameResourcesOnDemand.push_back(std::move(availableFrameResourceFuture));
+    }
+}
+
+void CompositorVk::destroyImage(Image& img) {
+    if (img.m_vkImageView != VK_NULL_HANDLE) {
+        m_vk.vkDestroyImageView(m_vkDevice, img.m_vkImageView, nullptr);
+        img.m_vkImageView = VK_NULL_HANDLE;
+    }
+    if (img.m_vkImage != VK_NULL_HANDLE) {
+        m_vk.vkDestroyImage(m_vkDevice, img.m_vkImage, nullptr);
+        img.m_vkImage = VK_NULL_HANDLE;
+    }
+    if (img.m_vkImageMemory != VK_NULL_HANDLE) {
+        m_vk.vkFreeMemory(m_vkDevice, img.m_vkImageMemory, nullptr);
+        img.m_vkImageMemory = VK_NULL_HANDLE;
+    }
 }
 
 void CompositorVk::setUpUniformBuffers() {
+    setUpUniformBuffersImpl(m_frameResources, m_uniformStorage);
+    setUpUniformBuffersImpl(m_frameResourcesOnDemand, m_uniformStorageOnDemand);
+}
+
+void CompositorVk::setUpUniformBuffersImpl(std::vector<PerFrameResources>& perFrameResources,
+                                           UniformBufferStorage& uniformBufferStorage) {
     VkPhysicalDeviceProperties physicalDeviceProperties;
     m_vk.vkGetPhysicalDeviceProperties(m_vkPhysicalDevice, &physicalDeviceProperties);
     const VkDeviceSize alignment = physicalDeviceProperties.limits.minUniformBufferOffsetAlignment;
-    m_uniformStorage.m_stride = ((sizeof(UniformBufferBinding) - 1) / alignment + 1) * alignment;
+    uniformBufferStorage.m_stride =
+        ((sizeof(UniformBufferBinding) - 1) / alignment + 1) * alignment;
 
     // TODO(b/389646068): Revise uniform buffer and descriptor management system to allocating per
     // layout here
     const uint32_t numLayouts = m_perSamplerRes.size();
     VkDeviceSize size =
-        m_uniformStorage.m_stride * m_maxFramesInFlight * kMaxLayersPerFrame * numLayouts;
+        uniformBufferStorage.m_stride * m_maxFramesInFlight * kMaxLayersPerFrame * numLayouts;
     auto maybeBuffer =
         createBuffer(size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
@@ -783,23 +869,32 @@ void CompositorVk::setUpUniformBuffers() {
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
                 .value();
     }
-    std::tie(m_uniformStorage.m_vkBuffer, m_uniformStorage.m_vkDeviceMemory) = buffer;
+    std::tie(uniformBufferStorage.m_vkBuffer, uniformBufferStorage.m_vkDeviceMemory) = buffer;
 
     void* mapped = nullptr;
-    VK_CHECK(m_vk.vkMapMemory(m_vkDevice, m_uniformStorage.m_vkDeviceMemory, 0, size, 0, &mapped));
+    VK_CHECK(
+        m_vk.vkMapMemory(m_vkDevice, uniformBufferStorage.m_vkDeviceMemory, 0, size, 0, &mapped));
 
     uint8_t* data = reinterpret_cast<uint8_t*>(mapped);
     for (uint32_t frameIndex = 0; frameIndex < m_maxFramesInFlight; ++frameIndex) {
-        PerFrameResources& frameResources = m_frameResources[frameIndex];
         for (const auto& [format, res] : m_perSamplerRes) {
-            frameResources.m_layerUboStorages[format].resize(kMaxLayersPerFrame);
+            perFrameResources[frameIndex].m_layerUboStorages[format].resize(kMaxLayersPerFrame);
             for (uint32_t layerIndex = 0; layerIndex < kMaxLayersPerFrame; ++layerIndex) {
                 auto* layerUboStorage = reinterpret_cast<UniformBufferBinding*>(data);
-                frameResources.m_layerUboStorages[format][layerIndex] = layerUboStorage;
-                data += m_uniformStorage.m_stride;
+                perFrameResources[frameIndex].m_layerUboStorages[format][layerIndex] =
+                    layerUboStorage;
+                data += uniformBufferStorage.m_stride;
             }
         }
     }
+}
+
+void CompositorVk::destroyUniformBufferStorage(UniformBufferStorage& storage) {
+    if (storage.m_vkDeviceMemory != VK_NULL_HANDLE) {
+        m_vk.vkUnmapMemory(m_vkDevice, storage.m_vkDeviceMemory);
+    }
+    m_vk.vkDestroyBuffer(m_vkDevice, storage.m_vkBuffer, nullptr);
+    m_vk.vkFreeMemory(m_vkDevice, storage.m_vkDeviceMemory, nullptr);
 }
 
 void CompositorVk::setUpPerSamplerResources() {
@@ -1474,6 +1569,10 @@ CompositorVk::CompositionFinishedWaitable CompositorVk::compose(
     return composeCompleteFuture;
 }
 
+void CompositorVk::setScreenMask(int width, int height, const uint8_t* rgbaData) {
+    setUpScreenMaskImage(uint32_t(width), uint32_t(height), rgbaData);
+}
+
 void CompositorVk::onImageDestroyed(uint32_t imageId) { m_renderTargetCache.remove(imageId); }
 
 bool operator==(const CompositorVkBase::DescriptorSetContents& lhs,
@@ -1553,6 +1652,151 @@ void CompositorVk::updateDescriptorSetsIfChanged(
                                 nullptr);
 
     frameResources->m_vkDescriptorSetsContents = descriptorSetsContents;
+}
+
+CompositorVk::PerFrameResources* CompositorVk::drawScreenMask(
+    VkCommandBuffer commandBuffer, VkFormat targetFormat, uint32_t targetWidth,
+    uint32_t targetHeight, VkRenderPass targetRenderPass, VkFramebuffer targetFramebuffer) {
+    // TODO(b/389646068): Make sure this renders correctly for each rotation mode
+    // TODO(b/389646068): Make sure this renders correctly with size and offset
+    if (!hasScreenMask()) {
+        return nullptr;
+    }
+
+    // If a screen mask is set, add another layer to draw the mask image
+    const VkFormat pipelineSamplerFormat = VK_FORMAT_UNDEFINED;  // Undefined means non-ycbcr
+    const DescriptorSetContents descriptorSetContents = {
+        .binding0 =
+            {
+                .sampledImageId = 0,
+                .sampledImageView = m_screenMaskImage.m_vkImageView,
+                .pipelineSamplerFormat = pipelineSamplerFormat,
+            },
+        .binding1 =
+            {
+                .positionTransform = glm::mat4(1.0f),
+                .texCoordTransform = glm::mat4(1.0f),
+                .colorTransform = glm::mat4(1.0f),
+                .mode = glm::uvec4(static_cast<uint32_t>(HWC2_COMPOSITION_DEVICE), 1.0f, 0, 0),
+                .alpha = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
+            },
+    };
+
+    FrameDescriptorSetsContents descriptorSetsContents;
+    descriptorSetsContents.descriptorSets.push_back(descriptorSetContents);
+
+    auto pipelineIt =
+        m_vkGraphicsVkPipelines.find(GraphicsPipelineKey{targetFormat, pipelineSamplerFormat});
+    if (pipelineIt == m_vkGraphicsVkPipelines.end()) {
+        GFXSTREAM_FATAL(
+            "CompositorVk::%s failed to find pipeline resources for target:%s sampler:%s", __func__,
+            string_VkFormat(targetFormat), string_VkFormat(pipelineSamplerFormat));
+        return nullptr;
+    }
+
+    // TODO: Change resource management system to unify layer and screenmask/background rendering
+    // Grab and wait for the next available resources.
+    if (m_availableFrameResourcesOnDemand.empty()) {
+        GFXSTREAM_FATAL("CompositorVk::%s failed to get PerFrameResources.", __func__);
+        return nullptr;
+    }
+    auto frameResourceFuture = std::move(m_availableFrameResourcesOnDemand.front());
+    m_availableFrameResourcesOnDemand.pop_front();
+    PerFrameResources* frameResources = frameResourceFuture.get();
+
+    updateDescriptorSetsIfChanged(descriptorSetsContents, frameResources);
+
+    const VkRenderPassBeginInfo renderPassBeginInfo = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass = targetRenderPass,
+        .framebuffer = targetFramebuffer,
+        .renderArea =
+            {
+                .offset =
+                    {
+                        .x = 0,
+                        .y = 0,
+                    },
+                .extent =
+                    {
+                        .width = targetWidth,
+                        .height = targetHeight,
+                    },
+            },
+        .clearValueCount = 0,
+        .pClearValues = nullptr,
+    };
+
+    const VkRect2D scissor = {
+        .offset =
+            {
+                .x = 0,
+                .y = 0,
+            },
+        .extent =
+            {
+                .width = targetWidth,
+                .height = targetHeight,
+            },
+    };
+    const VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = static_cast<float>(targetWidth),
+        .height = static_cast<float>(targetHeight),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+
+    m_vk.vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+    const VkDeviceSize offsets[] = {0};
+    m_vk.vkCmdBindVertexBuffers(commandBuffer, 0, 1, &m_vertexVkBuffer, offsets);
+
+    m_vk.vkCmdBindIndexBuffer(commandBuffer, m_indexVkBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+    m_vk.vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineIt->second);
+    m_vk.vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+    m_vk.vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+    VkPipelineLayout layerPipelineLayout =
+        m_perSamplerRes[pipelineSamplerFormat].m_vkPipelineLayout;
+    VkDescriptorSet layerDescriptorSet =
+        frameResources->m_layerDescriptorSets[pipelineSamplerFormat][0];
+
+    m_vk.vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 layerPipelineLayout,
+                                 /*firstSet=*/0,
+                                 /*descriptorSetCount=*/1, &layerDescriptorSet,
+                                 /*dynamicOffsetCount=*/0,
+                                 /*pDynamicOffsets=*/nullptr);
+
+    m_vk.vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(k_indices.size()), 1, 0, 0, 0);
+
+    m_vk.vkCmdEndRenderPass(commandBuffer);
+
+    return frameResources;
+}
+
+void CompositorVk::releaseOndemandResources(VkFence gpuCompleteFence,
+                                            PerFrameResources* frameResources) {
+    std::shared_future<PerFrameResources*> gpuCompleteFutureForResources =
+        std::async(std::launch::deferred, [gpuCompleteFence, frameResources, this]() mutable {
+            GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DEFAULT_CATEGORY, "Wait for on demand complete fence");
+            VkResult res = m_vk.vkWaitForFences(m_vkDevice, 1, &gpuCompleteFence, VK_TRUE,
+                                                kVkWaitForFencesTimeoutNsecs);
+            if (res == VK_SUCCESS) {
+                return frameResources;
+            }
+            if (res == VK_TIMEOUT) {
+                // Retry. If device lost, hopefully this returns immediately.
+                res = m_vk.vkWaitForFences(m_vkDevice, 1, &gpuCompleteFence, VK_TRUE,
+                                           kVkWaitForFencesTimeoutNsecs);
+            }
+            VK_CHECK(res);
+            return frameResources;
+        }).share();
+    m_availableFrameResourcesOnDemand.push_back(gpuCompleteFutureForResources);
 }
 
 }  // namespace vk
