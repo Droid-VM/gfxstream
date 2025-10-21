@@ -354,7 +354,6 @@ class VkEmulation {
     void* getColorBufferHostPointer(uint32_t colorBuffer);
 #ifdef __APPLE__
     MTLResource_id getColorBufferMetalMemoryHandle(uint32_t colorBufferHandle);
-    VkImage getColorBufferVkImage(uint32_t colorBufferHandle);
 #endif
 
     struct VkColorBufferMemoryExport {
