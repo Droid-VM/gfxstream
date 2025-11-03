@@ -2274,12 +2274,6 @@ bool FrameBuffer::Impl::getBufferInfo(HandleType p_buffer, int* size) {
 }
 
 bool FrameBuffer::Impl::post(HandleType p_colorbuffer, bool needLockAndBind) {
-#if GFXSTREAM_ENABLE_HOST_GLES
-    if (m_features.GuestVulkanOnly.enabled) {
-        flushColorBufferFromGl(p_colorbuffer);
-    }
-#endif
-
     auto res = postImplSync(p_colorbuffer, needLockAndBind);
     if (res) setGuestPostedAFrame();
     return res;
@@ -2287,12 +2281,6 @@ bool FrameBuffer::Impl::post(HandleType p_colorbuffer, bool needLockAndBind) {
 
 void FrameBuffer::Impl::postWithCallback(HandleType p_colorbuffer,
                                          Post::CompletionCallback callback, bool needLockAndBind) {
-#if GFXSTREAM_ENABLE_HOST_GLES
-    if (m_features.GuestVulkanOnly.enabled) {
-        flushColorBufferFromGl(p_colorbuffer);
-    }
-#endif
-
     AsyncResult res = postImpl(p_colorbuffer, callback, needLockAndBind);
     if (res.Succeeded()) {
         setGuestPostedAFrame();
