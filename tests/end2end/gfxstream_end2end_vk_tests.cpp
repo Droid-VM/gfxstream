@@ -299,10 +299,8 @@ class GfxstreamEnd2EndVkTest : public GfxstreamEnd2EndTest {
             const vkhpp::SamplerYcbcrConversionCreateInfo conversionCreateInfo = {
                 .pNext = &externalFormat,
                 .format = static_cast<vkhpp::Format>(ahbFormatProperties.format),
-                .ycbcrModel = static_cast<vkhpp::SamplerYcbcrModelConversion>(
-                    ahbFormatProperties.suggestedYcbcrModel),
-                .ycbcrRange =
-                    static_cast<vkhpp::SamplerYcbcrRange>(ahbFormatProperties.suggestedYcbcrRange),
+                .ycbcrModel = vkhpp::SamplerYcbcrModelConversion::eYcbcr601,
+                .ycbcrRange = vkhpp::SamplerYcbcrRange::eItuNarrow,
                 .components =
                     {
                         .r = static_cast<vkhpp::ComponentSwizzle>(
