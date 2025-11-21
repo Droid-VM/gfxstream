@@ -80,7 +80,7 @@ static void initIcdPaths(bool forTesting) {
     auto androidIcd = gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD");
 
     if (forTesting) {
-#if defined(__APPLE__) && !defined(__arm64__)
+#if defined(__APPLE__) && !defined(__arm64__) || defined(__WIN32__)
         const char* testingICD = "swiftshader";
 #else
         const char* testingICD = "lavapipe";
@@ -102,8 +102,9 @@ static void initIcdPaths(bool forTesting) {
 
     // In high integrity mode (e.g. admin mode on windows), loader won't be able to read the
     // environment variables. TODO(b/446119531) Load the driver dlls directly in this case.
+    // Note: in testing mode the loader allows env vars in high integrity mode
     const bool highIntegrityMode = processInHighIntegrityMode();
-    if (highIntegrityMode) {
+    if (highIntegrityMode && !forTesting) {
         GFXSTREAM_ERROR("%s: Vulkan ICD selection is not supported with elevated permissions.",
                         __func__);
     }
@@ -250,39 +251,38 @@ class VulkanDispatchImpl {
             };
         }
 
+        std::vector<std::string> possiblePaths;
         const std::vector<std::string> possibleBasenames = getPossibleLoaderPathBasenames();
 
-        const std::string explicitIcd = gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD");
-
-#ifdef _WIN32
-        constexpr const bool isWindows = true;
-#else
-        constexpr const bool isWindows = false;
-#endif
-        if (explicitIcd.empty() || isWindows) {
-            return possibleBasenames;
-        }
-
+        // 1. Add paths relative to the program/launcher directories.
         std::vector<std::string> possibleDirectories;
 
-        if (mForTesting || explicitIcd == "mock") {
-            possibleDirectories = {
-                pj({gfxstream::base::getProgramDirectory(), "testlib64"}),
-                pj({gfxstream::base::getLauncherDirectory(), "testlib64"}),
-            };
+        // If in testing mode, prioritize testlib64.
+        if (mForTesting) {
+            possibleDirectories.push_back(
+                pj({gfxstream::base::getProgramDirectory(), "testlib64"}));
+            possibleDirectories.push_back(
+                pj({gfxstream::base::getLauncherDirectory(), "testlib64"}));
         }
 
+        // Always add lib64/vulkan paths as a primary or secondary option.
         possibleDirectories.push_back(
             pj({gfxstream::base::getProgramDirectory(), "lib64", "vulkan"}));
         possibleDirectories.push_back(
             pj({gfxstream::base::getLauncherDirectory(), "lib64", "vulkan"}));
 
-        std::vector<std::string> possiblePaths;
+
         for (const std::string& possibleDirectory : possibleDirectories) {
             for (const std::string& possibleBasename : possibleBasenames) {
                 possiblePaths.push_back(pj({possibleDirectory, possibleBasename}));
             }
         }
+
+        // 2. Add system-wide basenames last, as an ultimate fallback.
+        for (const std::string& possibleBasename : possibleBasenames) {
+            possiblePaths.push_back(possibleBasename);
+        }
+
         return possiblePaths;
     }
 
