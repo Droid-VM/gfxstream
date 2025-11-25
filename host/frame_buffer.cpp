@@ -1475,7 +1475,7 @@ WorkerProcessingResult FrameBuffer::Impl::postWorkerFunc(Post& post) {
                             },
                             "Wait for post");
                     });
-            m_postWorker->post(post.cb, std::move(postCallback));
+            m_postWorker->post(post.cb, std::move(postCallback), post.colorTransform);
             decColorBufferRefCountNoDestroy(post.cbHandle);
             break;
         }
@@ -1517,7 +1517,8 @@ WorkerProcessingResult FrameBuffer::Impl::postWorkerFunc(Post& post) {
                     post.screenshot.screenheight,
                     post.screenshot.rotation,
                     post.screenshot.pixelsFormat,
-                    post.screenshot.pixels, post.screenshot.rect);
+                    post.screenshot.pixels, post.screenshot.rect,
+                    post.colorTransform);
             decColorBufferRefCountNoDestroy(post.cbHandle);
             break;
         case PostCmd::Block:
@@ -1553,7 +1554,8 @@ std::future<void> FrameBuffer::Impl::sendPostWorkerCmd(Post post) {
         post.cb->readToBytesScaled(post.screenshot.screenwidth, post.screenshot.screenheight,
                                    post.screenshot.rotation, post.screenshot.rect,
                                    post.screenshot.pixelsFormat,
-                                   post.screenshot.pixels);
+                                   post.screenshot.pixels,
+                                   post.colorTransform);
     } else {
         std::future<void> completeFuture =
             m_postThread.enqueue(Post(std::move(post)));
@@ -2528,6 +2530,7 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
         postCmd.cmd = PostCmd::Post;
         postCmd.cb = colorBuffer.get();
         postCmd.cbHandle = p_colorbuffer;
+        postCmd.colorTransform = Post::GetColorTransform();
         postCmd.completionCallback = std::make_unique<Post::CompletionCallback>(callback);
         sendPostWorkerCmd(std::move(postCmd));
         ret = AsyncResult::OK_AND_CALLBACK_SCHEDULED;
@@ -2838,6 +2841,7 @@ int FrameBuffer::Impl::getScreenshot(unsigned int nChannels, unsigned int* width
     scrCmd.screenshot.pixelsFormat = format;
     scrCmd.screenshot.pixels = pixels;
     scrCmd.screenshot.rect = rect;
+    scrCmd.colorTransform = Post::GetColorTransform();
 
     std::future<void> completeFuture = sendPostWorkerCmd(std::move(scrCmd));
 
