@@ -123,7 +123,6 @@ EGLAPI EGLint EGLAPIENTRY eglWaitSyncKHR(EGLDisplay display, EGLSyncKHR sync, EG
 EGLAPI void EGLAPIENTRY eglBlitFromCurrentReadBufferANDROID(EGLDisplay display, EGLImageKHR image);
 EGLAPI void* EGLAPIENTRY eglSetImageFenceANDROID(EGLDisplay display, EGLImageKHR image);
 EGLAPI void EGLAPIENTRY eglWaitImageFenceANDROID(EGLDisplay display, void* fence);
-EGLAPI void EGLAPIENTRY eglAddLibrarySearchPathANDROID(const char* path);
 EGLAPI EGLBoolean EGLAPIENTRY eglQueryVulkanInteropSupportANDROID(void);
 EGLAPI EGLBoolean EGLAPIENTRY eglGetSyncAttribKHR(EGLDisplay display, EGLSyncKHR sync, EGLint attribute, EGLint *value);
 EGLAPI EGLBoolean EGLAPIENTRY eglSetNativeTextureDecompressionEnabledANDROID(EGLDisplay display, EGLBoolean enabled);
@@ -183,8 +182,6 @@ static const ExtensionDescriptor s_eglExtensions[] = {
                 (__eglMustCastToProperFunctionPointerType)eglSetImageFenceANDROID },
         {"eglWaitImageFenceANDROID",
                 (__eglMustCastToProperFunctionPointerType)eglWaitImageFenceANDROID },
-        {"eglAddLibrarySearchPathANDROID",
-                (__eglMustCastToProperFunctionPointerType)eglAddLibrarySearchPathANDROID },
         {"eglQueryVulkanInteropSupportANDROID",
                 (__eglMustCastToProperFunctionPointerType)eglQueryVulkanInteropSupportANDROID },
         {"eglGetSyncAttribKHR",
@@ -307,8 +304,8 @@ GLESiface* static_translator_glesv2_getIfaces(const EGLiface*);
 #define STATIC_TRANSLATOR_GETIFACE_NAME_GLES_CM static_translator_glescm_getIfaces
 #define STATIC_TRANSLATOR_GETIFACE_NAME_GLES_V2 static_translator_glesv2_getIfaces
 
-#define LIB_GLES_CM_NAME EMUGL_LIBNAME("GLES_CM_translator")
-#define LIB_GLES_V2_NAME EMUGL_LIBNAME("GLES_V2_translator")
+#define LIB_GLES_CM_NAME "libGLES_CM_translator"
+#define LIB_GLES_V2_NAME "libGLES_V2_translator"
 
 static __translator_getGLESIfaceFunc loadIfaces(const char* libName,
                                                 char* error,
@@ -1632,10 +1629,6 @@ EGLAPI void* EGLAPIENTRY eglSetImageFenceANDROID(EGLDisplay dpy, EGLImageKHR ima
 EGLAPI void EGLAPIENTRY eglWaitImageFenceANDROID(EGLDisplay dpy, void* fence) {
     const GLESiface* iface = g_eglInfo->getIface(GLES_2_0);
     iface->waitSync((GLsync)fence, 0, -1);
-}
-
-EGLAPI void EGLAPIENTRY eglAddLibrarySearchPathANDROID(const char* path) {
-    gfxstream::base::SharedLibrary::addLibrarySearchPath(path);
 }
 
 EGLAPI EGLBoolean EGLAPIENTRY eglQueryVulkanInteropSupportANDROID(void) {

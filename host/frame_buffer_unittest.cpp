@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "frame_buffer.h"
 
 #include <memory>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "frame_buffer.h"
 #include "render_thread_info.h"
+#include "gfxstream/common/testing/GraphicsTestEnvironment.h"
 #include "gfxstream/files/PathUtils.h"
 #include "gfxstream/host/display_operations.h"
 #include "gfxstream/host/features.h"
@@ -55,8 +57,12 @@ class FrameBufferTest : public ::testing::Test {
     FrameBufferTest() = default;
 
   protected:
+    static void SetUpTestSuite() {
+        ASSERT_THAT(gfxstream::testing::SetupGraphicsTestEnvironment(), ::testing::IsTrue())
+            << "Failed to configured graphics test environment!";
+    }
+
     void SetUp() override {
-        // setupStandaloneLibrarySearchPaths();
         const EGLDispatch* egl = LazyLoadedEGLDispatch::get();
         ASSERT_NE(nullptr, egl);
         ASSERT_NE(nullptr, LazyLoadedGLESv2Dispatch::get());
@@ -333,6 +339,30 @@ TEST_F(FrameBufferTest, CreateOpenUpdateCloseColorBuffer_FormatChange) {
                              forRead.data()));
 
     mFb->closeColorBuffer(handle);
+}
+
+// Regression test for b/462496183: ensure compatibility with older guests that
+// are not using virtio gpu and are instead still using GLenums for format params.
+TEST_F(FrameBufferTest, CreateOpenUpdateCloseColorBuffer_RGB565) {
+    constexpr const uint32_t kWidth = 1024;
+    constexpr const uint32_t kHeight = 1024;
+
+    HandleType colorBufferHandle =
+        mFb->createColorBuffer(kWidth, kHeight, GfxstreamFormat::R5G6B5_UNORM);
+    ASSERT_THAT(colorBufferHandle, ::testing::Ne(0));
+
+    for (int i = 0; i < 10; i++) {
+        constexpr const uint32_t kBpp = 2;
+        std::vector<uint8_t> buffer(kWidth * kHeight * kBpp);
+
+        // NOTE: historical usage did not pass a `buffer.size()`:
+        mFb->readColorBufferDeprecated(colorBufferHandle, 0, 0, kWidth, kHeight,
+                                       GL_RGB, GL_UNSIGNED_SHORT_5_6_5, buffer.data());
+        mFb->updateColorBufferDeprecated(colorBufferHandle, 0, 0, kWidth, kHeight,
+                                         GL_RGB, GL_UNSIGNED_SHORT_5_6_5, buffer.data());
+    }
+
+    mFb->closeColorBuffer(colorBufferHandle);
 }
 
 // Tests obtaining EGL configs from FrameBuffer.
