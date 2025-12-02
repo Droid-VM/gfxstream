@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "gfxstream/common/testing/GraphicsTestEnvironment.h"
+#include "gfxstream/common/testing/graphics_test_environment.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -154,6 +154,16 @@ bool SetupGraphicsTestEnvironment() {
 #endif  // defined(GFXSTREAM_TESTING_USE_VULKAN_LAVAPIPE) || defined(GFXSTREAM_TESTING_USE_VULKAN_SWIFTSHADER)
 
     return true;
+}
+
+bool IsGraphicsTestEnvironmentProvidingVulkanDriver() {
+#if defined(GFXSTREAM_TESTING_USE_VULKAN_LAVAPIPE)
+    return true;
+#elif defined(GFXSTREAM_TESTING_USE_VULKAN_SWIFTSHADER)
+    return true;
+#else
+    return false;
+#endif
 }
 
 }  // namespace testing
