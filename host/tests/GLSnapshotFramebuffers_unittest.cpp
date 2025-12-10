@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "GLSnapshotTesting.h"
-#include "apigen-codec-common/glUtils.h"
+#include "gfxstream/host/testing/GLSnapshotTesting.h"
+#include "gfxstream/host/glUtils.h"
 
 #include <gtest/gtest.h>
 
 #include <map>
 
 namespace gfxstream {
+namespace host {
 namespace gl {
 namespace {
 
@@ -158,4 +159,5 @@ TEST_F(SnapshotGlFramebufferObjectTest, BindColor0Texture2D) {
 
 }  // namespace
 }  // namespace gl
+}  // namespace host
 }  // namespace gfxstream

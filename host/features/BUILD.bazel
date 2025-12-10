@@ -1,7 +1,16 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//:build_variables.bzl", "GFXSTREAM_HOST_COPTS", "GFXSTREAM_HOST_DEFINES")
+
+package(
+    default_applicable_licenses = ["//:gfxstream_license"],
+    default_visibility = ["//:gfxstream"],
+)
+
 cc_library(
-    name = "gfxstream_features",
-    srcs = ["Features.cpp"] + glob(["include/**/*.h"]),
-    copts = ["-fno-exceptions"],
+    name = "gfxstream_host_features",
+    srcs = ["features.cpp"],
+    hdrs = glob(["include/**/*.h"]),
+    copts = GFXSTREAM_HOST_COPTS,
+    defines = GFXSTREAM_HOST_DEFINES,
     includes = ["include"],
-    visibility = ["//visibility:public"],
 )

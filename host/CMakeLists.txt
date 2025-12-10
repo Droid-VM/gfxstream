@@ -1,69 +1,16 @@
-add_subdirectory(backend)
-add_subdirectory(features)
-add_subdirectory(tracing)
-
-# Codec common sources
-add_subdirectory(apigen-codec-common)
-add_subdirectory(compressedTextureFormats)
-
-# GL
-add_subdirectory(gl)
-
-# Vulkan
-add_subdirectory(vulkan)
-
-# RenderControl decoder
-add_subdirectory(renderControl_dec)
-
-# Magma decoder
-add_subdirectory(magma)
-
-if(CONFIG_AEMU)
-    add_compile_definitions(GFXSTREAM_BUILD_WITH_SNAPSHOT_SUPPORT)
-    add_compile_definitions(CONFIG_AEMU)
-endif()
-
-# Stream server core
-set(stream-server-core-sources
-    Buffer.cpp
-    ExternalObjectManager.cpp
-    ColorBuffer.cpp
-    GfxStreamAgents.cpp
-    VirtioGpuContext.cpp
-    VirtioGpuFrontend.cpp
-    VirtioGpuResource.cpp
-    VirtioGpuRingBlob.cpp
-    VirtioGpuTimelines.cpp
-    VsyncThread.cpp
-    ChannelStream.cpp
-    DisplaySurface.cpp
-    DisplaySurfaceUser.cpp
-    Hwc2.cpp
-    PostWorker.cpp
-    PostWorkerGl.cpp
-    ReadBuffer.cpp
-    RenderChannelImpl.cpp
-    RenderThreadInfo.cpp
-    RenderThreadInfoGl.cpp
-    RenderThreadInfoMagma.cpp
-    RingStream.cpp
-    SyncThread.cpp
-    RenderThread.cpp
-    RenderControl.cpp
-    RenderWindow.cpp
-    RenderLibImpl.cpp
-    RendererImpl.cpp
-    FrameBuffer.cpp
-    GraphicsDriverLock.cpp)
-if (APPLE)
-    set(stream-server-core-platform-sources NativeSubWindow_cocoa.mm)
-elseif (WIN32)
-    set(stream-server-core-platform-sources NativeSubWindow_win32.cpp)
-elseif (QNX)
-    set(stream-server-core-platform-sources NativeSubWindow_qnx.cpp)
-else()
-    set(stream-server-core-platform-sources NativeSubWindow_x11.cpp)
-endif()
+# Copyright 2025 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 add_library(
         gfxstream_backend_headers
@@ -72,6 +19,85 @@ target_include_directories(
         gfxstream_backend_headers
         INTERFACE
         include)
+
+add_subdirectory(address_space)
+add_subdirectory(common)
+add_subdirectory(features)
+add_subdirectory(iostream)
+add_subdirectory(library)
+add_subdirectory(snapshot)
+add_subdirectory(tracing)
+add_subdirectory(decoder_common)
+add_subdirectory(compressed_textures)
+add_subdirectory(renderdoc)
+
+add_library(
+    gfxstream_backend.headers
+    INTERFACE
+    )
+target_link_libraries(
+    gfxstream_backend.headers
+    INTERFACE
+    gfxstream_features.headers
+    gfxstream_host_decoder_common
+    gfxstream_host_snapshot.headers
+    gfxstream_host_renderdoc
+    )
+target_include_directories(
+    gfxstream_backend.headers
+    INTERFACE
+    include
+    )
+
+
+add_subdirectory(gl)
+add_subdirectory(renderControl_dec)
+add_subdirectory(vulkan)
+
+
+if(CONFIG_AEMU)
+    add_compile_definitions(GFXSTREAM_BUILD_WITH_SNAPSHOT_SUPPORT)
+    add_compile_definitions(CONFIG_AEMU)
+endif()
+
+# Stream server core
+set(stream-server-core-sources
+    buffer.cpp
+    channel_stream.cpp
+    color_buffer.cpp
+    frame_buffer.cpp
+    hwc2.cpp
+    post_worker.cpp
+    post_worker_gl.cpp
+    read_buffer.cpp
+    render_channel_impl.cpp
+    render_control.cpp
+    renderer_impl.cpp
+    render_lib_impl.cpp
+    render_thread.cpp
+    render_thread_info.cpp
+    render_window.cpp
+    ring_stream.cpp
+    sync_thread.cpp
+    virtio_gpu_context.cpp
+    virtio_gpu_frontend.cpp
+    virtio_gpu_pipe.cpp
+    virtio_gpu_resource.cpp
+    virtio_gpu_ring_blob.cpp
+    virtio_gpu_timelines.cpp
+    vsync_thread.cpp)
+if (APPLE)
+    set(stream-server-core-platform-sources native_sub_window_cocoa.mm)
+elseif (WIN32)
+    set(stream-server-core-platform-sources native_sub_window_win32.cpp)
+elseif (QNX)
+    set(stream-server-core-platform-sources native_sub_window_qnx.cpp)
+else()
+    set(stream-server-core-platform-sources native_sub_window_x11.cpp)
+endif()
+
+
+
 
 # Compile everything as a static library first so that unit tests can call non-exported functions
 add_library(
@@ -83,37 +109,42 @@ add_library(
 target_link_libraries(
         gfxstream_backend_static
         PUBLIC
-        GLES_CM_translator_static
-        OpenGLESDispatch
-        renderControl_dec
-        gfxstream_backend_common
-        gfxstream_features
-        gfxstream_host_tracing
-        gfxstream-gl-server
-        gfxstream-magma-server
-        gfxstream-vulkan-server
-        gfxstream_egl_headers
-        gfxstream-snapshot
-        apigen-codec-common
         ${GFXSTREAM_HOST_COMMON_LIB}
-        ${GFXSTREAM_BASE_LIB})
+        gfxstream_backend.headers
+        gfxstream_common_base
+        gfxstream_common_logging
+        gfxstream_drm_headers
+        gfxstream_features
+        gfxstream_glm_headers
+        gfxstream_host_address_space
+        gfxstream_host_common
+        gfxstream_host_decoder_common
+        gfxstream_host_iostream
+        gfxstream_host_library
+        gfxstream_host_renderdoc
+        gfxstream_host_snapshot.headers
+        gfxstream_host_tracing
+        gfxstream_opengl_headers
+        gfxstream_openglesdispatch
+        gfxstream-gl-server
+        gfxstream-vulkan-server
+        gfxstream_xcb_headers
+        GLES_CM_translator_static
+        renderControl_dec
+        )
 
 target_include_directories(
         gfxstream_backend_static
         PUBLIC
         ${GFXSTREAM_REPO_ROOT}
-        ${GFXSTREAM_REPO_ROOT}/include
         ${GFXSTREAM_REPO_ROOT}/host
         ${GFXSTREAM_REPO_ROOT}/host/include
-        ${GFXSTREAM_REPO_ROOT}/host/apigen-codec-common
+        ${GFXSTREAM_REPO_ROOT}/host/gfxstream_host_decoder_common
         ${GFXSTREAM_REPO_ROOT}/host/gl
         ${GFXSTREAM_REPO_ROOT}/host/gl/glestranslator/include
-        ${GFXSTREAM_REPO_ROOT}/host/magma
-        ${GFXSTREAM_REPO_ROOT}/host/magma/magma_dec
         ${GFXSTREAM_REPO_ROOT}/host/vulkan
         ${GFXSTREAM_REPO_ROOT}/host/vulkan/cereal/common
-        ${GFXSTREAM_REPO_ROOT}/third-party/fuchsia/magma/include
-        ${GFXSTREAM_REPO_ROOT}/third-party/glm/include)
+        )
 
 if (APPLE)
     target_link_libraries(gfxstream_backend_static PUBLIC "-framework AppKit -framework QuartzCore -framework IOSurface")
@@ -122,7 +153,7 @@ if (WIN32)
     target_link_libraries(gfxstream_backend_static PRIVATE D3d9.lib)
 endif()
 
-# Suppress some warnings generated by platform/aemu repo
+# Suppress some warnings
 target_compile_options(
     gfxstream_backend_static
     PRIVATE
@@ -142,24 +173,18 @@ add_library(
     gfxstream_backend
     SHARED
     render_api.cpp
-    virtio-gpu-gfxstream-renderer.cpp)
+    virtio_gpu_gfxstream_renderer.cpp)
 
 target_link_libraries(
     gfxstream_backend
     PUBLIC
     gfxstream_common_utils
-    gfxstream_backend_common
     gfxstream_features
+    gfxstream_host_common
     gfxstream_host_tracing
     gfxstream_backend_static
     PRIVATE
     )
-
-if(BUILD_STANDALONE)
-    target_link_libraries(gfxstream_backend
-        PRIVATE
-        gfxstream-gl-host-common)
-endif()
 
 if (APPLE)
     set_target_properties(gfxstream_backend
@@ -172,6 +197,13 @@ if (LINUX)
     target_link_options(gfxstream_backend PRIVATE "LINKER:--build-id=sha1")
 endif()
 
+# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=90050
+if(CMAKE_CXX_COMPILER_ID MATCHES GNU)
+    target_link_libraries(
+        gfxstream_backend
+        PUBLIC
+        -lstdc++fs)
+endif()
 
 if(CONFIG_AEMU)
     android_install_shared_library(TARGET gfxstream_backend)
@@ -207,73 +239,31 @@ endfunction()
     target_link_libraries(
         gfxstream_backend_unittests
         PRIVATE
-        OSWindow
         gfxstream_backend
-        aemu-host-common-testing-support
+        gfxstream_host_testing_oswindow_support
         ${GFXSTREAM_BASE_LIB}
         gtest_main)
-        discover_tests(gfxstream_backend_unittests)
-
-    # More functional tests#########################################################
-
-    # Common testing support library################################################
-    # This includes the server core and testing sources
-    add_library(
-        stream-server-testing-support
-        tests/SampleApplication.cpp
-        tests/GLSnapshotTesting.cpp
-        tests/OpenGLTestContext.cpp
-        tests/GLTestUtils.cpp
-        tests/ShaderUtils.cpp
-        tests/GLSnapshotTestDispatch.cpp
-        tests/GLSnapshotTestStateUtils.cpp
-        tests/HelloTriangleImp.cpp)
-    target_include_directories(
-        stream-server-testing-support
-        PUBLIC
-        ${GFXSTREAM_REPO_ROOT}
-        ${GFXSTREAM_REPO_ROOT}/include
-        ${GFXSTREAM_REPO_ROOT}/host
-        ${GFXSTREAM_REPO_ROOT}/host/gl/glestranslator/GLES_CM
-        ${GFXSTREAM_REPO_ROOT}/host/gl/glestranslator/include
-        ${GFXSTREAM_REPO_ROOT}/host/apigen-codec-common
-        ${GFXSTREAM_REPO_ROOT}/host/vulkan)
-    target_link_libraries(
-        stream-server-testing-support
-        PUBLIC
-        aemu-host-common-testing-support
-        aemu-base-testing-support
-        gfxstream_common_image
-        gfxstream_backend_static
-        gfxstream_stb
-        OSWindow
-        gtest)
-
-    if (LINUX)
-    add_library(
-        x11_testing_support
-        tests/X11TestingSupport.cpp)
-    target_link_libraries(
-        x11_testing_support
-        aemu-base.headers)
-    endif()
+    discover_tests(gfxstream_backend_unittests)
 
     # Basic opengl rendering tests##################################################
     add_executable(
         OpenglRender_unittests
-        tests/FrameBuffer_unittest.cpp
+        frame_buffer_unittest.cpp
+        vsync_thread_unittest.cpp
         tests/GLES1Dispatch_unittest.cpp
         tests/DefaultFramebufferBlit_unittest.cpp
         tests/TextureDraw_unittest.cpp
         tests/StalePtrRegistry_unittest.cpp
-        tests/VsyncThread_unittest.cpp)
+        )
     target_link_libraries(
         OpenglRender_unittests
         PRIVATE
-        stream-server-testing-support
-        aemu-host-common-testing-support
-        aemu-base-testing-support
         gfxstream_backend_static
+        gfxstream_common_base
+        gfxstream_common_testenv
+        gfxstream_host_common
+        gfxstream_host_testing_support
+        gmock
         gtest_main)
     if (LINUX)
         target_compile_definitions(
@@ -306,39 +296,47 @@ endfunction()
     target_link_libraries(
         OpenglRender_snapshot_unittests
         PRIVATE
-        stream-server-testing-support
-        aemu-host-common-testing-support
-        aemu-base-testing-support
+        gfxstream_host_testing_support
         gfxstream_backend_static
+        gfxstream_common_base
+        gfxstream_host_common
         gtest_main)
     discover_tests(OpenglRender_snapshot_unittests)
 
     # Vulkan tests##################################################################
     add_executable(
         Vulkan_unittests
-        tests/Vulkan_unittest.cpp
-        tests/CompositorVk_unittest.cpp
-        tests/SwapChainStateVk_unittest.cpp
-        tests/DisplayVk_unittest.cpp
-        VirtioGpuTimelinesTests.cpp
-        vulkan/vk_util_unittest.cpp
-        vulkan/VkFormatUtils_unittest.cpp
-        vulkan/VkQsriTimeline_unittest.cpp
-        vulkan/VkDecoderGlobalState_unittest.cpp
+        virtio_gpu_timelines_tests.cpp
+        vulkan/compositor_vk_unittest.cpp
+        vulkan/display_vk_unittest.cpp
+        vulkan/swap_chain_state_vk_unittest.cpp
+        vulkan/vk_decoder_global_state_unittest.cpp
+        vulkan/vk_format_utils_unittest.cpp
+        vulkan/vk_qsri_timeline_unittest.cpp
+        vulkan/vk_utils_tests.cpp
+        vulkan/vulkan_unittest.cpp
     )
     target_link_libraries(
         Vulkan_unittests
         PRIVATE
-        stream-server-testing-support
-        aemu-host-common-testing-support
-        aemu-base-testing-support
         gfxstream_backend_static
+        gfxstream_common_base
+        gfxstream_common_testenv
+        gfxstream_host_testing_oswindow_support
+        gfxstream_host_testing_support
+        gfxstream-vulkan-server
         gtest
         gtest_main
         gmock)
     if (APPLE)
-        target_compile_definitions(Vulkan_unittests PRIVATE -DVK_USE_PLATFORM_METAL_EXT)
-        target_link_libraries(Vulkan_unittests PUBLIC "-framework AppKit")
+        target_compile_definitions(
+            Vulkan_unittests
+            PRIVATE
+            -DVK_USE_PLATFORM_METAL_EXT)
+        target_link_libraries(
+            Vulkan_unittests
+            PUBLIC
+            "-framework AppKit")
     endif()
     discover_tests(
             Vulkan_unittests
@@ -353,13 +351,13 @@ endfunction()
     endif()
 
 
-    file(GLOB Vulkan_unittests_datafiles "tests/testdata/*.png")
+    file(GLOB Vulkan_unittests_datafiles "vulkan/testdata/*.png")
     add_custom_command(TARGET Vulkan_unittests POST_BUILD
                        COMMAND ${CMAKE_COMMAND} -E make_directory
-                            ${CMAKE_BINARY_DIR}/tests/testdata
+                            ${CMAKE_BINARY_DIR}/testdata
                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
                             ${Vulkan_unittests_datafiles}
-                            ${CMAKE_BINARY_DIR}/tests/testdata)
+                            ${CMAKE_BINARY_DIR}/testdata)
 
     add_executable(
             Vulkan_integrationtests
@@ -370,9 +368,10 @@ endfunction()
             Vulkan_integrationtests
             PRIVATE
             gfxstream_backend_static
+            gfxstream_common_base
             gfxstream-gl-server
             gfxstream-vulkan-server
-            stream-server-testing-support
+            gfxstream_host_testing_support
             gtest
             gtest_main
             gmock)
@@ -380,6 +379,6 @@ endfunction()
 endif()
 if (WIN32)
     set(BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}")
-    configure_file(../cmake/SetWin32TestEnvironment.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/SetWin32TestEnvironment.cmake @ONLY)
+    configure_file(../toolchain/cmake/SetWin32TestEnvironment.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/SetWin32TestEnvironment.cmake @ONLY)
     set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES ${CMAKE_CURRENT_BINARY_DIR}/SetWin32TestEnvironment.cmake)
 endif()

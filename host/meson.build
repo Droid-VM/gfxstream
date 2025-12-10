@@ -1,216 +1,115 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT
-
-#===============#
-# Configuration #
-#===============#
-gfxstream_host_args = [
-  '-D_FILE_OFFSET_BITS=64',
-  '-Wno-unused-parameter',
-  '-Wno-unused-function',
-  '-Wno-unused-variable',
-  '-Wno-ignored-qualifiers',
-  '-Wno-mismatched-tags',
-  '-Wno-missing-field-initializers',
-  '-Wno-implicit-fallthrough',
-]
-
-if host_machine.system() == 'qnx'
-  gfxstream_host_args += '-D_QNX_SOURCE'
-  qnx_target = get_option('qnx_target')
-  if qnx_target == ''
-    error('option qnx_target is not set')
-  endif
-endif
-
-pkg_cflags = []
-pkg_cflags += '-DGFXSTREAM_UNSTABLE=1'
-
-#===============#
-# Dependencies  #
-#===============#
-if host_machine.system() == 'qnx'
-  ## have not yet got pkgconfig to work with cross-compile,
-  ## finding libraries manually in the meantime.
-
-  ## ERROR: Dependency "screen" not found, tried pkgconfig
-  # qnx_screen_dep = dependency('screen')
-
-  rel_path_prefix = meson.get_external_property('qnx_path_prefix')
-  abs_path_prefix = meson.current_source_dir() + '/' + rel_path_prefix
-
-  aemu_libs_path = abs_path_prefix + '/aemu/install/lib'
-
-  incl_aemu_headers = include_directories([
-    rel_path_prefix + '/aemu/install/include',
-    rel_path_prefix + '/aemu/install/include/aemu/host-common',
-    rel_path_prefix + '/aemu/install/include/aemu/snapshot',
-  ])
-
-  aemu_base_lib = cc.find_library('aemu-base', dirs: aemu_libs_path)
-  aemu_base_dep = declare_dependency(include_directories : incl_aemu_headers, dependencies : [aemu_base_lib])
-
-  aemu_common_lib = cc.find_library('aemu-host-common', dirs: aemu_libs_path)
-  aemu_common_dep = declare_dependency(include_directories : incl_aemu_headers, dependencies : [aemu_common_lib])
-
-  aemu_logging_lib = cc.find_library('aemu-logging', dirs: aemu_libs_path)
-  aemu_logging_dep = declare_dependency(include_directories : incl_aemu_headers, dependencies : [aemu_logging_lib])
-
-  aemu_snapshot_lib = cc.find_library('aemu-snapshot', dirs: aemu_libs_path)
-  aemu_snapshot_dep = declare_dependency(include_directories : incl_aemu_headers, dependencies : [aemu_snapshot_lib])
-
-  inc_qnx_headers = include_directories(join_paths(qnx_target, 'usr/include'))
-  qnx_screen_lib = cc.find_library('screen', required : true)
-  qnx_screen_dep = declare_dependency(include_directories: inc_qnx_headers, dependencies: [qnx_screen_lib])
-
-  qnx_egl_lib = cc.find_library('EGL', required : true)
-  qnx_egl_dep = declare_dependency(include_directories: inc_qnx_headers, dependencies: [qnx_egl_lib])
-
-  qnx_gles2_lib = cc.find_library('GLESv2', required : true)
-  qnx_gles2_dep = declare_dependency(include_directories: inc_qnx_headers, dependencies: [qnx_gles2_lib])
-
-else
-  aemu_base_dep = dependency('aemu_base')
-  aemu_common_dep = dependency('aemu_host_common')
-  aemu_logging_dep = dependency('aemu_logging')
-  aemu_snapshot_dep = dependency('aemu_snapshot')
-  dl_dep = dependency('dl')
-  thread_dep = dependency('threads')
-  gfxstream_host_args += '-DGFXSTREAM_UNSTABLE_VULKAN_EXTERNAL_SYNC=1'
-  gfxstream_host_args += '-DGFXSTREAM_UNSTABLE_VULKAN_DMABUF_WINSYS=1'
-endif
-
-if log_level == 'error'
-  gfxstream_host_args += '-DSTREAM_RENDERER_LOG_LEVEL=1'
-elif log_level == 'warn'
-  gfxstream_host_args += '-DSTREAM_RENDERER_LOG_LEVEL=2'
-elif log_level == 'info'
-  gfxstream_host_args += '-DSTREAM_RENDERER_LOG_LEVEL=3'
-endif
-
-if use_auto and (use_gles or use_vulkan or use_magma)
-  error('Can not specify auto and custom options are same time')
-endif
-
-if use_auto
-  use_gles = true
-  use_vulkan = true
-  use_composer = true
-  use_magma = host_machine.system() == 'linux'
-endif
-
-gfxstream_host_args += '-DGFXSTREAM_MESON_BUILD=1'
-gfxstream_host_args += '-DGFXSTREAM_ENABLE_HOST_GLES=@0@'.format(use_gles ? '1' : '0')
-
-if use_magma
-  gfxstream_host_args += '-DGFXSTREAM_ENABLE_HOST_MAGMA=1'
-  drm_dep = dependency('libdrm', fallback: ['libdrm', 'libdrm_dep'])
-else
-  gfxstream_host_args += '-DGFXSTREAM_ENABLE_HOST_MAGMA=0'
-endif
-
-#===============#
-# Includes      #
-#===============#
+# SPDX-License-Identifier: Apache-2.0
 
 gfxstream_headers = files(
   'include/gfxstream/virtio-gpu-gfxstream-renderer.h',
   'include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h')
 
-inc_root = include_directories('../')
-inc_gfxstream_include = include_directories('../include')
-# Included by all host component builds. Leave empty for future build updates.
-inc_include = include_directories()
-inc_utils = include_directories('../utils/include')
-
-if host_machine.system() == 'qnx'
-  inc_gfxstream_include = [inc_qnx_headers, inc_gfxstream_include]
-endif
-
-if use_vulkan
-  inc_vulkan_headers = include_directories('../common/vulkan/include')
-
-  if cc.has_header('renderdoc_app.h')
-    inc_renderdoc_external = include_directories()
-  else
-    inc_renderdoc_external = include_directories('../third-party/renderdoc/include')
-  endif
-endif
-
-if use_magma
-  inc_magma_external = include_directories('../third-party/fuchsia/magma/include')
-  inc_magma_external_lib = include_directories('../third-party/fuchsia/magma/include/lib')
-endif
-
-if cc.has_header('glm/glm.hpp')
-  inc_glm = include_directories()
-else
-  inc_glm = include_directories('../third-party/glm/include')
-endif
-
+inc_gfxstream_server = include_directories('include')
 inc_stream_servers = include_directories('.')
 inc_host_include = include_directories('include')
 
-inc_gl_common = include_directories('gl/glestranslator/GLcommon/include')
+inc_gl_common = include_directories('gl/glestranslator/common/include')
 
 subdir('features')
+subdir('iostream')
+subdir('library')
 subdir('tracing')
+subdir('renderdoc')
+subdir('snapshot')
+subdir('decoder_common')
+subdir('address_space')
+subdir('common')
 
-subdir('apigen-codec-common')
-subdir('gl/gl-host-common')
-subdir('backend')
+inc_gfxstream_backend = [
+  inc_host_decoder_common,
+  inc_common_base,
+  inc_common_utils,
+  inc_drm_headers,
+  inc_glm,
+  inc_host_address_space,
+  inc_host_common,
+  inc_host_features,
+  inc_host_include,
+  inc_host_iostream,
+  inc_host_library,
+  inc_common_logging,
+  inc_host_renderdoc,
+  inc_host_snapshot,
+  inc_host_tracing,
+  inc_include,
+  inc_opengl_headers,
+  inc_root,
+]
 
-inc_gfxstream_backend = [inc_root, inc_gfxstream_include, inc_include, inc_apigen_codec, inc_utils,
-                         inc_gl_host_common, inc_host_include, inc_common_utils, inc_host_backend,
-                         inc_host_features, inc_host_tracing]
-
-link_gfxstream_backend = [lib_gl_host_common, lib_apigen_codec, lib_common_utils, lib_host_backend,
-                          lib_host_features, lib_host_tracing]
+link_gfxstream_backend = [
+  lib_host_decoder_common,
+  lib_common_base,
+  lib_common_utils,
+  lib_host_address_space,
+  lib_host_common,
+  lib_host_features,
+  lib_host_iostream,
+  lib_host_library,
+  lib_common_logging,
+  lib_host_snapshot,
+  lib_host_tracing,
+]
 
 files_lib_gfxstream_backend = files(
-  'Buffer.cpp',
-  'ExternalObjectManager.cpp',
-  'ChannelStream.cpp',
-  'ColorBuffer.cpp',
-  'DisplaySurface.cpp',
-  'DisplaySurfaceUser.cpp',
-  'Hwc2.cpp',
-  'PostWorker.cpp',
-  'ReadBuffer.cpp',
+  'buffer.cpp',
+  'channel_stream.cpp',
+  'color_buffer.cpp',
+  'frame_buffer.cpp',
+  'hwc2.cpp',
+  'post_worker.cpp',
+  'read_buffer.cpp',
   'render_api.cpp',
-  'RenderChannelImpl.cpp',
-  'RenderThread.cpp',
-  'RenderThreadInfo.cpp',
-  'RingStream.cpp',
-  'SyncThread.cpp',
-  'RenderWindow.cpp',
-  'RenderLibImpl.cpp',
-  'RendererImpl.cpp',
-  'FrameBuffer.cpp',
-  'GfxStreamAgents.cpp',
-  'GraphicsDriverLock.cpp',
-  'virtio-gpu-gfxstream-renderer.cpp',
-  'VirtioGpuContext.cpp',
-  'VirtioGpuFrontend.cpp',
-  'VirtioGpuResource.cpp',
-  'VirtioGpuRingBlob.cpp',
-  'VirtioGpuTimelines.cpp',
-  'VsyncThread.cpp',
+  'render_channel_impl.cpp',
+  'renderer_impl.cpp',
+  'render_lib_impl.cpp',
+  'render_thread.cpp',
+  'render_thread_info.cpp',
+  'render_window.cpp',
+  'ring_stream.cpp',
+  'sync_thread.cpp',
+  'virtio_gpu_context.cpp',
+  'virtio_gpu_frontend.cpp',
+  'virtio_gpu_gfxstream_renderer.cpp',
+  'virtio_gpu_pipe.cpp',
+  'virtio_gpu_resource.cpp',
+  'virtio_gpu_ring_blob.cpp',
+  'virtio_gpu_timelines.cpp',
+  'vsync_thread.cpp',
 )
 
 if use_gles or use_vulkan
-  subdir('compressedTextureFormats')
+  subdir('compressed_textures')
+
+  inc_gfxstream_backend += [
+    inc_host_compressed_textures,
+  ]
+  link_gfxstream_backend + [
+    lib_host_compressed_textures,
+  ]
 endif
 
 if use_gles
   subdir('gl')
 
-  files_lib_gfxstream_backend += files('PostWorkerGl.cpp')
-  files_lib_gfxstream_backend += files('RenderThreadInfoGl.cpp')
-  files_lib_gfxstream_backend += files('RenderControl.cpp')
+  files_lib_gfxstream_backend += files('post_worker_gl.cpp')
+  files_lib_gfxstream_backend += files('render_control.cpp')
 
-  inc_gfxstream_backend += [inc_gl_server, inc_gl_snapshot, inc_gl_common]
-  link_gfxstream_backend += lib_gl_server
+  inc_gfxstream_backend += [
+    inc_gl_common,
+    inc_gl_openglesdispatch,
+    inc_gl_server,
+    inc_gl_snapshot,
+    inc_opengl_headers,
+  ]
+  link_gfxstream_backend += [
+    lib_gl_server,
+  ]
 endif
 
 if use_vulkan
@@ -225,24 +124,17 @@ if use_composer
   link_gfxstream_backend += lib_composer
 endif
 
-if use_magma
-  subdir('magma')
-  files_lib_gfxstream_backend += files('RenderThreadInfoMagma.cpp')
-  inc_gfxstream_backend += [inc_magma_dec, inc_magma_external]
-  link_gfxstream_backend += lib_magma_server
-endif
-
 if not use_gles
-  files_lib_gfxstream_backend += files('NativeSubWindow_stub.cpp')
+  files_lib_gfxstream_backend += files('native_sub_window_stub.cpp')
 elif host_machine.system() == 'darwin'
-  files_lib_gfxstream_backend += files('NativeSubWindow_cocoa.mm')
+  files_lib_gfxstream_backend += files('native_sub_window_cocoa.mm')
 elif host_machine.system() == 'windows'
-  files_lib_gfxstream_backend += files('NativeSubWindow_win32.cpp')
+  files_lib_gfxstream_backend += files('native_sub_window_win32.cpp')
 elif host_machine.system() == 'linux' and use_gles
-  files_lib_gfxstream_backend += files('NativeSubWindow_x11.cpp')
+  files_lib_gfxstream_backend += files('native_sub_window_x11.cpp')
 elif host_machine.system() == 'qnx'
   files_lib_gfxstream_backend += files(
-    'NativeSubWindow_qnx.cpp',
+    'native_sub_window_qnx.cpp',
   )
 endif
 
@@ -253,21 +145,24 @@ gfxstream_backend_cpp_args = [
   '-DVK_GFXSTREAM_STRUCTURE_TYPE_EXT',
 ]
 
-deps_gfxstream_backend = [
-  aemu_common_dep,
-  aemu_base_dep,
-  aemu_logging_dep,
-  aemu_snapshot_dep,
-]
+if host_machine.system() == 'windows'
+  gfxstream_backend_cpp_args += '-DVK_USE_PLATFORM_WIN32_KHR'
+elif host_machine.system() == 'darwin'
+  gfxstream_backend_cpp_args += '-DVK_USE_PLATFORM_METAL_EXT'
+  gfxstream_backend_cpp_args += '-DVK_USE_PLATFORM_MACOS_MVK'
+elif host_machine.system() == 'linux'
+  gfxstream_backend_cpp_args += '-DVK_USE_PLATFORM_XCB_KHR'
+endif
+
+deps_gfxstream_backend = []
 
 link_args_gfxstream_backend = ''
 
 if host_machine.system() == 'linux'
   deps_gfxstream_backend += [
-    dl_dep,
     thread_dep,
   ]
-  link_args_gfxstream_backend = '-Wl,-lpthread,-lrt'
+  link_args_gfxstream_backend = '-Wl,-lpthread,-lrt,-ldl'
 endif
 
 if host_machine.system() == 'qnx'
@@ -282,7 +177,7 @@ gfxstream_backend = library(
   'gfxstream_backend',
   files_lib_gfxstream_backend,
   cpp_args: gfxstream_host_args + gfxstream_backend_cpp_args,
-  include_directories: [inc_gfxstream_backend, inc_glm],
+  include_directories: [inc_gfxstream_backend],
   gnu_symbol_visibility: 'default',
   dependencies: deps_gfxstream_backend,
   link_with: link_gfxstream_backend,

@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 
 files_lib_cereal = files(
   'common/goldfish_vk_extension_structs.cpp',
@@ -17,16 +17,37 @@ cereal_cpp_args = [
 
 if host_machine.system() == 'qnx'
   cereal_cpp_args += '-DVK_USE_PLATFORM_SCREEN_QNX'
+elif host_machine.system() == 'windows'
+  cereal_cpp_args += '-DVK_USE_PLATFORM_WIN32_KHR'
+elif host_machine.system() == 'darwin'
+  cereal_cpp_args += '-DVK_USE_PLATFORM_METAL_EXT'
+  cereal_cpp_args += '-DVK_USE_PLATFORM_MACOS_MVK'
+elif host_machine.system() == 'linux'
+  cereal_cpp_args += '-DVK_USE_PLATFORM_XCB_KHR'
 endif
 
 lib_vulkan_cereal = static_library(
   'cereal',
   files_lib_cereal,
   cpp_args: cereal_cpp_args + gfxstream_host_args,
-  include_directories: [inc_cereal, inc_cereal_common, inc_stream_servers,
-                        inc_vulkan_server, inc_utils,
-                        inc_gfxstream_include, inc_include, inc_vulkan_headers,
-                        inc_host_features],
-  dependencies: [aemu_base_dep, aemu_common_dep],
-  link_with: [lib_host_features]
+  include_directories: [
+    inc_cereal_common,
+    inc_cereal,
+    inc_common_base,
+    inc_gfxstream_server,
+    inc_host_common,
+    inc_host_decoder_common,
+    inc_host_features,
+    inc_common_logging,
+    inc_include,
+    inc_stream_servers,
+    inc_vulkan_headers,
+    inc_vulkan_server,
+  ],
+  link_with: [
+    lib_common_base,
+    lib_host_common,
+    lib_host_features,
+    lib_common_logging,
+  ],
 )

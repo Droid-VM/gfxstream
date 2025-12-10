@@ -2,7 +2,15 @@
 
 %#include <GLES/gl.h>
 %#include <GL/GLcorearb.h>
+
+
+%#ifdef __MINGW64__
+%#include <GLES/glplatform.h>
+%#define GL_APICALL KHRONOS_APICALL inline
+%#else
 %#define GL_APICALL KHRONOS_APICALL
+%#endif // __MINGW64__
+
 
 namespaces translator,gles1
 void glClipPlane(GLenum plane, const GLdouble *equation);
@@ -67,7 +75,7 @@ void glWeightPointerARB(GLint size, GLenum type, GLsizei stride, const GLvoid* p
 void glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
 void glImportMemoryFdEXT(GLuint memory, GLuint64 size, GLenum handleType, GLint fd);
 void glImportMemoryWin32HandleEXT(GLuint memory, GLuint64 size, GLenum handleType, void* handle);
-void glDeleteMemoryObjectsEXT(GLsizei n, const GLuint *memoryObjects); 
+void glDeleteMemoryObjectsEXT(GLsizei n, const GLuint *memoryObjects);
 GLboolean glIsMemoryObjectEXT(GLuint memoryObject);
 void glCreateMemoryObjectsEXT(GLsizei n, GLuint *memoryObjects);
 void glMemoryObjectParameterivEXT(GLuint memoryObject, GLenum pname, const GLint *params);

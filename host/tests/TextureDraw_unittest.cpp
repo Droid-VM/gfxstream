@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "texture_draw.h"
+
 #include <gtest/gtest.h>
 
-#include "GLTestUtils.h"
-#include "OpenGLTestContext.h"
-#include "TextureDraw.h"
+#include "gfxstream/host/testing/GLTestUtils.h"
+#include "gfxstream/host/testing/OpenGLTestContext.h"
 
 namespace gfxstream {
+namespace host {
 namespace gl {
 namespace {
 
@@ -73,7 +75,7 @@ void TestTextureDrawBasic(const GLESv2Dispatch* gl, GLenum internalformat,
 
     TextureDraw textureDraw;
 
-    textureDraw.draw(textureToDraw, 0, 0, 0);
+    textureDraw.draw(textureToDraw, 0, 0, 0, std::nullopt);
 
     std::vector<unsigned char> pixelsOut(bytes, 0xff);
 
@@ -219,4 +221,5 @@ TEST_F(GLTest, TextureDrawBasic) {
 
 }  // namespace
 }  // namespace gl
+}  // namespace host
 }  // namespace gfxstream

@@ -16,7 +16,6 @@
 #define VIRTGPU_GFXSTREAM_PROTOCOL_H
 
 #include <stdint.h>
-#include "virgl_hw.h"
 
 namespace gfxstream {
 
@@ -129,14 +128,7 @@ struct vulkanCapset {
     uint32_t externalSync;
     uint32_t virglSupportedFormats[16];
     uint32_t vulkanBatchedDescriptorSetUpdate;
-};
-
-struct magmaCapset {
-    uint32_t protocolVersion;
-    // ASG Ring Parameters
-    uint32_t ringSize;
-    uint32_t bufferSize;
-    uint32_t blobAlignment;
+    uint32_t hasTraceAsyncCommand;
 };
 
 struct glesCapset {

@@ -14,11 +14,12 @@
 
 #include <gtest/gtest.h>
 
-#include "GLEScmContext.h"
-#include "GLTestUtils.h"
-#include "OpenGLTestContext.h"
+#include "gles_cm_context.h"
+#include "gfxstream/host/testing/GLTestUtils.h"
+#include "gfxstream/host/testing/OpenGLTestContext.h"
 
 namespace gfxstream {
+namespace host {
 namespace gl {
 namespace {
 
@@ -37,4 +38,5 @@ TEST_F(GLTest, TestGlFrustumNoCoreProfile) {
 
 }  // namespace
 }  // namespace gl
+}  // namespace host
 }  // namespace gfxstream

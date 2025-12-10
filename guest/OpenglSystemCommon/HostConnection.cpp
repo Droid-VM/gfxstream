@@ -21,6 +21,7 @@
 #if defined(__ANDROID__)
 #include "android-base/properties.h"
 #endif
+#include "gfxstream/common/logging.h"
 #include "renderControl_types.h"
 
 using gfxstream::guest::ChecksumCalculator;
@@ -58,7 +59,6 @@ public:
 #include "ProcessPipe.h"
 #include "QemuPipeStream.h"
 #include "ThreadInfo.h"
-
 #include "VirtGpu.h"
 #include "VirtioGpuPipeStream.h"
 
@@ -68,13 +68,7 @@ public:
 #include <unistd.h>
 #endif
 
-#undef LOG_TAG
-#define LOG_TAG "HostConnection"
-#include <cutils/log.h>
-
 #define STREAM_BUFFER_SIZE  (4*1024*1024)
-
-constexpr const auto kEglProp = "ro.hardware.egl";
 
 static HostConnectionType getConnectionTypeFromProperty(enum VirtGpuCapset capset) {
 #if defined(__Fuchsia__) || defined(LINUX_GUEST_BUILD)
@@ -109,7 +103,7 @@ static HostConnectionType getConnectionTypeFromProperty(enum VirtGpuCapset capse
     if (transport == "virtio-gpu-asg" || transport == "virtio-gpu-pipe") {
         std::string egl;
 #if defined(__ANDROID__)
-        egl = android::base::GetProperty(kEglProp, "");
+        egl = android::base::GetProperty("ro.hardware.egl", "");
 #endif
         // ANGLE doesn't work well without ASG, particularly if HostComposer uses a pipe
         // transport and VK uses ASG.
@@ -164,12 +158,12 @@ std::unique_ptr<HostConnection> HostConnection::connect(enum VirtGpuCapset capse
 #if defined(__ANDROID__)
             auto stream = createGoldfishAddressSpaceStream(STREAM_BUFFER_SIZE);
             if (!stream) {
-                ALOGE("Failed to create AddressSpaceStream for host connection\n");
+                GFXSTREAM_ERROR("Failed to create AddressSpaceStream for host connection.");
                 return nullptr;
             }
             con->m_stream = stream;
 #else
-            ALOGE("Fatal: HOST_CONNECTION_ADDRESS_SPACE not supported on this host.");
+            GFXSTREAM_FATAL("HOST_CONNECTION_ADDRESS_SPACE not supported on this host.");
             abort();
 #endif
 
@@ -179,11 +173,11 @@ std::unique_ptr<HostConnection> HostConnection::connect(enum VirtGpuCapset capse
         case HOST_CONNECTION_QEMU_PIPE: {
             auto stream = new QemuPipeStream(STREAM_BUFFER_SIZE);
             if (!stream) {
-                ALOGE("Failed to create QemuPipeStream for host connection\n");
+                GFXSTREAM_ERROR("Failed to create QemuPipeStream for host connection.");
                 return nullptr;
             }
             if (stream->connect() < 0) {
-                ALOGE("Failed to connect to host (QemuPipeStream)\n");
+                GFXSTREAM_ERROR("Failed to connect to host (QemuPipeStream).");
                 return nullptr;
             }
             con->m_stream = stream;
@@ -193,16 +187,16 @@ std::unique_ptr<HostConnection> HostConnection::connect(enum VirtGpuCapset capse
         case HOST_CONNECTION_VIRTIO_GPU_PIPE: {
             auto stream = new VirtioGpuPipeStream(STREAM_BUFFER_SIZE, INVALID_DESCRIPTOR);
             if (!stream) {
-                ALOGE("Failed to create VirtioGpu for host connection\n");
+                GFXSTREAM_ERROR("Failed to create VirtioGpu for host connection.");
                 return nullptr;
             }
             if (stream->connect() < 0) {
-                ALOGE("Failed to connect to host (VirtioGpu)\n");
+                GFXSTREAM_ERROR("Failed to connect to host (VirtioGpu).");
                 return nullptr;
             }
 
             auto rendernodeFd = stream->getRendernodeFd();
-            auto device = VirtGpuDevice::getInstance(capset);
+            /* auto device = */ VirtGpuDevice::getInstance(capset);
             con->m_stream = stream;
             con->m_rendernodeFd = rendernodeFd;
             break;
@@ -214,7 +208,7 @@ std::unique_ptr<HostConnection> HostConnection::connect(enum VirtGpuCapset capse
             auto deviceHandle = device->getDeviceHandle();
             auto stream = createVirtioGpuAddressSpaceStream(kCapsetGfxStreamVulkan);
             if (!stream) {
-                ALOGE("Failed to create virtgpu AddressSpaceStream\n");
+                GFXSTREAM_ERROR("Failed to create virtgpu AddressSpaceStream.");
                 return nullptr;
             }
             con->m_stream = stream;
@@ -228,13 +222,13 @@ std::unique_ptr<HostConnection> HostConnection::connect(enum VirtGpuCapset capse
 #if defined(ANDROID)
     con->m_grallocHelper.reset(gfxstream::createPlatformGralloc(con->m_rendernodeFd));
     if (!con->m_grallocHelper) {
-        ALOGE("Failed to create platform Gralloc!");
+        GFXSTREAM_FATAL("Failed to create platform Gralloc!");
         abort();
     }
 
     con->m_anwHelper.reset(gfxstream::createPlatformANativeWindowHelper());
     if (!con->m_anwHelper) {
-        ALOGE("Failed to create platform ANativeWindowHelper!");
+        GFXSTREAM_FATAL("Failed to create platform ANativeWindowHelper!");
         abort();
     }
 #endif
@@ -360,6 +354,7 @@ ExtendedRCEncoderContext *HostConnection::rcEncoder()
         rcEnc->queryAndSetVulkanAsyncQsri();
         rcEnc->queryAndSetReadColorBufferDma();
         rcEnc->queryAndSetHWCMultiConfigs();
+        rcEnc->queryAndSetHWCColorTransform();
         rcEnc->queryAndSetVulkanAuxCommandBufferMemory();
         rcEnc->queryVersion();
 

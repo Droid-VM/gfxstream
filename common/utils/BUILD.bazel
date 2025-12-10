@@ -1,16 +1,17 @@
-# Header Library
-cc_library(
-    name = "gfxstream_common_utils_headers",
-    hdrs = glob(["include/**/*.h"]),
-    includes = ["include"],
-    visibility = ["//visibility:public"],
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(
+    default_applicable_licenses = ["//:gfxstream_license"],
+    default_visibility = ["//:gfxstream"],
 )
 
-# Code Library
 cc_library(
     name = "gfxstream_common_utils",
-    srcs = ["Strings.cpp"],
-    copts = ["-fno-exceptions"],
-    visibility = ["//visibility:public"],
-    deps = [":gfxstream_common_utils_headers"],
+    srcs = ["strings.cpp"],
+    hdrs = glob(["include/**/*.h"]),
+    copts = select({
+        "@platforms//os:windows": ["/EHs-c-"],
+        "//conditions:default": ["-fno-exceptions"],
+    }),
+    includes = ["include"],
 )

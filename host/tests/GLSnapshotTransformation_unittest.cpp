@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "GLSnapshotTesting.h"
-#include "OpenGLTestContext.h"
+#include "gfxstream/host/testing/GLSnapshotTesting.h"
+#include "gfxstream/host/testing/OpenGLTestContext.h"
 
 #include <gtest/gtest.h>
 
 namespace gfxstream {
+namespace host {
 namespace gl {
 namespace {
 
@@ -78,4 +79,5 @@ INSTANTIATE_TEST_SUITE_P(GLES2SnapshotTransformation,
 
 }  // namespace
 }  // namespace gl
+}  // namespace host
 }  // namespace gfxstream

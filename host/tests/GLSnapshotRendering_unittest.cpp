@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "GLSnapshotTestDispatch.h"
-#include "GLSnapshotTesting.h"
-#include "Standalone.h"
-#include "HelloTriangle.h"
-#include "host-common/GraphicsAgentFactory.h"
-#include "host-common/testing/MockGraphicsAgentFactory.h"
-
 #include <gtest/gtest.h>
 
+#include "frame_buffer.h"
+#include "gfxstream/host/testing/HelloTriangle.h"
+#include "gfxstream/host/testing/GLSnapshotTestDispatch.h"
+#include "gfxstream/host/testing/GLSnapshotTesting.h"
+#include "gfxstream/host/testing/OSWindow.h"
+
 namespace gfxstream {
+namespace host {
 namespace gl {
 namespace {
 
@@ -59,17 +59,9 @@ protected:
 
 template <typename T>
 class SnapshotGlRenderingSampleTest : public ::testing::Test {
-protected:
-    static void SetUpTestSuite() {
-        android::emulation::injectGraphicsAgents(
-                android::emulation::MockGraphicsAgentFactory());
-    }
-
-    static void TearDownTestSuite() { }
-
+  protected:
     virtual void SetUp() override {
         // setupStandaloneLibrarySearchPaths();
-        emugl::set_emugl_window_operations(*getGraphicsAgents()->emu);
         //const EGLDispatch* egl = LazyLoadedEGLDispatch::get();
 
         gl::LazyLoadedGLESv2Dispatch::get();
@@ -105,4 +97,5 @@ TYPED_TEST(SnapshotGlRenderingSampleTest, SnapshotDrawLoop) {
 
 }  // namespace
 }  // namespace gl
+}  // namespace host
 }  // namespace gfxstream

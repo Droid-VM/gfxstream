@@ -1,0 +1,97 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+package(
+    default_applicable_licenses = ["//:gfxstream_license"],
+    default_visibility = ["//:gfxstream"],
+)
+
+# Flatten all data files into a single `testdata` directory to simplify
+# path discovery inside of tests and inside of the guest drivers (the
+# guest EGL driver loads the GLES1 and GLES2 drivers for example).
+copy_to_directory(
+    name = "gfxstream_end2end_testdata",
+    srcs = [
+        "testdata/256x256_android.png",
+        "testdata/256x256_android_with_transparency.png",
+        "testdata/256x256_golden_basic_composition.png",
+        "testdata/256x256_golden_basic_yv12.png",
+        "testdata/256x256_golden_rotated_rgba.png",
+        "testdata/256x256_golden_rotated_yv12.png",
+        "//guest/GLESv1:gfxstream_guest_glesv1",
+        "//guest/GLESv1_enc:gfxstream_guest_glesv1encoder_shared",
+        "//guest/GLESv2:gfxstream_guest_glesv2",
+        "//guest/GLESv2_enc:gfxstream_guest_glesv2encoder_shared",
+        "//guest/OpenglCodecCommon:gfxstream_guest_openglcodeccommon_shared",
+        "//guest/OpenglSystemCommon:gfxstream_guest_openglsystemcommon_shared",
+        "//guest/egl:gfxstream_guest_egl",
+        "//guest/rendercontrol:gfxstream_guest_rendercontrol",
+        "@mesa//:mesa_gfxstream_guest_vulkan",
+        "@rutabaga//:rutabaga_gfx_kumquat_server",
+    ],
+    include_external_repositories = ["*"],
+    # Effectively, all of the "prefixes" to flatten.
+    root_paths = [
+        "tests/end2end/testdata",
+        "guest/egl",
+        "guest/GLESv1",
+        "guest/GLESv1_enc",
+        "guest/GLESv2",
+        "guest/GLESv2_enc",
+        "guest/OpenglCodecCommon",
+        "guest/OpenglSystemCommon",
+        "guest/rendercontrol",
+    ],
+)
+
+cc_test(
+    name = "gfxstream_end2end_tests",
+    size = "enormous",
+    srcs = [
+        "gfxstream_end2end_composition_tests.cpp",
+        "gfxstream_end2end_gl_tests.cpp",
+        "gfxstream_end2end_gralloc_tests.cpp",
+        "gfxstream_end2end_test_utils.cpp",
+        "gfxstream_end2end_test_utils.h",
+        "gfxstream_end2end_tests.cpp",
+        "gfxstream_end2end_tests.h",
+        "gfxstream_end2end_vk_tests.cpp",
+        "kumquat_instance.cpp",
+        "kumquat_instance.h",
+        "test_data_utils.cpp",
+        "test_data_utils.h",
+    ] + glob([
+        "shaders/**/*.h",
+    ]),
+    cxxopts = ["-std=c++20"],
+    data = [
+        ":gfxstream_end2end_testdata",
+    ],
+    defines = [
+        "ANDROID",
+        "VK_USE_PLATFORM_ANDROID_KHR",
+    ],
+    dynamic_deps = [
+        "//guest/OpenglSystemCommon:gfxstream_guest_openglsystemcommon_shared",
+    ],
+    deps = [
+        "//common/base:gfxstream_common_base",
+        "//common/image:gfxstream_common_image",
+        "//common/logging:gfxstream_common_logging",
+        "//common/testenv:graphics_test_environment_support",
+        "//common/utils:gfxstream_common_utils",
+        "//guest/OpenglSystemCommon:gfxstream_guest_openglsystemcommon",
+        "//guest/rendercontrol:gfxstream_guest_rendercontrol_headers",
+        "//host/gl/OpenGLESDispatch:gfxstream_host_openglesdispatch_headers",
+        "//third_party/android:gfxstream_thirdparty_android_headers",
+        "//third_party/drm:gfxstream_drm_headers",
+        "//third_party/opengl:gfxstream_egl_headers",
+        "//third_party/vulkan:gfxstream_vulkan_headers",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@mesa//:mesa_gfxstream_guest_android",
+        "@mesa//:mesa_gfxstream_guest_platform",
+        "@rules_cc//cc/runfiles",
+        "@rutabaga//:rutabaga_gfx_kumquat_client_ffi_headers",
+    ],
+)

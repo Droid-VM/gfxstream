@@ -18,7 +18,6 @@ EGLint eglGetMaxGLESVersion(EGLDisplay display);
 void eglBlitFromCurrentReadBufferANDROID(EGLDisplay display, EGLImageKHR image);
 void* eglSetImageFenceANDROID(EGLDisplay display, EGLImageKHR image);
 void eglWaitImageFenceANDROID(EGLDisplay display, void* fence);
-void eglAddLibrarySearchPathANDROID(const char* path);
 EGLBoolean eglQueryVulkanInteropSupportANDROID(void);
 EGLBoolean eglGetSyncAttribKHR(EGLDisplay display, EGLSync sync, EGLint attribute, EGLint *value);
 EGLDisplay eglGetNativeDisplayANDROID(EGLDisplay display);
@@ -28,4 +27,4 @@ EGLBoolean eglSetImageInfoANDROID(EGLDisplay display, EGLImage image, EGLint wid
 EGLImage eglImportImageANDROID(EGLDisplay display, EGLImage image);
 EGLint eglDebugMessageControlKHR(EGLDEBUGPROCKHR callback, const EGLAttrib * attrib_list);
 EGLBoolean eglSetNativeTextureDecompressionEnabledANDROID(EGLDisplay display, EGLBoolean enabled);
-EGLBoolean eglSetProgramBinaryLinkStatusEnabledANDROID(EGLDisplay display, EGLboolean enabled);
+EGLBoolean eglSetProgramBinaryLinkStatusEnabledANDROID(EGLDisplay display, EGLBoolean enabled);

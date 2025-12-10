@@ -23,6 +23,7 @@
 #include <string.h>
 
 namespace gfxstream {
+namespace host {
 namespace gl {
 
 #define DEBUG 0
@@ -112,7 +113,10 @@ static return_type gles1_dummy_##func_name signature { \
 bool gles1_dispatch_init(GLESv1Dispatch* dispatch_table) {
     if (dispatch_table->initialized) return true;
 
+#if !defined(__MINGW64__)
+//link error
     LIST_GLES1_FUNCTIONS(ASSIGN_GLES1_STATIC, ASSIGN_GLES1_STATIC);
+#endif // !defined(__MINGW64__)
 
     dispatch_table->initialized = true;
     return true;
@@ -132,4 +136,5 @@ void *gles1_dispatch_get_proc_func(const char *name, void *userData)
 }
 
 }  // namespace gl
+}  // namespace host
 }  // namespace gfxstream

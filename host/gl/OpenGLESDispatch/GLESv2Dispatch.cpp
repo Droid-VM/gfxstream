@@ -25,6 +25,7 @@
 #define DEFAULT_GLES_V2_LIB EMUGL_LIBNAME("GLES_V2_translator")
 
 namespace gfxstream {
+namespace host {
 namespace gl {
 
 // An unimplemented function which prints out an error message.
@@ -45,7 +46,10 @@ void gles2_unimplemented() {
 bool gles2_dispatch_init(GLESv2Dispatch* dispatch_table) {
     if (dispatch_table->initialized) return true;
 
+#if !defined(__MINGW64__)
+//link error
     LIST_GLES2_FUNCTIONS(LOOKUP_SYMBOL_STATIC,LOOKUP_SYMBOL_STATIC)
+#endif // !defined(__MINGW64__)
 
     dispatch_table->initialized = true;
     return true;
@@ -66,4 +70,5 @@ void *gles2_dispatch_get_proc_func(const char *name, void *userData)
 }
 
 }  // namespace gl
+}  // namespace host
 }  // namespace gfxstream

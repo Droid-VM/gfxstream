@@ -13,13 +13,15 @@
 // limitations under the License.
 #include <gtest/gtest.h>
 
-#include "host-common/testing/MockGraphicsAgentFactory.h"
-#include "Standalone.h"
-#include "GLTestUtils.h"
-
 #include <memory>
 
+#include "frame_buffer.h"
+#include "OpenGLESDispatch/OpenGLDispatchLoader.h"
+#include "gfxstream/host/testing/GLTestUtils.h"
+#include "gfxstream/host/testing/SampleApplication.h"
+
 namespace gfxstream {
+namespace host {
 namespace {
 
 using gl::GLESApi;
@@ -64,7 +66,7 @@ public:
 
             mFb->closeColorBuffer(mColorBuffer);
             mColorBuffer = mFb->createColorBuffer(
-                    mWidth, mHeight, GL_RGBA, FRAMEWORK_FORMAT_GL_COMPATIBLE);
+                    mWidth, mHeight, GfxstreamFormat::R8G8B8A8_UNORM);
             mFb->setEmulatedEglWindowSurfaceColorBuffer(mSurface, mColorBuffer);
         }
     }
@@ -158,7 +160,7 @@ public:
 
         mFb->readColorBuffer(
             mColorBuffer, 0, 0, mWidth, mHeight,
-            GL_RGBA, GL_UNSIGNED_BYTE, forRead.data());
+            GfxstreamFormat::R8G8B8A8_UNORM, forRead.data());
 
         EXPECT_TRUE(
             ImageMatches(mWidth, mHeight, 4, mWidth, targetBuffer.data(), forRead.data()));
@@ -182,14 +184,7 @@ static constexpr float kDrawColorRed[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
 static constexpr float kDrawColorGreen[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
 
 class CombinedFramebufferBlit : public ::testing::Test, public ::testing::WithParamInterface<ClearColorParam> {
-protected:
-    static void SetUpTestSuite() {
-        android::emulation::injectGraphicsAgents(
-                android::emulation::MockGraphicsAgentFactory());
-    }
-
-    static void TearDownTestSuite() { }
-
+  protected:
     virtual void SetUp() override {
         mApp.reset(new ClearColor(GetParam()));
     }
@@ -279,4 +274,5 @@ INSTANTIATE_TEST_SUITE_P(DefaultFramebufferBlitTest,
                             ClearColorParam(GLESApi_3_0, true)));
 
 }  // namespace
+}  // namespace host
 }  // namespace gfxstream

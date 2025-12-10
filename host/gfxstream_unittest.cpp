@@ -16,14 +16,13 @@
 
 #include <vector>
 
-#include "OSWindow.h"
-#include "aemu/base/system/System.h"
-#include "host-common/testing/MockGraphicsAgentFactory.h"
-#include "virgl_hw.h"
+#include "gfxstream/host/testing/OSWindow.h"
+#include "gfxstream/system/System.h"
 #include "gfxstream/virtio-gpu-gfxstream-renderer-unstable.h"
 #include "gfxstream/virtio-gpu-gfxstream-renderer.h"
+#include "virtio_gpu_format_utils.h"
 
-using android::base::sleepMs;
+using gfxstream::base::sleepMs;
 
 class GfxStreamBackendTest : public ::testing::Test {
 private:
@@ -59,7 +58,6 @@ protected:
                                 {STREAM_RENDERER_PARAM_RENDERER_FLAGS, surfacelessFlags}} {}
 
     static void SetUpTestSuite() {
-        android::emulation::injectGraphicsAgents(android::emulation::MockGraphicsAgentFactory());
         if (useWindow) {
             window.reset(CreateOSWindow());
         }
@@ -68,7 +66,7 @@ protected:
     static void TearDownTestSuite() { window.reset(nullptr); }
 
     void SetUp() override {
-        android::base::setEnvironmentVariable("ANDROID_GFXSTREAM_EGL", "1");
+        gfxstream::base::setEnvironmentVariable("ANDROID_GFXSTREAM_EGL", "1");
         if (useWindow) {
             window->initialize("GfxStreamBackendTestWindow", width, height);
             window->setVisible(true);
@@ -89,7 +87,7 @@ protected:
 std::unique_ptr<OSWindow> GfxStreamBackendTest::window = nullptr;
 
 const bool GfxStreamBackendTest::useWindow =
-        android::base::getEnvironmentVariable("ANDROID_EMU_TEST_WITH_WINDOW") == "1";
+        gfxstream::base::getEnvironmentVariable("ANDROID_EMU_TEST_WITH_WINDOW") == "1";
 
 TEST_F(GfxStreamBackendTest, Init) {
     stream_renderer_init(streamRendererParams.data(), streamRendererParams.size());

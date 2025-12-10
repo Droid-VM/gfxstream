@@ -52,6 +52,10 @@ def main():
         source_file_lines = source_file.readlines()
 
     with open(args.target_file, mode='wt') as target_file:
+
+        # Always use forward slashes to avoid differences on Windows
+        normalized_source_file = str(args.source_file).replace("\\", "/")
+
         header = f"""// Copyright (C) {datetime.today().year} The Android Open Source Project
 // Copyright (C) {datetime.today().year} Google Inc.
 //
@@ -75,13 +79,16 @@ def main():
 #include <stdint.h>
 #include <vector>
 
-// From {args.source_file}:
+// From {normalized_source_file}:
 
 """
         target_file.write(header)
 
         for source_file_line in source_file_lines:
-            target_file.write("// " + source_file_line)
+            if(source_file_line != '\n'):
+                target_file.write("// " + source_file_line)
+            else:
+                target_file.write("//\n")
 
         target_file.write("\n\n")
 

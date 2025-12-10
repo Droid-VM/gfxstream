@@ -19,15 +19,15 @@ PROGRAM_PARAMETERS=""
 PROGRAM_DESCRIPTION=\
 "Regenerate static translator headers for EGL/GLES1/GLES2,3."
 
-ENTRIES_DIR=stream-servers/gl/OpenGLESDispatch
-HEADER_OUT_DIR=include/OpenGLESDispatch
-IMPL_OUT_DIR=stream-servers/gl/OpenGLESDispatch
+ENTRIES_DIR=host/gl/OpenGLESDispatch
+HEADER_OUT_DIR=host/gl/OpenGLESDispatch/include/OpenGLESDispatch
+IMPL_OUT_DIR=host/gl/OpenGLESDispatch
 
 function gen_entries_with_mode() {
     local mode=$1
     local entries_file=$2
     local output_path=$3
-    scripts/gen-entries.py --mode=$mode $entries_file --output=$output_path
+    python3 scripts/gen-entries.py --mode=$mode $entries_file --output=$output_path
 }
 
 function funcargs_header() {

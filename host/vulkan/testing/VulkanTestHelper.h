@@ -14,17 +14,16 @@
 
 #pragma once
 
-#include "VkDecoderGlobalState.h"
-#include "VulkanDispatch.h"
-#include "aemu/base/BumpPool.h"
-#include "base/include/aemu/base/HealthMonitor.h"
-#include "base/include/aemu/base/Metrics.h"
-#include "vulkan/VkCommonOperations.h"
-#include "vulkan/VkDecoderContext.h"
+#include "gfxstream/BumpPool.h"
+#include "gfxstream/host/GfxApiLogger.h"
+#include "vk_decoder_global_state.h"
+#include "vulkan_dispatch.h"
 #include "vulkan/testing/VkDecoderTestDispatch.h"
-#include "utils/include/utils/GfxApiLogger.h"
+#include "vulkan/vk_common_operations.h"
+#include "vulkan/vk_decoder_context.h"
 
 namespace gfxstream {
+namespace host {
 namespace vk {
 namespace testing {
 
@@ -99,11 +98,9 @@ class VulkanTestHelper {
     static std::mutex mMutex;  // Locked for the entire lifetime of this class.
     std::lock_guard<std::mutex> mLock;
     VulkanDispatch* mVk;
-    emugl::GfxApiLogger mLogger;
-    std::unique_ptr<android::base::MetricsLogger> mMetricsLogger;
-    emugl::HealthMonitor<> mHealthMonitor;
+    gfxstream::host::GfxApiLogger mLogger;
     std::unique_ptr<VkEmulation> mVkEmu;
-    std::unique_ptr<::android::base::BumpPool> mBp;
+    std::unique_ptr<::gfxstream::base::BumpPool> mBp;
     VkDecoderContext mDecoderContext;
     VkDecoderTestDispatch mTestDispatch;
     bool mFailOnValidationErrors = true;
@@ -119,4 +116,5 @@ class VulkanTestHelper {
 
 }  // namespace testing
 }  // namespace vk
+}  // namespace host
 }  // namespace gfxstream

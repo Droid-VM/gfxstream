@@ -12,12 +12,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #pragma once
 
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
 
 #include "goldfish_vk_private_defs.h"
+#include "vk_android_native_buffer_gfxstream.h"
+#include "vulkan_gfxstream.h"
+#include "vulkan_gfxstream_structure_type.h"
 
 template <class T>
 struct vk_get_vk_struct_id;
@@ -28,6 +32,11 @@ struct vk_get_vk_struct_id;
         static constexpr VkStructureType id = ID; \
     };
 
+REGISTER_VK_STRUCT_ID(VkInstanceCreateInfo, VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO);
+REGISTER_VK_STRUCT_ID(VkDebugReportCallbackCreateInfoEXT,
+                      VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT);
+REGISTER_VK_STRUCT_ID(VkDebugUtilsMessengerCreateInfoEXT,
+                      VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT);
 REGISTER_VK_STRUCT_ID(VkBufferCreateInfo, VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
 REGISTER_VK_STRUCT_ID(VkImageCreateInfo, VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
 REGISTER_VK_STRUCT_ID(VkImageFormatProperties2, VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2);
@@ -58,6 +67,10 @@ REGISTER_VK_STRUCT_ID(VkSamplerYcbcrConversionInfo,
 REGISTER_VK_STRUCT_ID(VkImportBufferGOOGLE, VK_STRUCTURE_TYPE_IMPORT_BUFFER_GOOGLE);
 REGISTER_VK_STRUCT_ID(VkCreateBlobGOOGLE, VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE);
 
+#if defined(__ANDROID__)
+REGISTER_VK_STRUCT_ID(VkImportAndroidHardwareBufferInfoANDROID,
+                      VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID);
+#endif
 #ifdef _WIN32
 REGISTER_VK_STRUCT_ID(VkImportMemoryWin32HandleInfoKHR,
                       VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR);
@@ -107,6 +120,12 @@ REGISTER_VK_STRUCT_ID(VkPhysicalDeviceInlineUniformBlockFeatures,
                       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES);
 REGISTER_VK_STRUCT_ID(VkPhysicalDeviceRobustness2FeaturesEXT,
                       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT);
+REGISTER_VK_STRUCT_ID(VkPhysicalDeviceTimelineSemaphoreFeaturesKHR,
+                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES);
+REGISTER_VK_STRUCT_ID(VkSubmitInfo,
+                      VK_STRUCTURE_TYPE_SUBMIT_INFO);
+REGISTER_VK_STRUCT_ID(VkSubmitInfo2,
+                      VK_STRUCTURE_TYPE_SUBMIT_INFO_2);
 
 #if defined(VK_USE_PLATFORM_SCREEN_QNX)
 REGISTER_VK_STRUCT_ID(VkPhysicalDeviceExternalMemoryScreenBufferFeaturesQNX,

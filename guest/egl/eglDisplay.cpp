@@ -23,8 +23,13 @@
 #include <dlfcn.h>
 #include <GLES3/gl31.h>
 
-#include <aemu/base/Path.h>
 #include <system/graphics.h>
+
+#include "aemu/base/Path.h"
+#include "gfxstream/common/logging.h"
+#ifndef __ANDROID__
+#include "gfxstream/system/System.h"
+#endif
 
 static const int systemEGLVersionMajor = 1;
 static const int systemEGLVersionMinor = 4;
@@ -105,7 +110,7 @@ bool eglDisplay::initialize(EGLClient_eglInterface *eglIface)
                                          &s_gles_lib);
         if (!m_gles_iface) {
             pthread_mutex_unlock(&m_lock);
-            ALOGE("Failed to load gles1 iface");
+            GFXSTREAM_ERROR("Failed to load gles1 iface");
             return false;
         }
 
@@ -119,7 +124,7 @@ bool eglDisplay::initialize(EGLClient_eglInterface *eglIface)
         HostConnection *hcon = HostConnection::get();
         if (!hcon) {
             pthread_mutex_unlock(&m_lock);
-            ALOGE("Failed to establish connection with the host\n");
+            GFXSTREAM_ERROR("Failed to establish connection with the host.");
             return false;
         }
 
@@ -129,7 +134,7 @@ bool eglDisplay::initialize(EGLClient_eglInterface *eglIface)
         renderControl_encoder_context_t *rcEnc = hcon->rcEncoder();
         if (!rcEnc) {
             pthread_mutex_unlock(&m_lock);
-            ALOGE("Failed to get renderControl encoder instance");
+            GFXSTREAM_ERROR("Failed to get renderControl encoder instance");
             return false;
         }
 
@@ -167,7 +172,7 @@ bool eglDisplay::initialize(EGLClient_eglInterface *eglIface)
         }
 
         uint32_t nInts = m_numConfigAttribs * (m_numConfigs + 1);
-        EGLint tmp_buf[nInts];
+        EGLint *tmp_buf = new EGLint[nInts];
 
         m_configs = new EGLint[nInts-m_numConfigAttribs];
 
@@ -190,6 +195,7 @@ bool eglDisplay::initialize(EGLClient_eglInterface *eglIface)
 
         memcpy(m_configs, tmp_buf + m_numConfigAttribs,
                m_numConfigs*m_numConfigAttribs*sizeof(EGLint));
+        delete [] tmp_buf;
 
         m_initialized = true;
     }
@@ -280,29 +286,29 @@ EGLClient_glesInterface *eglDisplay::loadGLESClientAPI(const char *basename,
                     basename +
                     std::string(LIBSUFFIX));
 #else
-    const std::string directory = gfxstream::guest::getProgramDirectory();
-    paths.push_back(directory + "/" + basename + LIBSUFFIX);
-    paths.push_back(directory + "/" + basename + "_with_host" + LIBSUFFIX);
-    paths.push_back(directory + "/lib64/" + basename + LIBSUFFIX);
-    paths.push_back(directory + "/lib64/" + basename + "_with_host" + LIBSUFFIX);
+    const std::string testdataDirectory =
+        gfxstream::base::getEnvironmentVariable("GFXSTREAM_TESTDATA_PATH");
+    paths.push_back(testdataDirectory + "/" + basename + LIBSUFFIX);
+    paths.push_back(testdataDirectory + "/" + basename + "_with_host" + LIBSUFFIX);
 #endif
 
     void* lib = nullptr;
     for (const std::string& path : paths) {
-        ALOGI("Opening %s", path.c_str());
+        GFXSTREAM_INFO("Opening %s", path.c_str());
         lib = dlopen(path.c_str(), RTLD_NOW);
         if (lib) {
             break;
         }
+        GFXSTREAM_ERROR("Failed to dlopen %s: %s", path.c_str(), dlerror());
     }
     if (!lib) {
-        ALOGE("Failed to dlopen %s", basename);
+        GFXSTREAM_ERROR("Failed to dlopen %s", basename);
         return NULL;
     }
 
     init_emul_gles_t init_gles_func = (init_emul_gles_t)dlsym(lib,"init_emul_gles");
     if (!init_gles_func) {
-        ALOGE("Failed to find init_emul_gles");
+        GFXSTREAM_ERROR("Failed to find init_emul_gles");
         dlclose((void*)lib);
         return NULL;
     }
@@ -432,7 +438,7 @@ const char *eglDisplay::queryString(EGLint name)
         return m_extensionString;
     }
     else {
-        ALOGE("[%s] Unknown name %d\n", __FUNCTION__, name);
+        GFXSTREAM_ERROR("Unknown name %d.", name);
         return NULL;
     }
 }
@@ -444,7 +450,7 @@ EGLBoolean eglDisplay::getAttribValue(EGLConfig config, EGLint attribIdx, EGLint
 {
     if (attribIdx == ATTRIBUTE_NONE)
     {
-        ALOGE("[%s] Bad attribute idx\n", __FUNCTION__);
+        GFXSTREAM_ERROR("Bad attribute idx.");
         return EGL_FALSE;
     }
     *value = *(m_configs + (intptr_t)(getIndexOfConfig(config))*m_numConfigAttribs + attribIdx);
@@ -516,7 +522,7 @@ EGLBoolean eglDisplay::setAttribValue(EGLConfig config, EGLint attribIdx, EGLint
 {
     if (attribIdx == ATTRIBUTE_NONE)
     {
-        ALOGE("[%s] Bad attribute idx\n", __FUNCTION__);
+        GFXSTREAM_ERROR("Bad attribute idx");
         return EGL_FALSE;
     }
     *(m_configs + (intptr_t)(getIndexOfConfig(config))*m_numConfigAttribs + attribIdx) = value;
@@ -561,7 +567,7 @@ EGLBoolean eglDisplay::getConfigNativePixelFormat(EGLConfig config, uint32_t * f
                 config,
                 findObjectOrDefault(m_attribs, EGL_ALPHA_SIZE, EGL_DONT_CARE),
                 &alphaSize))) {
-        ALOGE("Couldn't find value for one of the pixel format attributes");
+        GFXSTREAM_ERROR("Couldn't find value for one of the pixel format attributes");
         return EGL_FALSE;
     }
 
@@ -595,7 +601,7 @@ EGLBoolean eglDisplay::getConfigGLPixelFormat(EGLConfig config, GLenum * format)
                 config,
                 findObjectOrDefault(m_attribs, EGL_ALPHA_SIZE, EGL_DONT_CARE),
                 &alphaSize))) {
-        ALOGE("Couldn't find value for one of the pixel format attributes");
+        GFXSTREAM_ERROR("Couldn't find value for one of the pixel format attributes");
         return EGL_FALSE;
     }
 

@@ -52,21 +52,12 @@ class ExtendedRCEncoderContext : public renderControl_encoder_context_t {
     bool hasAsyncFrameCommands() const { return m_featureInfo.hasAsyncFrameCommands; }
     bool hasSyncBufferData() const { return m_featureInfo.hasSyncBufferData; }
     bool hasHWCMultiConfigs() const { return m_featureInfo.hasHWCMultiConfigs; }
+    bool hasHWCColorTransform() const { return m_featureInfo.hasHWCColorTransform; }
     void bindDmaDirectly(void* dmaPtr, uint64_t dmaPhysAddr) {
         m_dmaPtr = dmaPtr;
         m_dmaPhysAddr = dmaPhysAddr;
     }
-    virtual uint64_t lockAndWriteDma(void* data, uint32_t size) {
-        if (m_dmaPtr && m_dmaPhysAddr) {
-            if (data != m_dmaPtr) {
-                memcpy(m_dmaPtr, data, size);
-            }
-            return m_dmaPhysAddr;
-        } else {
-            ALOGE("%s: ALOGEOR: No DMA context bound!", __func__);
-            return 0;
-        }
-    }
+    virtual uint64_t lockAndWriteDma(void* data, uint32_t size);
     void setGLESMaxVersion(GLESMaxVersion ver) { m_featureInfo.glesMaxVersion = ver; }
     GLESMaxVersion getGLESMaxVersion() const { return m_featureInfo.glesMaxVersion; }
     bool hasDirectMem() const { return m_featureInfo.hasDirectMem; }
@@ -105,6 +96,7 @@ class ExtendedRCEncoderContext : public renderControl_encoder_context_t {
     void queryAndSetVulkanAsyncQsri();
     void queryAndSetReadColorBufferDma();
     void queryAndSetHWCMultiConfigs();
+    void queryAndSetHWCColorTransform();
     void queryAndSetVulkanAuxCommandBufferMemory();
     GLint queryVersion();
     void setVulkanFeatureInfo(void* info);
