@@ -918,9 +918,6 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     };
 
 #ifdef __APPLE__
-    std::vector<const char*> moltenVkInstanceExtNames = {
-        VK_MVK_MACOS_SURFACE_EXTENSION_NAME,
-    };
     std::vector<const char*> moltenVkDeviceExtNames = {
         VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
     };
@@ -946,17 +943,9 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     bool surfaceSupported = vk_util::extensionsSupported(instanceExts, surfaceInstanceExtNames);
 #if defined(__APPLE__)
     const std::string vulkanIcd = gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD");
-    const bool moltenVKRequested = (vulkanIcd == "moltenvk");
-    const bool moltenVKSupported =
-        vk_util::extensionsSupported(instanceExts, moltenVkInstanceExtNames);
+    const bool useMoltenVK = (vulkanIcd == "moltenvk");
     const bool usePortabilityEnumeration =
         vk_util::extensionsSupported(instanceExts, portabilityEnumerationNames);
-    if (moltenVKRequested && !moltenVKSupported) {
-        // This might happen if the user manually changes moltenvk ICD library
-        // Just a warning to enable a later version without or other drivers without portability
-        GFXSTREAM_WARNING("MoltenVK requested, but the required extensions are not supported.");
-    }
-    const bool useMoltenVK = moltenVKRequested && moltenVKSupported;
 #endif
 
     VkApplicationInfo appInfo = {
@@ -1030,11 +1019,6 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     }
 
 #if defined(__APPLE__)
-    if (useMoltenVK) {
-        for (auto extension : moltenVkInstanceExtNames) {
-            selectedInstanceExtensionNames.emplace(extension);
-        }
-    }
     if (usePortabilityEnumeration) {
         GFXSTREAM_INFO("Enabling Vulkan portability.");
         instCi.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
@@ -1195,7 +1179,8 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         ivk->vkEnumerateDeviceExtensionProperties(physicalDevices[i], nullptr,
                                                   &deviceExtensionCount, deviceExts.data());
 
-        deviceInfos[i].externalMemoryMode = ExternalMemory::calculateMode(deviceExts);
+        deviceInfos[i].externalMemoryMode =
+            ExternalMemory::calculateMode(deviceExts, deviceInfos[i].memProps);
 
         deviceInfos[i].supportsExternalMemoryImport = false;
         deviceInfos[i].supportsExternalMemoryExport = false;
@@ -1585,7 +1570,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         }
     }
 
-    ivk->vkCreateDevice(emulation->mPhysicalDevice, &dCi, nullptr, &emulation->mDevice);
+    res = ivk->vkCreateDevice(emulation->mPhysicalDevice, &dCi, nullptr, &emulation->mDevice);
 
     if (res != VK_SUCCESS) {
         GFXSTREAM_ERROR("Failed to create Vulkan device. Error %s.", string_VkResult(res));
@@ -2106,9 +2091,14 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
                 &memoryHostPointerProperties);
             uint32_t requestedBits = (1u << allocInfo.memoryTypeIndex);
             if ((requestedBits & memoryHostPointerProperties.memoryTypeBits) == 0) {
-                GFXSTREAM_FATAL(
-                    "%s: Cannot allocate external memory on memory type 0x%x, supported bits 0x%x",
-                    __func__, requestedBits, memoryHostPointerProperties.memoryTypeBits);
+                static bool errorReported = false;
+                if (!errorReported) {
+                    GFXSTREAM_ERROR(
+                        "%s: Cannot allocate external memory on memory type 0x%x, supported bits "
+                        "0x%x",
+                        __func__, requestedBits, memoryHostPointerProperties.memoryTypeBits);
+                        errorReported = true;
+                }
             }
         }
 
@@ -3698,9 +3688,19 @@ bool VkEmulation::readColorBufferPixelsScaledGpu(uint32_t colorBufferHandle, int
     }
 
     // 2. Call m_compositorVk->drawImage for the transformation.
-    mCompositorVk->drawImage(mCommandBuffer, VK_FORMAT_R8G8B8A8_UNORM, pixelsWidth, pixelsHeight,
-                             tempRenderPass, tempFramebuffer, imResources, sourceCbInfo->imageView,
-                             rotationToDegrees(pixelsRotation), colorTransform);
+    CompositorVk::ImageDrawParams drawParams = {
+        .commandBuffer = mCommandBuffer,
+        .targetFormat = VK_FORMAT_R8G8B8A8_UNORM,
+        .targetWidth = (uint32_t)pixelsWidth,
+        .targetHeight = (uint32_t)pixelsHeight,
+        .targetRenderPass = tempRenderPass,
+        .targetFramebuffer = tempFramebuffer,
+        .frameResources = imResources,
+        .rotationDegrees = rotationToDegrees(pixelsRotation),
+        .useScreenBlend = false,
+        .colorTransform = colorTransform,
+    };
+    mCompositorVk->drawImage(drawParams, sourceCbInfo->imageView);
 
     // 3. Perform GPU-side readback from tempImage to staging buffer.
     mDebugUtilsHelper.cmdBeginDebugLabel(mCommandBuffer, "readColorBufferPixelsScaledGpu_Readback");

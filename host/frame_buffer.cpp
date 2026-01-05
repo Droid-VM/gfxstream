@@ -1385,13 +1385,23 @@ FrameBuffer::Impl::Impl(FrameBuffer* framebuffer, int p_width, int p_height,
       m_windowHeight(p_height),
       m_useSubWindow(useSubWindow),
       m_fpsStats(getenv("SHOW_FPS_STATS") != nullptr),
-      m_readbackThread([this](FrameBuffer::Impl::Readback&& readback) {
-          return sendReadbackWorkerCmd(readback);
-      }),
+      m_readbackThread(
+        []() {
+            GFXSTREAM_TRACE_NAME_THREAD("Gfxstream Readback Worker");
+        },
+        [this](FrameBuffer::Impl::Readback&& readback) {
+            return sendReadbackWorkerCmd(readback);
+        }),
       m_refCountPipeEnabled(features.RefCountPipe.enabled),
       m_noDelayCloseColorBufferEnabled(features.NoDelayCloseColorBuffer.enabled ||
                                        features.Minigbm.enabled),
-      m_postThread([this](Post&& post) { return postWorkerFunc(post); }) {
+      m_postThread(
+        []() {
+            GFXSTREAM_TRACE_NAME_THREAD("Gfxstream Post Worker");
+        },
+        [this](Post&& post) {
+            return postWorkerFunc(post);
+        }) {
     mDisplayActiveConfigId = 0;
     mDisplayConfigs[0] = {p_width, p_height, 160, 160};
     uint32_t displayId = 0;
@@ -1820,6 +1830,14 @@ bool FrameBuffer::Impl::setupSubWindow(FBNativeWindowType p_window, int wx, int 
                     Post clearCmd;
                     clearCmd.cmd = PostCmd::Clear;
                     sendPostWorkerCmd(std::move(clearCmd));
+                }
+            } else {
+                if (m_lastPostedColorBuffer) {
+                    GFXSTREAM_DEBUG("setupSubwindow: draw last posted cb");
+                    postImpl(m_lastPostedColorBuffer,
+                        [](std::shared_future<void> waitForGpu) {
+                            waitForGpu.wait();
+                        }, false);
                 }
             }
             m_windowContentFullWidth = fbw;
@@ -3795,8 +3813,9 @@ void FrameBuffer::Impl::createSharedTrivialContext(EGLContext* contextOut, EGLSu
 
     ENSURE_GL_EMULATION_VOID();
 
-    const EmulatedEglConfig* config = m_emulationGl->getEmulationEglConfigs().get(0 /* p_config */);
-    if (!config) return;
+    if (m_emulationGl->mEglConfig == EGL_NO_CONFIG) {
+        GFXSTREAM_FATAL("GL/EGL emulation has not chosen a config.");
+    }
 
     int maj, min;
     get_gfxstream_gles_version(&maj, &min);
@@ -3804,12 +3823,12 @@ void FrameBuffer::Impl::createSharedTrivialContext(EGLContext* contextOut, EGLSu
     const EGLint contextAttribs[] = {EGL_CONTEXT_MAJOR_VERSION_KHR, maj,
                                      EGL_CONTEXT_MINOR_VERSION_KHR, min, EGL_NONE};
 
-    *contextOut = s_egl.eglCreateContext(getDisplay(), config->getHostEglConfig(),
+    *contextOut = s_egl.eglCreateContext(getDisplay(), m_emulationGl->mEglConfig,
                                          getGlobalEGLContext(), contextAttribs);
 
     const EGLint pbufAttribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
 
-    *surfOut = s_egl.eglCreatePbufferSurface(getDisplay(), config->getHostEglConfig(), pbufAttribs);
+    *surfOut = s_egl.eglCreatePbufferSurface(getDisplay(), m_emulationGl->mEglConfig, pbufAttribs);
 }
 
 void FrameBuffer::Impl::destroySharedTrivialContext(EGLContext context, EGLSurface surface) {

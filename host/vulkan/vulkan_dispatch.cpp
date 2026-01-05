@@ -81,6 +81,7 @@ static void setIcdPaths(const std::string& icdFilename) {
 static void initIcdPaths(bool forTesting) {
     auto androidIcd = gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD");
 
+#ifdef CONFIG_AEMU
     if (forTesting) {
 #if defined(__APPLE__) && !defined(__arm64__) || defined(__WIN32__)
         const char* testingICD = "swiftshader";
@@ -97,7 +98,9 @@ static void initIcdPaths(bool forTesting) {
         }
         gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", testingICD);
         androidIcd = testingICD;
-    } else if (androidIcd == "") {
+    } else
+#endif
+    if (androidIcd == "") {
         // Rely on user to set VK_DRIVER_FILES
         return;
     }
@@ -120,9 +123,15 @@ static void initIcdPaths(bool forTesting) {
     } else {
 #ifdef __APPLE__
         // Mac: Use MoltenVK by default unless GPU mode is set to swiftshader
+        const bool verboseLogs =
+            (gfxstream::base::getEnvironmentVariable("ANDROID_EMUGL_VERBOSE") == "1");
         if (androidIcd == "kosmickrisp") {
             gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "kosmickrisp");
-            setIcdPaths("kosmickrisp_icd.json");
+            setIcdPaths("libkosmickrisp_icd.json");
+
+            if (verboseLogs) {
+                gfxstream::base::setEnvironmentVariable("MESA_KK_DEBUG", "1");
+            }
         } else {
             if (androidIcd != "moltenvk") {
                 GFXSTREAM_WARNING("%s: Unknown ICD (%s), resetting to MoltenVK", __func__,
@@ -136,8 +145,6 @@ static void initIcdPaths(bool forTesting) {
             // 2: Log errors and warning messages.
             // 3: Log errors, warnings and informational messages.
             // 4: Log errors, warnings, infos and debug messages.
-            const bool verboseLogs =
-                (gfxstream::base::getEnvironmentVariable("ANDROID_EMUGL_VERBOSE") == "1");
             const char* logLevelValue = verboseLogs ? "4" : "1";
             gfxstream::base::setEnvironmentVariable("MVK_CONFIG_LOG_LEVEL", logLevelValue);
 
