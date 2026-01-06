@@ -70,11 +70,7 @@ class WorkerThread {
     // A function that's called for each enqueued item in a separate thread.
     using Processor = std::function<Result(Item&&)>;
 
-    using Initializer = std::function<void()>;
-
-    WorkerThread(Initializer initializer, Processor processor)
-        : mInitializer(std::move(initializer)),
-          mProcessor(std::move(processor)) { mQueue.reserve(10); }
+    WorkerThread(Processor&& processor) : mProcessor(std::move(processor)) { mQueue.reserve(10); }
 
     WorkerThread(const WorkerThread&) = delete;
     WorkerThread& operator=(const WorkerThread&) = delete;
@@ -142,10 +138,6 @@ class WorkerThread {
     }
 
     void ThreadLoop() {
-        if (mInitializer) {
-            mInitializer();
-        }
-
         std::vector<Command> todo;
         todo.reserve(10);
         for (;;) {
@@ -184,7 +176,6 @@ class WorkerThread {
         }
     }
 
-    Initializer mInitializer;
     Processor mProcessor;
 
     std::mutex mThreadMutex;

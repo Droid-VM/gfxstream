@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "gfxstream/Compiler.h"
+#include "gfxstream/Optional.h"
 #include "gfxstream/system/System.h"
 #include "gfxstream/threads/WorkerThread.h"
 
@@ -68,8 +69,6 @@ class ThreadPool {
 public:
     using Item = ItemT;
     using WorkerId = ThreadPoolWorkerId;
-
-    using Initializer = std::function<void(WorkerId)>;
     using Processor = std::function<void(Item&&, WorkerId)>;
 
    private:
@@ -84,29 +83,37 @@ public:
     using Worker = WorkerThread<Optional<Command>>;
 
    public:
-    ThreadPool(int numThreads, Initializer initializer, Processor processor)
-        : mInitializer(initializer),
-          mProcessor(processor) {
-        if (numThreads < 1) {
-            numThreads = gfxstream::base::getCpuCoreCount();
+    // Fn is the type of the processor, it can either have 2 parameters: 1 for the Item, 1 for the
+    // WorkerId, or have only 1 Item parameter.
+    template <class Fn, typename = std::enable_if_t<std::is_invocable_v<Fn, Item, WorkerId> ||
+                                                    std::is_invocable_v<Fn, Item>>>
+    ThreadPool(int threads, Fn&& processor) : mProcessor() {
+        if constexpr (std::is_invocable_v<Fn, Item, WorkerId>) {
+            mProcessor = std::move(processor);
+        } else if constexpr (std::is_invocable_v<Fn, Item>) {
+            using namespace std::placeholders;
+            mProcessor = std::bind(std::move(processor), _1);
         }
-        for (int workerId = 0; workerId <= numThreads; workerId++) {
-            mWorkers.emplace_back(
-                new Worker(
-                    [this, workerId]() {
-                        if (mInitializer) {
-                            mInitializer(workerId);
-                        }
-                    },
-                    [this](Optional<Command>&& commandOpt) {
-                        if (!commandOpt) {
-                            return Worker::Result::Stop;
-                        }
-                        Command command = std::move(commandOpt.value());
-                        mProcessor(std::move(command.mItem), command.mWorkerId);
-                        return Worker::Result::Continue;
-                    }));
+        if (threads < 1) {
+            threads = gfxstream::base::getCpuCoreCount();
         }
+        mWorkers = std::vector<Optional<Worker>>(threads);
+        for (auto& workerPtr : mWorkers) {
+            workerPtr.emplace([this](Optional<Command>&& commandOpt) {
+                if (!commandOpt) {
+                    return Worker::Result::Stop;
+                }
+                Command command = std::move(commandOpt.value());
+                mProcessor(std::move(command.mItem), command.mWorkerId);
+                return Worker::Result::Continue;
+            });
+        }
+    }
+    explicit ThreadPool(Processor&& processor)
+        : ThreadPool(0, std::move(processor)) {}
+    ~ThreadPool() {
+        done();
+        join();
     }
 
     bool start() {
@@ -114,7 +121,7 @@ public:
             if (workerPtr->start()) {
                 ++mValidWorkersCount;
             } else {
-                workerPtr.reset();
+                workerPtr.clear();
             }
         }
         return mValidWorkersCount > 0;
@@ -175,9 +182,8 @@ public:
     int numWorkers() const { return mValidWorkersCount; }
 
 private:
-    Initializer mInitializer;
     Processor mProcessor;
-    std::vector<std::unique_ptr<Worker>> mWorkers;
+    std::vector<Optional<Worker>> mWorkers;
     std::atomic<int> mNextWorkerIndex{0};
     int mValidWorkersCount{0};
 };
