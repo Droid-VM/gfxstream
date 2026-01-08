@@ -1730,8 +1730,12 @@ void VkEmulation::initFeatures(Features features) {
         if (mCompositorVk) {
             GFXSTREAM_ERROR("Reset VkEmulation::compositorVk.");
         }
-        mCompositorVk = CompositorVk::create(*mIvk, mDevice, mPhysicalDevice, mQueue, mQueueLock,
-                                             mQueueFamilyIndex, 3, &mYcbcrSamplerPool, mDebugUtilsHelper);
+        mCompositorVk =
+            CompositorVk::create(*mIvk, mDevice, mPhysicalDevice, mQueue, mQueueLock,
+                                 mQueueFamilyIndex, 3, &mYcbcrSamplerPool, mDebugUtilsHelper);
+        if (!mCompositorVk) {
+            GFXSTREAM_FATAL("Failed to create Vulkan compositor.");
+        }
     }
 
     if (features.useVulkanNativeSwapchain) {
@@ -2239,7 +2243,7 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
             validHandle = (VK_SUCCESS == exportRes) && (NULL != exportHandle);
             info->handleInfo = ExternalHandleInfo{
                 .handle = reinterpret_cast<ExternalHandleType>(exportHandle),
-                .streamHandleType = STREAM_HANDLE_TYPE_MEM_AHB,
+                .streamHandleType = STREAM_HANDLE_TYPE_PLATFORM_AHB,
             };
 #endif
             break;

@@ -1385,23 +1385,13 @@ FrameBuffer::Impl::Impl(FrameBuffer* framebuffer, int p_width, int p_height,
       m_windowHeight(p_height),
       m_useSubWindow(useSubWindow),
       m_fpsStats(getenv("SHOW_FPS_STATS") != nullptr),
-      m_readbackThread(
-        []() {
-            GFXSTREAM_TRACE_NAME_THREAD("Gfxstream Readback Worker");
-        },
-        [this](FrameBuffer::Impl::Readback&& readback) {
-            return sendReadbackWorkerCmd(readback);
-        }),
+      m_readbackThread([this](FrameBuffer::Impl::Readback&& readback) {
+          return sendReadbackWorkerCmd(readback);
+      }),
       m_refCountPipeEnabled(features.RefCountPipe.enabled),
       m_noDelayCloseColorBufferEnabled(features.NoDelayCloseColorBuffer.enabled ||
                                        features.Minigbm.enabled),
-      m_postThread(
-        []() {
-            GFXSTREAM_TRACE_NAME_THREAD("Gfxstream Post Worker");
-        },
-        [this](Post&& post) {
-            return postWorkerFunc(post);
-        }) {
+      m_postThread([this](Post&& post) { return postWorkerFunc(post); }) {
     mDisplayActiveConfigId = 0;
     mDisplayConfigs[0] = {p_width, p_height, 160, 160};
     uint32_t displayId = 0;
@@ -2841,7 +2831,7 @@ int FrameBuffer::Impl::getScreenshot(unsigned int nChannels, unsigned int* width
 
     if (*cPixels < (size_t)needed) {
         *cPixels = needed;
-        return -2;
+        return Renderer::GET_SCREENSHOT_RESULT_PIXELS_SIZE;
     }
     *cPixels = needed;
     if (desiredRotation == GFXSTREAM_ROTATION_90 || desiredRotation == GFXSTREAM_ROTATION_270) {
