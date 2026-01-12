@@ -171,6 +171,8 @@ class VkEmulation {
 
     std::string getGpuVendor() const;
     std::string getGpuName() const;
+    std::string getGpuDriverVersion() const;
+    std::string getGpuDriverInfo() const;
     std::string getGpuVersionString() const;
     std::string getInstanceExtensionsString() const;
     std::string getDeviceExtensionsString() const;
@@ -582,6 +584,7 @@ class VkEmulation {
 
     // Instance and device for creating the system-wide shareable objects.
     VkInstance mInstance = VK_NULL_HANDLE;
+    uint32_t mVulkanApiVersionInUse = 0;
     uint32_t mVulkanInstanceVersion = 0;
     std::vector<VkExtensionProperties> mInstanceExtensions;
 
