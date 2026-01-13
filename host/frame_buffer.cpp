@@ -851,7 +851,6 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     bool m_useSubWindow = false;
 
     bool m_fpsStats = false;
-    bool m_perfStats = false;
     int m_statsNumFrames = 0;
     long long m_statsStartTime = 0;
 
