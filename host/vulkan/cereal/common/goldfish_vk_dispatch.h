@@ -35,7 +35,6 @@
 #include "goldfish_vk_private_defs.h"
 #include "vk_android_native_buffer_gfxstream.h"
 #include "vulkan_gfxstream.h"
-
 namespace gfxstream {
 namespace host {
 namespace vk {
@@ -45,7 +44,6 @@ struct VulkanDispatch;
 }  // namespace vk
 }  // namespace host
 }  // namespace gfxstream
-
 using DlOpenFunc = void*(void);
 using DlSymFunc = void*(void*, const char*);
 
@@ -590,6 +588,7 @@ struct VulkanDispatch {
     PFN_vkQueueSubmitAsync2GOOGLE vkQueueSubmitAsync2GOOGLE;
     PFN_vkGetSemaphoreGOOGLE vkGetSemaphoreGOOGLE;
     PFN_vkTraceAsyncGOOGLE vkTraceAsyncGOOGLE;
+    PFN_vkSetDebugMetadataAsyncGOOGLE vkSetDebugMetadataAsyncGOOGLE;
 #endif
 #ifdef VK_QNX_external_memory_screen_buffer
     PFN_vkGetScreenBufferPropertiesQNX vkGetScreenBufferPropertiesQNX;
