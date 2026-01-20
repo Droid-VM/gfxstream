@@ -1101,10 +1101,10 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
         if (emulation->mInstanceSupportsGetPhysicalDeviceProperties2) {
             deviceInfos[i].supportsDriverProperties =
-                vk_util::extensionsSupported(deviceExts, {VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME}) ||
+                vk_util::extensionSupported(deviceExts, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME) ||
                 (deviceInfos[i].physdevProps.apiVersion >= VK_API_VERSION_1_2);
             deviceInfos[i].supportsExternalMemoryHostProps =
-                vk_util::extensionsSupported(deviceExts, {VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME});
+                vk_util::extensionSupported(deviceExts, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 
             VkPhysicalDeviceProperties2 deviceProps = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR,
@@ -1168,15 +1168,15 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         dmaBufBlockList |= (deviceInfos[i].driverVendor == "radv (Vendor 0x1002)");
 #endif
         deviceInfos[i].supportsDmaBuf =
-            vk_util::extensionsSupported(deviceExts, {VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME}) &&
+            vk_util::extensionSupported(deviceExts, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) &&
             !dmaBufBlockList;
 #endif
 
         deviceInfos[i].hasSamplerYcbcrConversionExtension =
-            vk_util::extensionsSupported(deviceExts, {VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME});
+            vk_util::extensionSupported(deviceExts, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
 
         deviceInfos[i].hasNvidiaDeviceDiagnosticCheckpointsExtension =
-            vk_util::extensionsSupported(deviceExts, {VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME});
+            vk_util::extensionSupported(deviceExts, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
 
         if (emulation->mGetPhysicalDeviceFeatures2Func) {
             VkPhysicalDeviceFeatures2 features2 = {
@@ -1208,15 +1208,21 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             VkPhysicalDevicePrivateDataFeatures privateDataFeatures = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIVATE_DATA_FEATURES,
                 .privateData = VK_FALSE};
-            if (vk_util::extensionsSupported(deviceExts, {VK_EXT_PRIVATE_DATA_EXTENSION_NAME})) {
+            if (vk_util::extensionSupported(deviceExts, VK_EXT_PRIVATE_DATA_EXTENSION_NAME)) {
                 vk_append_struct(&features2Chain, &privateDataFeatures);
+            }
+            VkPhysicalDeviceFrameBoundaryFeaturesEXT frameBoundaryFeatures = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT
+            };
+            if (vk_util::extensionSupported(deviceExts, VK_EXT_FRAME_BOUNDARY_EXTENSION_NAME)) {
+                vk_append_struct(&features2Chain, &frameBoundaryFeatures);
             }
 
             VkPhysicalDeviceRobustness2FeaturesEXT robustness2Features = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
             const bool robustnessRequested = emulation->mFeatures.VulkanRobustness.enabled;
             const bool robustnessSupported =
-                vk_util::extensionsSupported(deviceExts, {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME});
+                vk_util::extensionSupported(deviceExts, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
             if (robustnessRequested && robustnessSupported) {
                 vk_append_struct(&features2Chain, &robustness2Features);
             }
@@ -1230,6 +1236,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                 deviceDiagnosticsConfigFeatures.diagnosticsConfig == VK_TRUE;
 
             deviceInfos[i].supportsPrivateData = (privateDataFeatures.privateData == VK_TRUE);
+            deviceInfos[i].supportsFrameBoundary = (frameBoundaryFeatures.frameBoundary == VK_TRUE);
 
             // Enable robustness only when requested
             if (robustnessRequested && robustnessSupported) {
@@ -1715,6 +1722,8 @@ bool VkEmulation::supportsPhysicalDeviceIDProperties() const {
 }
 
 bool VkEmulation::supportsPrivateData() const { return mDeviceInfo.supportsPrivateData; }
+
+bool VkEmulation::supportsFrameBoundary() const { return mDeviceInfo.supportsFrameBoundary; }
 
 bool VkEmulation::supportsExternalMemoryImport() const {
     return mDeviceInfo.supportsExternalMemoryImport;
