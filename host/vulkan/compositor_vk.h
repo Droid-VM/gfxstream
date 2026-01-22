@@ -35,6 +35,7 @@
 #include "gfxstream/synchronization/Lock.h"
 #include "goldfish_vk_dispatch.h"
 #include "host/hwc2.h"
+#include "vulkan/vk_format_support.h"
 #include "vulkan/vk_utils.h"
 
 namespace gfxstream {
@@ -60,6 +61,8 @@ struct YuvOrDefaultGfxstreamFormat {
     bool operator==(const YuvOrDefaultGfxstreamFormat& other) const {
         return underlying == other.underlying;
     }
+
+    bool IsYuv() const { return underlying != GfxstreamFormat::UNKNOWN; }
 };
 
 }  // namespace vk
@@ -98,6 +101,7 @@ struct CompositorVkBase : public vk_util::MultiCrtp<CompositorVkBase,         //
     const VkQueue m_vkQueue;
     const uint32_t m_queueFamilyIndex;
     vk_util::YcbcrSamplerPool* m_ycbcrSamplerPool;
+    const ImageSupport& m_imageSupport;
     const DebugUtilsHelper m_debugUtilsHelper;
     std::shared_ptr<gfxstream::base::Lock> m_vkQueueLock;
 
@@ -241,13 +245,15 @@ struct CompositorVkBase : public vk_util::MultiCrtp<CompositorVkBase,         //
                               VkPhysicalDevice physicalDevice, VkQueue queue,
                               std::shared_ptr<gfxstream::base::Lock> queueLock,
                               uint32_t queueFamilyIndex, uint32_t maxFramesInFlight,
-                              vk_util::YcbcrSamplerPool* ycbcrPool, DebugUtilsHelper debugUtils)
+                              vk_util::YcbcrSamplerPool* ycbcrPool, const ImageSupport& imageSupport,
+                              DebugUtilsHelper debugUtils)
         : m_vk(vk),
           m_vkDevice(device),
           m_vkPhysicalDevice(physicalDevice),
           m_vkQueue(queue),
           m_queueFamilyIndex(queueFamilyIndex),
           m_ycbcrSamplerPool(ycbcrPool),
+          m_imageSupport(imageSupport),
           m_debugUtilsHelper(debugUtils),
           m_vkQueueLock(queueLock),
           m_vertexVkBuffer(VK_NULL_HANDLE),
@@ -267,6 +273,7 @@ class CompositorVk : protected CompositorVkBase, public Compositor {
         const VulkanDispatch& vk, VkDevice vkDevice, VkPhysicalDevice vkPhysicalDevice,
         VkQueue vkQueue, std::shared_ptr<gfxstream::base::Lock> queueLock,
         uint32_t queueFamilyIndex, uint32_t maxFramesInFlight, vk_util::YcbcrSamplerPool* ycbcrPool,
+        const ImageSupport& imageSupport,
         DebugUtilsHelper debugUtils = DebugUtilsHelper::withUtilsDisabled());
 
     ~CompositorVk();
@@ -297,6 +304,7 @@ class CompositorVk : protected CompositorVkBase, public Compositor {
         float rotationDegrees = 0.0f;
         bool useScreenBlend = false;
         std::optional<std::array<float, 16>> colorTransform;
+        hwc_rect_t displayFrame = {0, 0, 0, 0};
     };
 
     void drawScreenMask(const ImageDrawParams& params);
@@ -310,29 +318,30 @@ class CompositorVk : protected CompositorVkBase, public Compositor {
     explicit CompositorVk(const VulkanDispatch&, VkDevice, VkPhysicalDevice, VkQueue,
                           std::shared_ptr<gfxstream::base::Lock> queueLock,
                           uint32_t queueFamilyIndex, uint32_t maxFramesInFlight,
-                          vk_util::YcbcrSamplerPool* ycbcrPool, DebugUtilsHelper debugUtils);
+                          vk_util::YcbcrSamplerPool* ycbcrPool, const ImageSupport& imageSupport,
+                          DebugUtilsHelper debugUtils);
 
-    void setUpFormatResources();
-    void setUpRenderPasses();
-    void setUpGraphicsPipeline(const VkShaderModule vertShaderMod,
+    bool setUpFormatResources();
+    bool setUpRenderPasses();
+    bool setUpGraphicsPipeline(const VkShaderModule vertShaderMod,
                                const VkShaderModule fragShaderMod,
                                const GfxstreamFormat samplerFormat);
-    void setUpGraphicsPipelines();
-    void setUpVertexBuffers();
-    void setUpDescriptorSets();
-    void setUpUniformBuffers();
-    void setUpCommandPool();
-    void setUpFences();
-    void setUpDefaultImage();
-    void setUpScreenMaskImage(uint32_t width, uint32_t height, const uint8_t* rgbaData);
-    void setUpScreenBackgroundImage(uint32_t width, uint32_t height, const uint8_t* rgbaData);
-    void setUpFrameResourceFutures();
+    bool setUpGraphicsPipelines();
+    bool setUpVertexBuffers();
+    bool setUpDescriptorSets();
+    bool setUpUniformBuffers();
+    bool setUpCommandPool();
+    bool setUpFences();
+    bool setUpDefaultImage();
+    bool setUpScreenMaskImage(uint32_t width, uint32_t height, const uint8_t* rgbaData);
+    bool setUpScreenBackgroundImage(uint32_t width, uint32_t height, const uint8_t* rgbaData);
+    bool setUpFrameResourceFutures();
 
-    Image createImage(uint32_t width, uint32_t height, const uint8_t* rgbaData,
+    bool createImage(Image& img, uint32_t width, uint32_t height, const uint8_t* rgbaData,
                       const std::string& debugName);
     void destroyImage(Image& img);
 
-    void createUniformBufferStorage(UniformBufferStorage& storage, uint32_t numBuffersRequired);
+    bool createUniformBufferStorage(UniformBufferStorage& storage, uint32_t numBuffersRequired);
     void destroyUniformBufferStorage(UniformBufferStorage& storage);
 
     std::optional<std::tuple<VkBuffer, VkDeviceMemory>> createBuffer(VkDeviceSize,

@@ -29,8 +29,8 @@
 #include <thread>
 #include <tuple>
 #include <type_traits>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 #include "gfxstream/common/logging.h"
 #include "gfxstream/host/gfxstream_format.h"
@@ -147,26 +147,24 @@ void vk_struct_chain_filter(H* head) {
     }
 }
 
-#define VK_CHECK(x)                                                                \
-    do {                                                                           \
-        VkResult err = x;                                                          \
-        if (err != VK_SUCCESS) {                                                   \
-            if (err == VK_ERROR_DEVICE_LOST) {                                     \
-                vk_util::getVkCheckCallbacks().callIfExists(                       \
-                    &vk_util::VkCheckCallbacks::onVkErrorDeviceLost);              \
-            }                                                                      \
-            const std::string errString = string_VkResult(err);                    \
-            GFXSTREAM_FATAL("VK_CHECK(" #x ") failed with %s", errString.c_str()); \
-        }                                                                          \
+#define VK_CHECK(x)                                                                   \
+    do {                                                                              \
+        VkResult err = x;                                                             \
+        if (err != VK_SUCCESS) {                                                      \
+            if (err == VK_ERROR_DEVICE_LOST) {                                        \
+                vk_util::getVkCheckCallbacks().callIfExists(                          \
+                    &vk_util::VkCheckCallbacks::onVkErrorDeviceLost);                 \
+            }                                                                         \
+            GFXSTREAM_FATAL("VK_CHECK(" #x ") failed with %s", string_VkResult(err)); \
+        }                                                                             \
     } while (0)
 
-#define VK_CHECK_MEMALLOC(x, allocateInfo)                                                  \
-    do {                                                                                    \
-        VkResult err = x;                                                                   \
-        if (err != VK_SUCCESS) {                                                            \
-            const std::string errString = string_VkResult(err);                             \
-            GFXSTREAM_FATAL("VK_CHECK_MEMALLOC(" #x ") failed with %s", errString.c_str()); \
-        }                                                                                   \
+#define VK_CHECK_MEMALLOC(x, allocateInfo)                                                     \
+    do {                                                                                       \
+        VkResult err = x;                                                                      \
+        if (err != VK_SUCCESS) {                                                               \
+            GFXSTREAM_FATAL("VK_CHECK_MEMALLOC(" #x ") failed with %s", string_VkResult(err)); \
+        }                                                                                      \
     } while (0)
 
 namespace vk_util {
@@ -197,10 +195,10 @@ std::optional<uint32_t> findMemoryType(const VulkanDispatch* ivk, VkPhysicalDevi
                                        uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
 bool extensionSupported(const std::vector<VkExtensionProperties>& currentProps,
-                               const char* wantedExtName);
+                        const char* wantedExtName);
 
 bool extensionsSupported(const std::vector<VkExtensionProperties>& currentProps,
-                                const std::vector<const char*>& wantedExtNames);
+                         const std::vector<const char*>& wantedExtNames);
 
 void setVkCheckCallbacks(std::unique_ptr<VkCheckCallbacks>);
 const CallbacksWrapper<VkCheckCallbacks>& getVkCheckCallbacks();
@@ -356,6 +354,19 @@ static inline bool vk_descriptor_type_has_image_view(VkDescriptorType type) {
             return false;
     }
 }
+
+// Get missing extensions from a requested list of extensions
+// Returns number of missing extension
+uint32_t getMissingExtensions(const std::vector<VkExtensionProperties>& currentProps,
+                              uint32_t enabledExtensionCount,
+                              const char* const* ppEnabledExtensionNames,
+                              std::string& outMissingExtensions);
+
+// Get missing features from a requested device features structure
+// Returns number of missing features
+uint32_t getMissingFeatures(const VkPhysicalDeviceFeatures& supported,
+                            const VkPhysicalDeviceFeatures& requested,
+                            std::string& outMissingFeatures);
 
 class YcbcrSamplerPool {
    public:

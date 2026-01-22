@@ -90,7 +90,7 @@ public:
         if (numThreads < 1) {
             numThreads = gfxstream::base::getCpuCoreCount();
         }
-        for (int workerId = 0; workerId <= numThreads; workerId++) {
+        for (int workerId = 0; workerId < numThreads; workerId++) {
             mWorkers.emplace_back(
                 new Worker(
                     [this, workerId]() {

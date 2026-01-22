@@ -643,132 +643,14 @@ static std::string decodeDriverVersion(uint32_t vendorId, uint32_t driverVersion
         }
         case 0x002:  // amd
         default: {
-            uint32_t major = VK_VERSION_MAJOR(driverVersion);
-            uint32_t minor = VK_VERSION_MINOR(driverVersion);
-            uint32_t patch = VK_VERSION_PATCH(driverVersion);
+            uint32_t major = VK_API_VERSION_MAJOR(driverVersion);
+            uint32_t minor = VK_API_VERSION_MINOR(driverVersion);
+            uint32_t patch = VK_API_VERSION_PATCH(driverVersion);
             result << major << "." << minor << "." << patch;
             break;
         }
     }
     return result.str();
-}
-
-/*static*/ std::vector<VkEmulation::ImageSupportInfo> VkEmulation::getBasicImageSupportList() {
-    struct ImageFeatureCombo {
-        VkFormat format;
-        VkImageCreateFlags createFlags = 0;
-    };
-    // Set the mutable flag for RGB UNORM formats so that the created image can also be sampled in
-    // the sRGB Colorspace. See
-    // https://chromium-review.googlesource.com/c/chromiumos/platform/minigbm/+/3827672/comments/77db9cb3_60663a6a
-    // for details.
-    std::vector<ImageFeatureCombo> combos = {
-        // Cover all the gralloc formats
-        {VK_FORMAT_R8G8B8A8_UNORM,
-         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
-        {VK_FORMAT_R8G8B8_UNORM,
-         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
-
-        {VK_FORMAT_R5G6B5_UNORM_PACK16},
-        {VK_FORMAT_A1R5G5B5_UNORM_PACK16},
-
-        {VK_FORMAT_R16G16B16A16_SFLOAT},
-        {VK_FORMAT_R16G16B16_SFLOAT},
-
-        {VK_FORMAT_B8G8R8A8_UNORM,
-         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
-
-        {VK_FORMAT_B4G4R4A4_UNORM_PACK16,
-         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
-        {VK_FORMAT_R4G4B4A4_UNORM_PACK16,
-         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
-
-        {VK_FORMAT_R8_UNORM,
-         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
-        {VK_FORMAT_R16_UNORM,
-         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
-
-        {VK_FORMAT_A2R10G10B10_UINT_PACK32},
-        {VK_FORMAT_A2R10G10B10_UNORM_PACK32},
-        {VK_FORMAT_A2B10G10R10_UNORM_PACK32},
-
-        // Compressed texture formats
-        {VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK},
-        {VK_FORMAT_ASTC_4x4_UNORM_BLOCK},
-
-        // YUV formats used in Android
-        {VK_FORMAT_G8_B8R8_2PLANE_420_UNORM},
-        {VK_FORMAT_G8_B8R8_2PLANE_422_UNORM},
-        {VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM},
-        {VK_FORMAT_G8_B8_R8_3PLANE_422_UNORM},
-        {VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16},
-    };
-
-    std::vector<VkImageType> types = {
-        VK_IMAGE_TYPE_2D,
-    };
-
-    std::vector<VkImageTiling> tilings = {
-        VK_IMAGE_TILING_LINEAR,
-        VK_IMAGE_TILING_OPTIMAL,
-    };
-
-    std::vector<VkImageUsageFlags> usageFlags = {
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
-        VK_IMAGE_USAGE_SAMPLED_BIT,          VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-    };
-
-    std::vector<VkEmulation::ImageSupportInfo> res;
-
-    // Currently: 17 format + create flags combo, 2 tilings, 5 usage flags -> 170 cases to check.
-    for (auto combo : combos) {
-        for (auto t : types) {
-            for (auto ti : tilings) {
-                for (auto u : usageFlags) {
-                    VkEmulation::ImageSupportInfo info;
-                    info.format = combo.format;
-                    info.type = t;
-                    info.tiling = ti;
-                    info.usageFlags = u;
-                    info.createFlags = combo.createFlags;
-                    res.push_back(info);
-                }
-            }
-        }
-    }
-
-    // Add depth attachment cases
-    std::vector<ImageFeatureCombo> depthCombos = {
-        // Depth formats
-        {VK_FORMAT_D16_UNORM},
-        {VK_FORMAT_X8_D24_UNORM_PACK32},
-        {VK_FORMAT_D24_UNORM_S8_UINT},
-        {VK_FORMAT_D32_SFLOAT},
-        {VK_FORMAT_D32_SFLOAT_S8_UINT},
-    };
-
-    std::vector<VkImageUsageFlags> depthUsageFlags = {
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
-        VK_IMAGE_USAGE_SAMPLED_BIT,          VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-    };
-
-    for (auto combo : depthCombos) {
-        for (auto t : types) {
-            for (auto u : depthUsageFlags) {
-                ImageSupportInfo info;
-                info.format = combo.format;
-                info.type = t;
-                info.tiling = VK_IMAGE_TILING_OPTIMAL;
-                info.usageFlags = u;
-                info.createFlags = combo.createFlags;
-                res.push_back(info);
-            }
-        }
-    }
-
-    return res;
 }
 
 // Checks if the user enforced a specific GPU, it can be done via index or name.
@@ -1038,12 +920,15 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     instCi.ppEnabledExtensionNames = selectedInstanceExtensionNamesC.data();
 
     // Can we know instance version early?
+    uint32_t maxInstanceVersion = VK_VERSION_1_0;
     if (gvk->vkEnumerateInstanceVersion) {
-        GFXSTREAM_DEBUG("global loader has vkEnumerateInstanceVersion.");
-        uint32_t instanceVersion;
-        VkResult res = gvk->vkEnumerateInstanceVersion(&instanceVersion);
+        VkResult res = gvk->vkEnumerateInstanceVersion(&maxInstanceVersion);
+        GFXSTREAM_DEBUG("Global loader has instance version = %d.%d.%d",
+                    VK_API_VERSION_MAJOR(maxInstanceVersion),
+                    VK_API_VERSION_MINOR(maxInstanceVersion),
+                    VK_API_VERSION_PATCH(maxInstanceVersion));
         if (VK_SUCCESS == res) {
-            if (instanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+            if (maxInstanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
                 GFXSTREAM_DEBUG("global loader has vkEnumerateInstanceVersion returning >= 1.1.");
                 appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
             }
@@ -1051,8 +936,9 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     }
 
     GFXSTREAM_DEBUG("Creating an instance, asking for version %d.%d.%d ...",
-                    VK_VERSION_MAJOR(appInfo.apiVersion), VK_VERSION_MINOR(appInfo.apiVersion),
-                    VK_VERSION_PATCH(appInfo.apiVersion));
+                    VK_API_VERSION_MAJOR(appInfo.apiVersion),
+                    VK_API_VERSION_MINOR(appInfo.apiVersion),
+                    VK_API_VERSION_PATCH(appInfo.apiVersion));
 
     VkResult res = gvk->vkCreateInstance(&instCi, nullptr, &emulation->mInstance);
     if (res != VK_SUCCESS) {
@@ -1083,6 +969,9 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                 GFXSTREAM_ERROR("Warning: Vulkan 1.1 APIs missing from instance (1st try)");
             }
         }
+        if (instanceVersion > maxInstanceVersion) {
+            maxInstanceVersion = instanceVersion;
+        }
 
         if (appInfo.apiVersion < VK_MAKE_VERSION(1, 1, 0) &&
             instanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
@@ -1107,7 +996,8 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         }
     }
 
-    emulation->mVulkanInstanceVersion = appInfo.apiVersion;
+    emulation->mVulkanApiVersionInUse = appInfo.apiVersion;
+    emulation->mVulkanInstanceVersion = maxInstanceVersion;
 
     // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkPhysicalDeviceIDProperties.html
     // Provided by VK_VERSION_1_1, or VK_KHR_external_fence_capabilities, VK_KHR_external_memory_capabilities,
@@ -1211,10 +1101,10 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
         if (emulation->mInstanceSupportsGetPhysicalDeviceProperties2) {
             deviceInfos[i].supportsDriverProperties =
-                vk_util::extensionsSupported(deviceExts, {VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME}) ||
+                vk_util::extensionSupported(deviceExts, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME) ||
                 (deviceInfos[i].physdevProps.apiVersion >= VK_API_VERSION_1_2);
             deviceInfos[i].supportsExternalMemoryHostProps =
-                vk_util::extensionsSupported(deviceExts, {VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME});
+                vk_util::extensionSupported(deviceExts, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 
             VkPhysicalDeviceProperties2 deviceProps = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR,
@@ -1278,15 +1168,15 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         dmaBufBlockList |= (deviceInfos[i].driverVendor == "radv (Vendor 0x1002)");
 #endif
         deviceInfos[i].supportsDmaBuf =
-            vk_util::extensionsSupported(deviceExts, {VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME}) &&
+            vk_util::extensionSupported(deviceExts, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) &&
             !dmaBufBlockList;
 #endif
 
         deviceInfos[i].hasSamplerYcbcrConversionExtension =
-            vk_util::extensionsSupported(deviceExts, {VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME});
+            vk_util::extensionSupported(deviceExts, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
 
         deviceInfos[i].hasNvidiaDeviceDiagnosticCheckpointsExtension =
-            vk_util::extensionsSupported(deviceExts, {VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME});
+            vk_util::extensionSupported(deviceExts, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
 
         if (emulation->mGetPhysicalDeviceFeatures2Func) {
             VkPhysicalDeviceFeatures2 features2 = {
@@ -1318,15 +1208,21 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             VkPhysicalDevicePrivateDataFeatures privateDataFeatures = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIVATE_DATA_FEATURES,
                 .privateData = VK_FALSE};
-            if (vk_util::extensionsSupported(deviceExts, {VK_EXT_PRIVATE_DATA_EXTENSION_NAME})) {
+            if (vk_util::extensionSupported(deviceExts, VK_EXT_PRIVATE_DATA_EXTENSION_NAME)) {
                 vk_append_struct(&features2Chain, &privateDataFeatures);
+            }
+            VkPhysicalDeviceFrameBoundaryFeaturesEXT frameBoundaryFeatures = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT
+            };
+            if (vk_util::extensionSupported(deviceExts, VK_EXT_FRAME_BOUNDARY_EXTENSION_NAME)) {
+                vk_append_struct(&features2Chain, &frameBoundaryFeatures);
             }
 
             VkPhysicalDeviceRobustness2FeaturesEXT robustness2Features = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
             const bool robustnessRequested = emulation->mFeatures.VulkanRobustness.enabled;
             const bool robustnessSupported =
-                vk_util::extensionsSupported(deviceExts, {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME});
+                vk_util::extensionSupported(deviceExts, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
             if (robustnessRequested && robustnessSupported) {
                 vk_append_struct(&features2Chain, &robustness2Features);
             }
@@ -1340,6 +1236,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                 deviceDiagnosticsConfigFeatures.diagnosticsConfig == VK_TRUE;
 
             deviceInfos[i].supportsPrivateData = (privateDataFeatures.privateData == VK_TRUE);
+            deviceInfos[i].supportsFrameBoundary = (frameBoundaryFeatures.frameBoundary == VK_TRUE);
 
             // Enable robustness only when requested
             if (robustnessRequested && robustnessSupported) {
@@ -1400,10 +1297,9 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     // Postcondition: emulation has valid device support info
 
     // Collect image support info of the selected device
-    emulation->mImageSupportInfo = getBasicImageSupportList();
-    for (size_t i = 0; i < emulation->mImageSupportInfo.size(); ++i) {
+    for (size_t i = 0; i < emulation->mImageSupportInfo.mSupportInfos.size(); ++i) {
         emulation->populateImageFormatExternalMemorySupportInfo(ivk, emulation->mPhysicalDevice,
-                                                                &emulation->mImageSupportInfo[i]);
+                                                                &emulation->mImageSupportInfo.mSupportInfos[i]);
     }
 
     if (!emulation->mDeviceInfo.hasGraphicsQueueFamily) {
@@ -1413,8 +1309,9 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
     auto deviceVersion = emulation->mDeviceInfo.physdevProps.apiVersion;
     GFXSTREAM_INFO("Selecting Vulkan device: %s, Version: %d.%d.%d",
-                   emulation->mDeviceInfo.physdevProps.deviceName, VK_VERSION_MAJOR(deviceVersion),
-                   VK_VERSION_MINOR(deviceVersion), VK_VERSION_PATCH(deviceVersion));
+                   emulation->mDeviceInfo.physdevProps.deviceName,
+                   VK_API_VERSION_MAJOR(deviceVersion), VK_API_VERSION_MINOR(deviceVersion),
+                   VK_API_VERSION_PATCH(deviceVersion));
 
     GFXSTREAM_DEBUG(
         "deviceInfo: \n"
@@ -1730,8 +1627,13 @@ void VkEmulation::initFeatures(Features features) {
         if (mCompositorVk) {
             GFXSTREAM_ERROR("Reset VkEmulation::compositorVk.");
         }
-        mCompositorVk = CompositorVk::create(*mIvk, mDevice, mPhysicalDevice, mQueue, mQueueLock,
-                                             mQueueFamilyIndex, 3, &mYcbcrSamplerPool, mDebugUtilsHelper);
+        mCompositorVk =
+            CompositorVk::create(*mIvk, mDevice, mPhysicalDevice, mQueue, mQueueLock,
+                                 mQueueFamilyIndex, 3, &mYcbcrSamplerPool, mImageSupportInfo,
+                                 mDebugUtilsHelper);
+        if (!mCompositorVk) {
+            GFXSTREAM_FATAL("Failed to create Vulkan compositor.");
+        }
     }
 
     if (features.useVulkanNativeSwapchain) {
@@ -1821,6 +1723,8 @@ bool VkEmulation::supportsPhysicalDeviceIDProperties() const {
 
 bool VkEmulation::supportsPrivateData() const { return mDeviceInfo.supportsPrivateData; }
 
+bool VkEmulation::supportsFrameBoundary() const { return mDeviceInfo.supportsFrameBoundary; }
+
 bool VkEmulation::supportsExternalMemoryImport() const {
     return mDeviceInfo.supportsExternalMemoryImport;
 }
@@ -1897,14 +1801,17 @@ std::string VkEmulation::getGpuVendor() const { return mDeviceInfo.driverVendor;
 
 std::string VkEmulation::getGpuName() const { return mDeviceInfo.physdevProps.deviceName; }
 
+std::string VkEmulation::getGpuDriverVersion() const { return mDeviceInfo.driverVersion; }
+
+std::string VkEmulation::getGpuDriverInfo() const { return mDeviceInfo.driverInfo; }
+
 std::string VkEmulation::getGpuVersionString() const {
     std::stringstream builder;
-    builder << "Vulkan "                                            //
-            << VK_API_VERSION_MAJOR(mVulkanInstanceVersion) << "."  //
-            << VK_API_VERSION_MINOR(mVulkanInstanceVersion) << "."  //
-            << VK_API_VERSION_PATCH(mVulkanInstanceVersion) << " "  //
-            << getGpuVendor() << " "                                //
-            << getGpuName();
+    builder << "Vulkan "                                             //
+            << VK_API_VERSION_MAJOR(mVulkanInstanceVersion) << "."   //
+            << VK_API_VERSION_MINOR(mVulkanInstanceVersion) << "."   //
+            << VK_API_VERSION_PATCH(mVulkanInstanceVersion) << ", "  //
+            << getGpuDriverInfo() << ", " << getGpuDriverVersion();
     return builder.str();
 }
 
@@ -1935,7 +1842,10 @@ void VkEmulation::getVulkanEmulationDeviceInfo(char** device_name, char** driver
                                                uint32_t* vendor_id, uint32_t* device_id,
                                                uint32_t* device_type, uint64_t* device_memory) {
     *driver_version = mDeviceInfo.physdevProps.driverVersion;
-    *api_version = mDeviceInfo.physdevProps.apiVersion;
+    // physdevProps.apiVersion only represents emulation device's api version, which is not very
+    // useful as it can be misleading for the max vulkan api version supported (e.g. vulkan 1.4
+    // supported device will say 1.1 because appinfo.version is provided like so.).
+    *api_version = mVulkanInstanceVersion;
     *vendor_id = mDeviceInfo.physdevProps.vendorID;
     *device_id = mDeviceInfo.physdevProps.deviceID;
     *device_type = mDeviceInfo.physdevProps.deviceType;
@@ -2239,7 +2149,7 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
             validHandle = (VK_SUCCESS == exportRes) && (NULL != exportHandle);
             info->handleInfo = ExternalHandleInfo{
                 .handle = reinterpret_cast<ExternalHandleType>(exportHandle),
-                .streamHandleType = STREAM_HANDLE_TYPE_MEM_AHB,
+                .streamHandleType = STREAM_HANDLE_TYPE_PLATFORM_AHB,
             };
 #endif
             break;
@@ -2569,19 +2479,15 @@ uint32_t VkEmulation::getValidMemoryTypeIndex(uint32_t requiredMemoryTypeBits,
 // pNext, sharingMode, queueFamilyIndexCount, pQueueFamilyIndices, and initialLayout won't be
 // filled.
 std::unique_ptr<VkImageCreateInfo> VkEmulation::generateColorBufferVkImageCreateInfoLocked(
-    VkFormat format, uint32_t width, uint32_t height, VkImageTiling tiling, uint32_t mipLevels) {
-    const VkEmulation::ImageSupportInfo* maybeImageSupportInfo = nullptr;
-    for (const auto& supportInfo : mImageSupportInfo) {
-        if (supportInfo.format == format && supportInfo.supported) {
-            maybeImageSupportInfo = &supportInfo;
-            break;
-        }
-    }
+        VkFormat format, uint32_t width, uint32_t height, VkImageTiling tiling,
+        uint32_t mipLevels) {
+    const ImageSupportInfo* maybeImageSupportInfo = mImageSupportInfo.GetSupportedInfo(format);
     if (!maybeImageSupportInfo) {
         GFXSTREAM_ERROR("Format %s [%d] is not supported.", string_VkFormat(format), format);
         return nullptr;
     }
-    const VkEmulation::ImageSupportInfo& imageSupportInfo = *maybeImageSupportInfo;
+    const ImageSupportInfo& imageSupportInfo = *maybeImageSupportInfo;
+
     const VkFormatProperties& formatProperties = imageSupportInfo.formatProps2.formatProperties;
 
     constexpr std::pair<VkFormatFeatureFlags, VkImageUsageFlags> formatUsagePairs[] = {
@@ -2985,27 +2891,11 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
 }
 
 bool VkEmulation::isFormatSupported(GfxstreamFormat format) {
-    std::optional<VkFormat> vkFormatOpt = ToVkFormat(format);
+    auto vkFormatOpt = ToVkFormat(format);
     if (!vkFormatOpt) {
         return false;
     }
-    const VkFormat vkFormat = *vkFormatOpt;
-
-    bool supported = !formatIsDepthOrStencil(vkFormat);
-    // TODO(b/356603558): add proper Vulkan querying, for now preserve existing assumption
-    if (!supported) {
-        for (size_t i = 0; i < mImageSupportInfo.size(); ++i) {
-            // Only enable depth/stencil if it is usable as an attachment
-            if (mImageSupportInfo[i].format == vkFormat &&
-                formatIsDepthOrStencil(mImageSupportInfo[i].format) &&
-                mImageSupportInfo[i].supported &&
-                mImageSupportInfo[i].formatProps2.formatProperties.optimalTilingFeatures &
-                    VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
-                supported = true;
-            }
-        }
-    }
-    return supported;
+    return mImageSupportInfo.IsFormatSupported(*vkFormatOpt);
 }
 
 bool VkEmulation::createVkColorBuffer(uint32_t width, uint32_t height, GfxstreamFormat format,
