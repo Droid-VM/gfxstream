@@ -36,6 +36,7 @@ objc_library(
     srcs = [
         "system-native-mac.mm",
     ],
+    copts = ["-std=c++20"],
     sdk_frameworks = [
         "IOKit",
         "AppKit",
