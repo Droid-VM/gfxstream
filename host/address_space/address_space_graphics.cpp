@@ -201,7 +201,7 @@ class Globals {
     }
 
     Allocation allocRingStorage() {
-        struct AllocationCreateInfo create = {0};
+        struct AllocationCreateInfo create = {};
         create.size = kAsgConsumerRingStorageSize;
         return newAllocation(create, mRingBlocks);
     }
@@ -212,7 +212,7 @@ class Globals {
     }
 
     Allocation allocBuffer() {
-        struct AllocationCreateInfo create = {0};
+        struct AllocationCreateInfo create = {};
         create.size = kAsgWriteBufferSize;
         return newAllocation(create, mBufferBlocks);
     }
@@ -227,7 +227,7 @@ class Globals {
             GFXSTREAM_FATAL("Dedicated ASG allocation requested without dedicated handle.\n");
         }
 
-        struct AllocationCreateInfo create = {0};
+        struct AllocationCreateInfo create = {};
         create.size = kAsgConsumerRingStorageSize + kAsgWriteBufferSize;
         create.dedicatedContextHandle = asgCreate.handle;
         create.virtioGpu = true;
@@ -371,7 +371,7 @@ private:
                          const std::optional<AddressSpaceDeviceLoadResources>& resources,
                          Block& block) {
         uint32_t filled = stream->getBe32();
-        struct AllocationCreateInfo create = {0};
+        struct AllocationCreateInfo create = {};
 
         if (!filled) {
             block.isEmpty = true;
@@ -510,7 +510,8 @@ AddressSpaceGraphicsContext::AddressSpaceGraphicsContext(
         static_cast<AddressSpaceDeviceType>(create.type) == AddressSpaceDeviceType::VirtioGpuGraphics;
 
     if (isVirtio) {
-        VirtioGpuInfo& info = mVirtioGpuInfo.emplace();
+        mVirtioGpuInfo = VirtioGpuInfo{};
+        VirtioGpuInfo& info = *mVirtioGpuInfo;
         info.contextId = create.virtioGpuContextId;
         info.capsetId = create.virtioGpuCapsetId;
         if (create.contextNameSize) {
@@ -687,7 +688,8 @@ void AddressSpaceGraphicsContext::postSave() const {
 bool AddressSpaceGraphicsContext::load(gfxstream::Stream* stream) {
     const bool hasVirtioGpuInfo = (stream->getBe32() == 1);
     if (hasVirtioGpuInfo) {
-        VirtioGpuInfo& info = mVirtioGpuInfo.emplace();
+        mVirtioGpuInfo = VirtioGpuInfo{};
+        VirtioGpuInfo& info = *mVirtioGpuInfo;
         info.contextId = stream->getBe32();
         info.capsetId = stream->getBe32();
         const bool hasName = (stream->getBe32() == 1);
