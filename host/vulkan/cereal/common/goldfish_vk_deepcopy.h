@@ -1918,6 +1918,23 @@ DEFINE_ALIAS_FUNCTION(deepcopy_VkDescriptorPoolInlineUniformBlockCreateInfo,
                       deepcopy_VkDescriptorPoolInlineUniformBlockCreateInfoEXT)
 
 #endif
+#ifdef VK_EXT_blend_operation_advanced
+void deepcopy_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* from,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* to);
+
+void deepcopy_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* from,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* to);
+
+void deepcopy_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPipelineColorBlendAdvancedStateCreateInfoEXT* from,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* to);
+
+#endif
 #ifdef VK_EXT_image_drm_format_modifier
 void deepcopy_VkDrmFormatModifierPropertiesEXT(Allocator* alloc, VkStructureType rootType,
                                                const VkDrmFormatModifierPropertiesEXT* from,
@@ -2274,6 +2291,16 @@ void deepcopy_VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT(
     VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT* to);
 
 #endif
+#ifdef VK_EXT_frame_boundary
+void deepcopy_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceFrameBoundaryFeaturesEXT* from,
+    VkPhysicalDeviceFrameBoundaryFeaturesEXT* to);
+
+void deepcopy_VkFrameBoundaryEXT(Allocator* alloc, VkStructureType rootType,
+                                 const VkFrameBoundaryEXT* from, VkFrameBoundaryEXT* to);
+
+#endif
 #ifdef VK_EXT_extended_dynamic_state2
 void deepcopy_VkPhysicalDeviceExtendedDynamicState2FeaturesEXT(
     Allocator* alloc, VkStructureType rootType,
@@ -2290,6 +2317,13 @@ void deepcopy_VkPhysicalDeviceColorWriteEnableFeaturesEXT(
 void deepcopy_VkPipelineColorWriteCreateInfoEXT(Allocator* alloc, VkStructureType rootType,
                                                 const VkPipelineColorWriteCreateInfoEXT* from,
                                                 VkPipelineColorWriteCreateInfoEXT* to);
+
+#endif
+#ifdef VK_EXT_primitives_generated_query
+void deepcopy_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* from,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* to);
 
 #endif
 #ifdef VK_GOOGLE_gfxstream

@@ -2,11 +2,24 @@
 Common build configuration definitions.
 """
 GFXSTREAM_COMMON_COPTS = [
+    "-Wall",
+    "-Wextra",
+    "-Wformat",
+    "-Wshadow",
+    "-Wunused-result",
+    "-Wno-missing-field-initializers",
+    "-Wno-return-type-c-linkage",
+    "-Wno-unused-function",
+    "-Wno-unused-parameter",
+    "-Wno-unused-private-field",
+    "-Wno-unused-variable",
+    "-Wno-thread-safety-analysis",
+    "-Wno-thread-safety-attributes",
 ] + select({
-    "//conditions:default": [
-        "-Wno-thread-safety-analysis",
-        "-Wno-thread-safety-attributes",
+    "@platforms//os:linux": [
+        "-Werror",
     ],
+    "//conditions:default": [],
 })
 GFXSTREAM_HOST_COPTS = GFXSTREAM_COMMON_COPTS + [
 ] + select({

@@ -1908,6 +1908,20 @@ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkDescriptorPoolInlineUniformBlockCreate
                       reservedunmarshal_VkDescriptorPoolInlineUniformBlockCreateInfoEXT)
 
 #endif
+#ifdef VK_EXT_blend_operation_advanced
+void reservedunmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forUnmarshaling, uint8_t** ptr);
+
+void reservedunmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forUnmarshaling, uint8_t** ptr);
+
+void reservedunmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* forUnmarshaling, uint8_t** ptr);
+
+#endif
 #ifdef VK_EXT_image_drm_format_modifier
 void reservedunmarshal_VkDrmFormatModifierPropertiesEXT(
     VulkanStream* vkStream, VkStructureType rootType,
@@ -2251,6 +2265,15 @@ void reservedunmarshal_VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT(
     VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT* forUnmarshaling, uint8_t** ptr);
 
 #endif
+#ifdef VK_EXT_frame_boundary
+void reservedunmarshal_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceFrameBoundaryFeaturesEXT* forUnmarshaling, uint8_t** ptr);
+
+void reservedunmarshal_VkFrameBoundaryEXT(VulkanStream* vkStream, VkStructureType rootType,
+                                          VkFrameBoundaryEXT* forUnmarshaling, uint8_t** ptr);
+
+#endif
 #ifdef VK_EXT_extended_dynamic_state2
 void reservedunmarshal_VkPhysicalDeviceExtendedDynamicState2FeaturesEXT(
     VulkanStream* vkStream, VkStructureType rootType,
@@ -2265,6 +2288,12 @@ void reservedunmarshal_VkPhysicalDeviceColorWriteEnableFeaturesEXT(
 void reservedunmarshal_VkPipelineColorWriteCreateInfoEXT(
     VulkanStream* vkStream, VkStructureType rootType,
     VkPipelineColorWriteCreateInfoEXT* forUnmarshaling, uint8_t** ptr);
+
+#endif
+#ifdef VK_EXT_primitives_generated_query
+void reservedunmarshal_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* forUnmarshaling, uint8_t** ptr);
 
 #endif
 #ifdef VK_GOOGLE_gfxstream

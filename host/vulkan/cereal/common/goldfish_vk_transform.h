@@ -3189,6 +3189,32 @@ DEFINE_ALIAS_FUNCTION(transform_fromhost_VkDescriptorPoolInlineUniformBlockCreat
                       transform_fromhost_VkDescriptorPoolInlineUniformBlockCreateInfoEXT)
 
 #endif
+#ifdef VK_EXT_blend_operation_advanced
+void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform);
+
+void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform);
+
+void transform_tohost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform);
+
+void transform_fromhost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform);
+
+#endif
 #ifdef VK_EXT_image_drm_format_modifier
 void transform_tohost_VkDrmFormatModifierPropertiesEXT(
     VkDecoderGlobalState* resourceTracker, VkDrmFormatModifierPropertiesEXT* toTransform);
@@ -3760,6 +3786,20 @@ void transform_fromhost_VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT(
     VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT* toTransform);
 
 #endif
+#ifdef VK_EXT_frame_boundary
+void transform_tohost_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceFrameBoundaryFeaturesEXT* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceFrameBoundaryFeaturesEXT* toTransform);
+
+void transform_tohost_VkFrameBoundaryEXT(VkDecoderGlobalState* resourceTracker,
+                                         VkFrameBoundaryEXT* toTransform);
+
+void transform_fromhost_VkFrameBoundaryEXT(VkDecoderGlobalState* resourceTracker,
+                                           VkFrameBoundaryEXT* toTransform);
+
+#endif
 #ifdef VK_EXT_extended_dynamic_state2
 void transform_tohost_VkPhysicalDeviceExtendedDynamicState2FeaturesEXT(
     VkDecoderGlobalState* resourceTracker,
@@ -3784,6 +3824,16 @@ void transform_tohost_VkPipelineColorWriteCreateInfoEXT(
 
 void transform_fromhost_VkPipelineColorWriteCreateInfoEXT(
     VkDecoderGlobalState* resourceTracker, VkPipelineColorWriteCreateInfoEXT* toTransform);
+
+#endif
+#ifdef VK_EXT_primitives_generated_query
+void transform_tohost_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* toTransform);
+
+void transform_fromhost_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* toTransform);
 
 #endif
 #ifdef VK_GOOGLE_gfxstream
