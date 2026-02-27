@@ -643,9 +643,9 @@ static std::string decodeDriverVersion(uint32_t vendorId, uint32_t driverVersion
         }
         case 0x002:  // amd
         default: {
-            uint32_t major = VK_VERSION_MAJOR(driverVersion);
-            uint32_t minor = VK_VERSION_MINOR(driverVersion);
-            uint32_t patch = VK_VERSION_PATCH(driverVersion);
+            uint32_t major = VK_API_VERSION_MAJOR(driverVersion);
+            uint32_t minor = VK_API_VERSION_MINOR(driverVersion);
+            uint32_t patch = VK_API_VERSION_PATCH(driverVersion);
             result << major << "." << minor << "." << patch;
             break;
         }
@@ -920,12 +920,15 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     instCi.ppEnabledExtensionNames = selectedInstanceExtensionNamesC.data();
 
     // Can we know instance version early?
+    uint32_t maxInstanceVersion = VK_VERSION_1_0;
     if (gvk->vkEnumerateInstanceVersion) {
-        GFXSTREAM_DEBUG("global loader has vkEnumerateInstanceVersion.");
-        uint32_t instanceVersion;
-        VkResult res = gvk->vkEnumerateInstanceVersion(&instanceVersion);
+        VkResult res = gvk->vkEnumerateInstanceVersion(&maxInstanceVersion);
+        GFXSTREAM_DEBUG("Global loader has instance version = %d.%d.%d",
+                    VK_API_VERSION_MAJOR(maxInstanceVersion),
+                    VK_API_VERSION_MINOR(maxInstanceVersion),
+                    VK_API_VERSION_PATCH(maxInstanceVersion));
         if (VK_SUCCESS == res) {
-            if (instanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+            if (maxInstanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
                 GFXSTREAM_DEBUG("global loader has vkEnumerateInstanceVersion returning >= 1.1.");
                 appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
             }
@@ -933,8 +936,9 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     }
 
     GFXSTREAM_DEBUG("Creating an instance, asking for version %d.%d.%d ...",
-                    VK_VERSION_MAJOR(appInfo.apiVersion), VK_VERSION_MINOR(appInfo.apiVersion),
-                    VK_VERSION_PATCH(appInfo.apiVersion));
+                    VK_API_VERSION_MAJOR(appInfo.apiVersion),
+                    VK_API_VERSION_MINOR(appInfo.apiVersion),
+                    VK_API_VERSION_PATCH(appInfo.apiVersion));
 
     VkResult res = gvk->vkCreateInstance(&instCi, nullptr, &emulation->mInstance);
     if (res != VK_SUCCESS) {
@@ -965,6 +969,9 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                 GFXSTREAM_ERROR("Warning: Vulkan 1.1 APIs missing from instance (1st try)");
             }
         }
+        if (instanceVersion > maxInstanceVersion) {
+            maxInstanceVersion = instanceVersion;
+        }
 
         if (appInfo.apiVersion < VK_MAKE_VERSION(1, 1, 0) &&
             instanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
@@ -989,7 +996,8 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         }
     }
 
-    emulation->mVulkanInstanceVersion = appInfo.apiVersion;
+    emulation->mVulkanApiVersionInUse = appInfo.apiVersion;
+    emulation->mVulkanInstanceVersion = maxInstanceVersion;
 
     // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkPhysicalDeviceIDProperties.html
     // Provided by VK_VERSION_1_1, or VK_KHR_external_fence_capabilities, VK_KHR_external_memory_capabilities,
@@ -1093,10 +1101,10 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
         if (emulation->mInstanceSupportsGetPhysicalDeviceProperties2) {
             deviceInfos[i].supportsDriverProperties =
-                vk_util::extensionsSupported(deviceExts, {VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME}) ||
+                vk_util::extensionSupported(deviceExts, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME) ||
                 (deviceInfos[i].physdevProps.apiVersion >= VK_API_VERSION_1_2);
             deviceInfos[i].supportsExternalMemoryHostProps =
-                vk_util::extensionsSupported(deviceExts, {VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME});
+                vk_util::extensionSupported(deviceExts, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 
             VkPhysicalDeviceProperties2 deviceProps = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR,
@@ -1160,15 +1168,15 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         dmaBufBlockList |= (deviceInfos[i].driverVendor == "radv (Vendor 0x1002)");
 #endif
         deviceInfos[i].supportsDmaBuf =
-            vk_util::extensionsSupported(deviceExts, {VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME}) &&
+            vk_util::extensionSupported(deviceExts, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) &&
             !dmaBufBlockList;
 #endif
 
         deviceInfos[i].hasSamplerYcbcrConversionExtension =
-            vk_util::extensionsSupported(deviceExts, {VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME});
+            vk_util::extensionSupported(deviceExts, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
 
         deviceInfos[i].hasNvidiaDeviceDiagnosticCheckpointsExtension =
-            vk_util::extensionsSupported(deviceExts, {VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME});
+            vk_util::extensionSupported(deviceExts, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
 
         if (emulation->mGetPhysicalDeviceFeatures2Func) {
             VkPhysicalDeviceFeatures2 features2 = {
@@ -1200,15 +1208,21 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             VkPhysicalDevicePrivateDataFeatures privateDataFeatures = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIVATE_DATA_FEATURES,
                 .privateData = VK_FALSE};
-            if (vk_util::extensionsSupported(deviceExts, {VK_EXT_PRIVATE_DATA_EXTENSION_NAME})) {
+            if (vk_util::extensionSupported(deviceExts, VK_EXT_PRIVATE_DATA_EXTENSION_NAME)) {
                 vk_append_struct(&features2Chain, &privateDataFeatures);
+            }
+            VkPhysicalDeviceFrameBoundaryFeaturesEXT frameBoundaryFeatures = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT
+            };
+            if (vk_util::extensionSupported(deviceExts, VK_EXT_FRAME_BOUNDARY_EXTENSION_NAME)) {
+                vk_append_struct(&features2Chain, &frameBoundaryFeatures);
             }
 
             VkPhysicalDeviceRobustness2FeaturesEXT robustness2Features = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
             const bool robustnessRequested = emulation->mFeatures.VulkanRobustness.enabled;
             const bool robustnessSupported =
-                vk_util::extensionsSupported(deviceExts, {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME});
+                vk_util::extensionSupported(deviceExts, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
             if (robustnessRequested && robustnessSupported) {
                 vk_append_struct(&features2Chain, &robustness2Features);
             }
@@ -1222,6 +1236,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                 deviceDiagnosticsConfigFeatures.diagnosticsConfig == VK_TRUE;
 
             deviceInfos[i].supportsPrivateData = (privateDataFeatures.privateData == VK_TRUE);
+            deviceInfos[i].supportsFrameBoundary = (frameBoundaryFeatures.frameBoundary == VK_TRUE);
 
             // Enable robustness only when requested
             if (robustnessRequested && robustnessSupported) {
@@ -1294,8 +1309,9 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
     auto deviceVersion = emulation->mDeviceInfo.physdevProps.apiVersion;
     GFXSTREAM_INFO("Selecting Vulkan device: %s, Version: %d.%d.%d",
-                   emulation->mDeviceInfo.physdevProps.deviceName, VK_VERSION_MAJOR(deviceVersion),
-                   VK_VERSION_MINOR(deviceVersion), VK_VERSION_PATCH(deviceVersion));
+                   emulation->mDeviceInfo.physdevProps.deviceName,
+                   VK_API_VERSION_MAJOR(deviceVersion), VK_API_VERSION_MINOR(deviceVersion),
+                   VK_API_VERSION_PATCH(deviceVersion));
 
     GFXSTREAM_DEBUG(
         "deviceInfo: \n"
@@ -1557,8 +1573,6 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         GFXSTREAM_FATAL("Failed: Could not allocate staging buffer for Vulkan emulation");
     }
 
-    GFXSTREAM_VERBOSE("Vulkan global emulation state successfully initialized.");
-
     emulation->mTransferQueueCommandBufferPool.resize(0);
 
     if (emulation->mDeviceInfo.supportsSamplerYcbcrConversion) {
@@ -1566,7 +1580,11 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                                                emulation->mDevice)) {
             GFXSTREAM_ERROR("Failed: Could create ycbcr sampler pool for Vulkan emulation");
         }
+    } else {
+        GFXSTREAM_INFO("Sampler Ycbcr conversion is not supported.");
     }
+
+    GFXSTREAM_VERBOSE("Vulkan global emulation state successfully initialized.");
 
     return emulation;
 }
@@ -1707,6 +1725,8 @@ bool VkEmulation::supportsPhysicalDeviceIDProperties() const {
 
 bool VkEmulation::supportsPrivateData() const { return mDeviceInfo.supportsPrivateData; }
 
+bool VkEmulation::supportsFrameBoundary() const { return mDeviceInfo.supportsFrameBoundary; }
+
 bool VkEmulation::supportsExternalMemoryImport() const {
     return mDeviceInfo.supportsExternalMemoryImport;
 }
@@ -1783,14 +1803,17 @@ std::string VkEmulation::getGpuVendor() const { return mDeviceInfo.driverVendor;
 
 std::string VkEmulation::getGpuName() const { return mDeviceInfo.physdevProps.deviceName; }
 
+std::string VkEmulation::getGpuDriverVersion() const { return mDeviceInfo.driverVersion; }
+
+std::string VkEmulation::getGpuDriverInfo() const { return mDeviceInfo.driverInfo; }
+
 std::string VkEmulation::getGpuVersionString() const {
     std::stringstream builder;
-    builder << "Vulkan "                                            //
-            << VK_API_VERSION_MAJOR(mVulkanInstanceVersion) << "."  //
-            << VK_API_VERSION_MINOR(mVulkanInstanceVersion) << "."  //
-            << VK_API_VERSION_PATCH(mVulkanInstanceVersion) << " "  //
-            << getGpuVendor() << " "                                //
-            << getGpuName();
+    builder << "Vulkan "                                             //
+            << VK_API_VERSION_MAJOR(mVulkanInstanceVersion) << "."   //
+            << VK_API_VERSION_MINOR(mVulkanInstanceVersion) << "."   //
+            << VK_API_VERSION_PATCH(mVulkanInstanceVersion) << ", "  //
+            << getGpuDriverInfo() << ", " << getGpuDriverVersion();
     return builder.str();
 }
 
@@ -1821,7 +1844,10 @@ void VkEmulation::getVulkanEmulationDeviceInfo(char** device_name, char** driver
                                                uint32_t* vendor_id, uint32_t* device_id,
                                                uint32_t* device_type, uint64_t* device_memory) {
     *driver_version = mDeviceInfo.physdevProps.driverVersion;
-    *api_version = mDeviceInfo.physdevProps.apiVersion;
+    // physdevProps.apiVersion only represents emulation device's api version, which is not very
+    // useful as it can be misleading for the max vulkan api version supported (e.g. vulkan 1.4
+    // supported device will say 1.1 because appinfo.version is provided like so.).
+    *api_version = mVulkanInstanceVersion;
     *vendor_id = mDeviceInfo.physdevProps.vendorID;
     *device_id = mDeviceInfo.physdevProps.deviceID;
     *device_type = mDeviceInfo.physdevProps.deviceType;

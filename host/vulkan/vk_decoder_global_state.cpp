@@ -2221,6 +2221,30 @@ class VkDecoderGlobalState::Impl {
 
         if (result != VK_SUCCESS) {
             GFXSTREAM_WARNING("Failed to create VkDevice: %s.", string_VkResult(result));
+
+            // Provide extra information on specific cases
+            if (createInfoFiltered.pEnabledFeatures && result == VK_ERROR_FEATURE_NOT_PRESENT) {
+                VkPhysicalDeviceFeatures supported;
+                vk->vkGetPhysicalDeviceFeatures(physicalDevice, &supported);
+
+                std::string missingFeatures;
+                vk_util::getMissingFeatures(supported, *createInfoFiltered.pEnabledFeatures,
+                                            missingFeatures);
+                GFXSTREAM_WARNING("Missing features: %s", missingFeatures.c_str());
+            } else if (result == VK_ERROR_EXTENSION_NOT_PRESENT) {
+                uint32_t extCount;
+                vk->vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount,
+                                                         nullptr);
+                std::vector<VkExtensionProperties> availableExts(extCount);
+                vk->vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount,
+                                                         availableExts.data());
+
+                std::string missingExtensions;
+                vk_util::getMissingExtensions(availableExts, createInfoFiltered.enabledExtensionCount,
+                                              createInfoFiltered.ppEnabledExtensionNames,
+                                              missingExtensions);
+                GFXSTREAM_WARNING("Missing extensions: %s", missingExtensions.c_str());
+            }
             return result;
         }
 
@@ -7274,6 +7298,24 @@ class VkDecoderGlobalState::Impl {
             }
 
             deviceOpTracker = deviceInfo->deviceOpTracker.get();
+
+            if (mRenderDocWithMultipleVkInstances && m_vkEmulation->supportsFrameBoundary()) {
+                // Check if this is a frame boundary submission, only the first submit call
+                // will be searched to initiate the frame delimiter on renderdoc capture
+                const VkFrameBoundaryEXT* frameBoundary =
+                    vk_find_struct<VkFrameBoundaryEXT>(pSubmits);
+
+                if (frameBoundary) {
+                    auto* phyDeviceInfo =
+                        gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
+                    if (!phyDeviceInfo) {
+                        GFXSTREAM_ERROR("vkQueueSubmit cannot find physical device info for %p",
+                                        device);
+                        return VK_ERROR_INITIALIZATION_FAILED;
+                    }
+                    mRenderDocWithMultipleVkInstances->onFrameDelimiter(phyDeviceInfo->instance);
+                }
+            }
         }
 
         for (HandleType cb : acquiredColorBuffers) {

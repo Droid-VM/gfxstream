@@ -437,8 +437,8 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
 
     void postWithCallback(HandleType p_colorbuffer, Post::CompletionCallback callback,
                           bool needLockAndBind = true);
-    bool hasGuestPostedAFrame() { return m_guestPostedAFrame; }
-    void resetGuestPostedAFrame() { m_guestPostedAFrame = false; }
+    bool hasGuestPostedAFrame() { return m_guestPostedAFrameTime.has_value(); }
+    void resetGuestPostedAFrame() { m_guestPostedAFrameTime = std::nullopt; }
 
     void doPostCallback(void* pixels, uint32_t displayId);
 
@@ -790,6 +790,9 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
 
     RepresentativeColorBufferMemoryTypeInfo getRepresentativeColorBufferMemoryTypeInfo() const;
 
+    void applyScreenshotBackground(const int width, const int height, const int numChannels,
+                                   uint8_t* pixelDataInOut);
+
    private:
     Impl(FrameBuffer* framebuffer, int p_width, int p_height, const FeatureSet& features,
          bool useSubWindow);
@@ -819,7 +822,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
                          bool needLockAndBind = true, bool repaint = false);
     bool postImplSync(HandleType p_colorbuffer, bool needLockAndBind = true, bool repaint = false);
     void setGuestPostedAFrame() {
-        m_guestPostedAFrame = true;
+        m_guestPostedAFrameTime = std::chrono::steady_clock::now();
         m_framebuffer->fireEvent({FrameBufferChange::FrameReady, mFrameNumber++});
     }
     HandleType createColorBufferWithResourceHandleLocked(int p_width, int p_height,
@@ -851,7 +854,6 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     bool m_useSubWindow = false;
 
     bool m_fpsStats = false;
-    bool m_perfStats = false;
     int m_statsNumFrames = 0;
     long long m_statsStartTime = 0;
 
@@ -904,7 +906,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
         uint32_t height;
     };
     gfxstream::base::WorkerProcessingResult sendReadbackWorkerCmd(const Readback& readback);
-    bool m_guestPostedAFrame = false;
+    std::optional<std::chrono::steady_clock::time_point> m_guestPostedAFrameTime;
 
     struct onPost {
         Renderer::OnPostCallback cb;
@@ -1013,6 +1015,67 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     ProcOwnedColorBuffers m_procOwnedColorBuffers;
     ProcOwnedCleanupCallbacks m_procOwnedCleanupCallbacks;
 
+    // ScreenBackground, copy of the CPU data
+    // TODO: keep and use the GPU blended display image for screenshots and remove this
+    struct {
+        struct RgbaColor {
+            uint8_t r, g, b, a;
+        };
+        static_assert(sizeof(RgbaColor) == 4);
+        int m_width = 0;
+        int m_height = 0;
+        std::vector<RgbaColor> m_rgbaData;
+
+        void reset() {
+            m_width = 0;
+            m_height = 0;
+            m_rgbaData.clear();
+        }
+
+        RgbaColor getPixelSafe(int x, int y) const {
+            x = std::max(0, std::min(m_width - 1, x));
+            y = std::max(0, std::min(m_height - 1, y));
+            const uint32_t pixelIndex = (y * m_width + x);
+            return m_rgbaData[pixelIndex];
+        }
+
+        RgbaColor bilinearSample(const float u, const float v) const {
+            const float x = u * m_width;
+            const float y = v * m_height;
+            int x0 = static_cast<int>(std::floor(x));
+            int y0 = static_cast<int>(std::floor(y));
+            int x1 = x0 + 1;
+            int y1 = y0 + 1;
+
+            float tx = x - x0;
+            float ty = y - y0;
+
+            RgbaColor p00 = getPixelSafe(x0, y0);
+            RgbaColor p10 = getPixelSafe(x1, y0);
+            RgbaColor p01 = getPixelSafe(x0, y1);
+            RgbaColor p11 = getPixelSafe(x1, y1);
+
+            auto lerpComponent = [](uint8_t a, uint8_t b, float t) {
+                return static_cast<uint8_t>(a + t * (b - a));
+            };
+
+            uint8_t rTop = lerpComponent(p00.r, p10.r, tx);
+            uint8_t gTop = lerpComponent(p00.g, p10.g, tx);
+            uint8_t bTop = lerpComponent(p00.b, p10.b, tx);
+
+            uint8_t rBottom = lerpComponent(p01.r, p11.r, tx);
+            uint8_t gBottom = lerpComponent(p01.g, p11.g, tx);
+            uint8_t bBottom = lerpComponent(p01.b, p11.b, tx);
+
+            RgbaColor result;
+            result.r = lerpComponent(rTop, rBottom, ty);
+            result.g = lerpComponent(gTop, gBottom, ty);
+            result.b = lerpComponent(bTop, bBottom, ty);
+
+            return result;
+        }
+    } mScreenBackgroundImage;
+
 #if GFXSTREAM_ENABLE_HOST_GLES
     gl::EmulatedEglContextMap m_contexts;
     gl::EmulatedEglImageMap m_images;
@@ -1103,17 +1166,34 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
 
     GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DEFAULT_CATEGORY, "FrameBuffer::Impl::Init()");
 
-    std::unique_ptr<gfxstream::host::RenderDocWithMultipleVkInstances> renderDocMultipleVkInstances = nullptr;
-    if (!gfxstream::base::getEnvironmentVariable("ANDROID_EMU_RENDERDOC").empty()) {
-        SharedLibrary* renderdocLib = nullptr;
+    const char* ANDROID_EMU_RENDERDOC_ENVVAR = "ANDROID_EMU_RENDERDOC";
+    const char* ANDROID_EMU_RENDERDOC_CAPTURE_PATH_TEMPLATE_ENVVAR =
+        "ANDROID_EMU_RENDERDOC_CAPTURE_PATH_TEMPLATE";
+    const char* ANDROID_EMU_RENDERDOC_LIBRARY_PATH = "ANDROID_EMU_RENDERDOC_LIBRARY_PATH";
+    std::unique_ptr<gfxstream::host::RenderDocWithMultipleVkInstances>
+        renderDocMultipleVkInstances = nullptr;
+
+    if (!gfxstream::base::getEnvironmentVariable(ANDROID_EMU_RENDERDOC_ENVVAR).empty()) {
+        std::string renderDocLibraryPath =
+            gfxstream::base::getEnvironmentVariable(ANDROID_EMU_RENDERDOC_LIBRARY_PATH);
+        const bool renderDocLibraryPathIsGiven = !renderDocLibraryPath.empty();
+        if (!renderDocLibraryPathIsGiven) {
+            // Look into default places
 #ifdef _WIN32
-        renderdocLib = SharedLibrary::open(R"(C:\Program Files\RenderDoc\renderdoc.dll)");
+            renderDocLibraryPath = R"(C:\Program Files\RenderDoc\renderdoc.dll)";
+#elif defined(__APPLE__)
+            renderDocLibraryPath = "librenderdoc.dylib";
 #elif defined(__linux__)
-        renderdocLib = SharedLibrary::open("librenderdoc.so");
+            renderDocLibraryPath = "librenderdoc.so";
+#else
+            renderDocLibraryPath = "librenderdoc";
 #endif
+        }
+
+        SharedLibrary* renderdocLib = nullptr;
+        renderdocLib = SharedLibrary::open(renderDocLibraryPath.c_str());
         impl->m_renderDoc = gfxstream::host::RenderDoc::create(renderdocLib);
         if (impl->m_renderDoc) {
-            GFXSTREAM_INFO("RenderDoc integration enabled.");
             renderDocMultipleVkInstances =
                 std::make_unique<gfxstream::host::RenderDocWithMultipleVkInstances>(
                     *impl->m_renderDoc);
@@ -1121,9 +1201,34 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
                 GFXSTREAM_ERROR(
                     "Failed to initialize RenderDoc with multiple VkInstances. Can't capture any "
                     "information from guest VkInstances with RenderDoc.");
+            } else {
+                const std::string capturePath = gfxstream::base::getEnvironmentVariable(
+                    ANDROID_EMU_RENDERDOC_CAPTURE_PATH_TEMPLATE_ENVVAR);
+                if (capturePath.empty()) {
+                    GFXSTREAM_INFO(
+                        "RenderDoc integration is enabled. Using default capture path, use "
+                        "%s to change.",
+                        ANDROID_EMU_RENDERDOC_CAPTURE_PATH_TEMPLATE_ENVVAR);
+                } else {
+                    renderDocMultipleVkInstances->setCaptureFilePathTemplate(capturePath);
+                    GFXSTREAM_INFO("RenderDoc integration is enabled. Capture path template: %s",
+                                   capturePath.c_str());
+                }
             }
+        } else {
+            std::string errorMsg =
+                "ANDROID_EMU_RENDERDOC is set, but RenderDoc integration cannot be enabled.";
+            // Give a hint to ask user set an envvar to setup the library path
+            if (renderDocLibraryPathIsGiven) {
+                errorMsg += " ANDROID_EMU_RENDERDOC_LIBRARY_PATH is set to ";
+                errorMsg += renderDocLibraryPath;
+            } else {
+                errorMsg += " Use ANDROID_EMU_RENDERDOC_LIBRARY_PATH to set correct path";
+            }
+            GFXSTREAM_ERROR(errorMsg.c_str());
         }
     }
+
     // Initialize Vulkan emulation state
     //
     // Note: This must happen before any use of s_egl,
@@ -1183,8 +1288,6 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
                 "disabled.");
             return nullptr;
         }
-
-        vk::VkDecoderGlobalState::initialize(impl->m_emulationVk.get());
 
         impl->m_vulkanEnabled = true;
         if (impl->m_features.VulkanNativeSwapchain.enabled) {
@@ -1359,6 +1462,11 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
         impl->m_postWorker.reset(postWorkerGl);
         impl->m_displaySurfaceUsers.push_back(postWorkerGl);
 #endif
+    }
+
+    // VkDecoderGlobalState must be initialized after m_emulationVk initialization is complete
+    if (impl->m_features.Vulkan.enabled) {
+        vk::VkDecoderGlobalState::initialize(impl->m_emulationVk.get());
     }
 
     // Start up the single sync thread. If we are using Vulkan native
@@ -1589,9 +1697,12 @@ std::future<void> FrameBuffer::Impl::sendPostWorkerCmd(Post post) {
         get_gfxstream_window_operations().is_current_thread_ui_thread()) {
         post.cb->readToBytesScaled(post.screenshot.screenwidth, post.screenshot.screenheight,
                                    post.screenshot.rotation, post.screenshot.rect,
-                                   post.screenshot.pixelsFormat,
-                                   post.screenshot.pixels,
+                                   post.screenshot.pixelsFormat, post.screenshot.pixels,
                                    post.colorTransform);
+
+        const int bpp = (post.screenshot.pixelsFormat == GfxstreamFormat::R8G8B8_UNORM) ? 3 : 4;
+        applyScreenshotBackground(post.screenshot.screenwidth, post.screenshot.screenheight, bpp,
+                                  reinterpret_cast<uint8_t*>(post.screenshot.pixels));
     } else {
         std::future<void> completeFuture =
             m_postThread.enqueue(Post(std::move(post)));
@@ -3770,7 +3881,37 @@ void FrameBuffer::Impl::setScreenMask(int width, int height, const uint8_t* rgba
 }
 
 void FrameBuffer::Impl::setScreenBackground(int width, int height, const uint8_t* rgbaData) {
+    // Avoid processing the call before initializing or after finalizing the framebuffer
+    if (!sInitialized.load(std::memory_order_relaxed)) {
+        GFXSTREAM_DEBUG("%s called in an invalid state.", __func__);
+        return;
+    }
+
+    if (rgbaData) {
+        mScreenBackgroundImage.m_width = width;
+        mScreenBackgroundImage.m_height = height;
+        mScreenBackgroundImage.m_rgbaData.resize(width * height);
+        memcpy(mScreenBackgroundImage.m_rgbaData.data(), rgbaData, width * height * 4);
+    } else {
+        mScreenBackgroundImage.reset();
+    }
+
     m_compositor->setScreenBackground(width, height, rgbaData);
+
+    //  Try to update the display at least 30 times a second, in case the guest is not
+    //  updating the display
+    if (m_guestPostedAFrameTime && m_lastPostedColorBuffer) {
+        const std::chrono::milliseconds maxUpdateLatency(1000 / 30);
+        const auto nowTime = std::chrono::steady_clock::now();
+        bool shouldRepost = (nowTime - m_guestPostedAFrameTime.value()) > maxUpdateLatency;
+        if (shouldRepost) {
+            // This is same as calling repost(), but without redundant checks and logging
+            if (!m_displayVk) {
+                postImplSync(m_lastPostedColorBuffer, true, true);
+            }
+            m_guestPostedAFrameTime = nowTime;
+        }
+    }
 }
 
 #ifdef CONFIG_AEMU
@@ -4733,6 +4874,40 @@ FrameBuffer::Impl::getRepresentativeColorBufferMemoryTypeInfo() const {
     return m_emulationVk->getRepresentativeColorBufferMemoryTypeInfo();
 }
 
+void FrameBuffer::Impl::applyScreenshotBackground(const int width, const int height,
+                                                  const int numChannels, uint8_t* pixelDataInOut) {
+    if (!pixelDataInOut) {
+        return;
+    }
+
+    auto screenBlendComponent = [](uint8_t sourceComponent, uint8_t backgroundComponent) {
+        const int s = static_cast<int>(sourceComponent);
+        const int b = static_cast<int>(backgroundComponent);
+        const int invertedProduct = (255 - s) * (255 - b);
+        const int roundedProduct = (invertedProduct + 127) / 255;
+        return static_cast<uint8_t>(255 - roundedProduct);
+    };
+
+    if (mScreenBackgroundImage.m_rgbaData.size()) {
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                // Provide normalized coords as the background may have a
+                // different resolution
+                const auto backgroundSampled = mScreenBackgroundImage.bilinearSample(
+                    ((float)x + 0.5f) / width, ((float)y + 0.5f) / height);
+
+                const int inputIndex = (y * width + x) * numChannels;
+                pixelDataInOut[inputIndex + 0] =
+                    screenBlendComponent(pixelDataInOut[inputIndex + 0], backgroundSampled.r);
+                pixelDataInOut[inputIndex + 1] =
+                    screenBlendComponent(pixelDataInOut[inputIndex + 1], backgroundSampled.g);
+                pixelDataInOut[inputIndex + 2] =
+                    screenBlendComponent(pixelDataInOut[inputIndex + 2], backgroundSampled.b);
+            }
+        }
+    }
+}
+
 FrameBuffer::~FrameBuffer() = default;
 
 /*static*/
@@ -5347,6 +5522,11 @@ const FeatureSet& FrameBuffer::getFeatures() const { return mImpl->getFeatures()
 RepresentativeColorBufferMemoryTypeInfo FrameBuffer::getRepresentativeColorBufferMemoryTypeInfo()
     const {
     return mImpl->getRepresentativeColorBufferMemoryTypeInfo();
+}
+
+void FrameBuffer::applyScreenshotBackground(const int width, const int height,
+                                            const int numChannels, uint8_t* pixelDataInOut) {
+    return mImpl->applyScreenshotBackground(width, height, numChannels, pixelDataInOut);
 }
 
 }  // namespace host

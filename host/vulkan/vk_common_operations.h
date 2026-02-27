@@ -132,6 +132,8 @@ class VkEmulation {
 
     bool supportsPrivateData() const;
 
+    bool supportsFrameBoundary() const;
+
     bool supportsExternalMemoryImport() const;
 
     bool supportsDmaBuf() const;
@@ -172,6 +174,8 @@ class VkEmulation {
 
     std::string getGpuVendor() const;
     std::string getGpuName() const;
+    std::string getGpuDriverVersion() const;
+    std::string getGpuDriverInfo() const;
     std::string getGpuVersionString() const;
     std::string getInstanceExtensionsString() const;
     std::string getDeviceExtensionsString() const;
@@ -456,6 +460,7 @@ class VkEmulation {
         bool hasNvidiaDeviceDiagnosticCheckpointsExtension = false;
         bool supportsNvidiaDeviceDiagnosticCheckpoints = false;
         bool supportsPrivateData = false;
+        bool supportsFrameBoundary = false;
 
         std::vector<VkExtensionProperties> extensions;
 
@@ -562,6 +567,7 @@ class VkEmulation {
 
     // Instance and device for creating the system-wide shareable objects.
     VkInstance mInstance = VK_NULL_HANDLE;
+    uint32_t mVulkanApiVersionInUse = 0;
     uint32_t mVulkanInstanceVersion = 0;
     std::vector<VkExtensionProperties> mInstanceExtensions;
 
