@@ -1573,8 +1573,6 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         GFXSTREAM_FATAL("Failed: Could not allocate staging buffer for Vulkan emulation");
     }
 
-    GFXSTREAM_VERBOSE("Vulkan global emulation state successfully initialized.");
-
     emulation->mTransferQueueCommandBufferPool.resize(0);
 
     if (emulation->mDeviceInfo.supportsSamplerYcbcrConversion) {
@@ -1582,7 +1580,11 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                                                emulation->mDevice)) {
             GFXSTREAM_ERROR("Failed: Could create ycbcr sampler pool for Vulkan emulation");
         }
+    } else {
+        GFXSTREAM_INFO("Sampler Ycbcr conversion is not supported.");
     }
+
+    GFXSTREAM_VERBOSE("Vulkan global emulation state successfully initialized.");
 
     return emulation;
 }
