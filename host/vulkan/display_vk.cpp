@@ -540,7 +540,7 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             .image = currentSwapchainImage,
             .subresourceRange = subresourceRange,
         };
-        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                   &barrier);
 
@@ -568,7 +568,7 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             .image = currentSwapchainImage,
             .subresourceRange = subresourceRange,
         };
-        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                   &acquireSwapchainImageBarrier);
         currentSwapchainLayout = acquireSwapchainImageBarrier.newLayout;
@@ -632,7 +632,7 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
                 .image = currentSwapchainImage,
                 .subresourceRange = subresourceRange,
             };
-            m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr,
                                       0, nullptr, 1, &transitionSwapchainToAttachmentBarrier);
             currentSwapchainLayout = transitionSwapchainToAttachmentBarrier.newLayout;
@@ -706,7 +706,7 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
                     .image = currentSwapchainImage,
                     .subresourceRange = subresourceRange,
                 };
-                m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
                                           nullptr, 0, nullptr, 1, &transitionToAttachment);
                 currentSwapchainLayout = transitionToAttachment.newLayout;
