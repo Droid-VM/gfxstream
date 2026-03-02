@@ -192,6 +192,12 @@ VkResult SwapChainStateVk::initSwapChainStateVk(const VkSwapchainCreateInfoKHR& 
 }
 
 SwapChainStateVk::~SwapChainStateVk() {
+    for (auto frameBuffer : m_vkFramebuffers) {
+        m_vk.vkDestroyFramebuffer(m_vkDevice, frameBuffer, nullptr);
+    }
+    for (auto renderPass : m_vkRenderPasses) {
+        m_vk.vkDestroyRenderPass(m_vkDevice, renderPass, nullptr);
+    }
     for (auto imageView : m_vkImageViews) {
         m_vk.vkDestroyImageView(m_vkDevice, imageView, nullptr);
     }

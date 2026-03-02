@@ -1000,6 +1000,7 @@ std::unique_ptr<DisplayVk::ImageBorrowResource> DisplayVk::ImageBorrowResource::
 }
 
 DisplayVk::ImageBorrowResource::~ImageBorrowResource() {
+    m_vk.vkDestroyFence(m_vkDevice, m_completeFence, nullptr);
     m_vk.vkFreeCommandBuffers(m_vkDevice, m_vkCommandPool, 1, &m_vkCommandBuffer);
 }
 

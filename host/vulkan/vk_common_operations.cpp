@@ -1673,6 +1673,12 @@ VkEmulation::~VkEmulation() {
     mDisplayVk.reset();
     mUdmabufCreator.reset();
 
+    for (auto& [cb,fence] : mTransferQueueCommandBufferPool) {
+        mDvk->vkDestroyFence(mDevice, fence, nullptr);
+        mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cb);
+    }
+    mTransferQueueCommandBufferPool.clear();
+
     mYcbcrSamplerPool.destroy();
 
     mStaging.destroy(mDvk, mDevice);
