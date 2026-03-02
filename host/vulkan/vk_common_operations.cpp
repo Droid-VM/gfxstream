@@ -1504,6 +1504,15 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
     GFXSTREAM_DEBUG("Vulkan device queue obtained.");
 
+    if (debugUtilsAvailableAndRequested) {
+        emulation->mDebugUtilsAvailableAndRequested = true;
+        emulation->mDebugUtilsHelper =
+            DebugUtilsHelper::withUtilsEnabled(emulation->mDevice, emulation->mIvk);
+
+        emulation->mDebugUtilsHelper.addDebugLabel(emulation->mInstance, "AEMU_Instance");
+        emulation->mDebugUtilsHelper.addDebugLabel(emulation->mDevice, "AEMU_Device");
+    }
+
     VkCommandPoolCreateInfo poolCi = {
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         0,
@@ -1513,11 +1522,11 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
     VkResult poolCreateRes =
         dvk->vkCreateCommandPool(emulation->mDevice, &poolCi, nullptr, &emulation->mCommandPool);
-
     if (poolCreateRes != VK_SUCCESS) {
         GFXSTREAM_ERROR("Failed to create command pool. Error: %s.", string_VkResult(poolCreateRes));
         return nullptr;
     }
+    emulation->mDebugUtilsHelper.addDebugLabel(emulation->mCommandPool, "AEMU_CommandPool");
 
     VkCommandBufferAllocateInfo cbAi = {
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1529,11 +1538,11 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
     VkResult cbAllocRes =
         dvk->vkAllocateCommandBuffers(emulation->mDevice, &cbAi, &emulation->mCommandBuffer);
-
     if (cbAllocRes != VK_SUCCESS) {
         GFXSTREAM_ERROR("Failed to allocate command buffer. Error: %s.", string_VkResult(cbAllocRes));
         return nullptr;
     }
+    emulation->mDebugUtilsHelper.addDebugLabel(emulation->mCommandBuffer, "AEMU_CommandBuffer");
 
     VkFenceCreateInfo fenceCi = {
         VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -1543,22 +1552,12 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
     VkResult fenceCreateRes =
         dvk->vkCreateFence(emulation->mDevice, &fenceCi, nullptr, &emulation->mCommandBufferFence);
-
     if (fenceCreateRes != VK_SUCCESS) {
         GFXSTREAM_ERROR("Failed to create fence for command buffer. Error: %s.",
                         string_VkResult(fenceCreateRes));
         return nullptr;
     }
-
-    if (debugUtilsAvailableAndRequested) {
-        emulation->mDebugUtilsAvailableAndRequested = true;
-        emulation->mDebugUtilsHelper =
-            DebugUtilsHelper::withUtilsEnabled(emulation->mDevice, emulation->mIvk);
-
-        emulation->mDebugUtilsHelper.addDebugLabel(emulation->mInstance, "AEMU_Instance");
-        emulation->mDebugUtilsHelper.addDebugLabel(emulation->mDevice, "AEMU_Device");
-        emulation->mDebugUtilsHelper.addDebugLabel(emulation->mCommandBuffer, "AEMU_CommandBuffer");
-    }
+    emulation->mDebugUtilsHelper.addDebugLabel(emulation->mCommandBufferFence, "AEMU_CommandBufferFence");
 
     if (commandBufferCheckpointsSupportedAndRequested) {
         emulation->mCommandBufferCheckpointsSupportedAndRequested = true;
@@ -1642,9 +1641,9 @@ void VkEmulation::initFeatures(Features features) {
         if (mDisplayVk) {
             GFXSTREAM_ERROR("Reset VkEmulation::displayVk.");
         }
-        mDisplayVk = std::make_unique<DisplayVk>(*mIvk, mPhysicalDevice, mDevice,
-                                                 mCompositorVk.get(), mQueueFamilyIndex, mQueue,
-                                                 mQueueLock, mQueueFamilyIndex, mQueue, mQueueLock);
+        mDisplayVk = std::make_unique<DisplayVk>(
+            *mIvk, mPhysicalDevice, mDevice, mCompositorVk.get(), mQueueFamilyIndex, mQueue,
+            mQueueLock, mQueueFamilyIndex, mQueue, mQueueLock, mDebugUtilsHelper);
     }
 
     auto representativeInfo = findRepresentativeColorBufferMemoryTypeIndexLocked();
@@ -3483,6 +3482,7 @@ bool VkEmulation::readColorBufferPixelsScaledGpu(uint32_t colorBufferHandle, int
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
     VK_CHECK(mDvk->vkCreateImage(mDevice, &imageCreateInfo, nullptr, &tempImage));
+    mDebugUtilsHelper.addDebugLabel(tempImage, "readColorBufferPixelsScaledGpu.tempImage");
 
     // Image memory allocation
     VkMemoryRequirements memReqs;
@@ -3506,6 +3506,7 @@ bool VkEmulation::readColorBufferPixelsScaledGpu(uint32_t colorBufferHandle, int
         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
     };
     VK_CHECK(mDvk->vkCreateImageView(mDevice, &imageViewCreateInfo, nullptr, &tempImageView));
+    mDebugUtilsHelper.addDebugLabel(tempImageView, "readColorBufferPixelsScaledGpu.tempImageView");
 
     // Render Pass creation
     VkAttachmentDescription colorAttachment = {
@@ -3545,6 +3546,7 @@ bool VkEmulation::readColorBufferPixelsScaledGpu(uint32_t colorBufferHandle, int
         .pDependencies = &dependency,
     };
     VK_CHECK(mDvk->vkCreateRenderPass(mDevice, &renderPassInfo, nullptr, &tempRenderPass));
+    mDebugUtilsHelper.addDebugLabel(tempRenderPass, "readColorBufferPixelsScaledGpu.tempRenderPass");
 
     // Framebuffer creation
     VkFramebufferCreateInfo framebufferInfo = {
@@ -3557,6 +3559,7 @@ bool VkEmulation::readColorBufferPixelsScaledGpu(uint32_t colorBufferHandle, int
         .layers = 1,
     };
     VK_CHECK(mDvk->vkCreateFramebuffer(mDevice, &framebufferInfo, nullptr, &tempFramebuffer));
+    mDebugUtilsHelper.addDebugLabel(tempFramebuffer, "readColorBufferPixelsScaledGpu.tempFramebuffer");
 
     const VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -4566,6 +4569,7 @@ std::tuple<VkCommandBuffer, VkFence> VkEmulation::allocateQueueTransferCommandBu
         .commandBufferCount = 1,
     };
     VK_CHECK(vk->vkAllocateCommandBuffers(mDevice, &allocateInfo, &commandBuffer));
+
     VkFence fence;
     VkFenceCreateInfo fenceCi = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -4577,12 +4581,13 @@ std::tuple<VkCommandBuffer, VkFence> VkEmulation::allocateQueueTransferCommandBu
     const int cbIndex = static_cast<int>(mTransferQueueCommandBufferPool.size());
     mTransferQueueCommandBufferPool.emplace_back(commandBuffer, fence);
 
+    mDebugUtilsHelper.addDebugLabel(commandBuffer, "QueueTransferCommandBuffer:CB%d", cbIndex);
+    mDebugUtilsHelper.addDebugLabel(fence, "QueueTransferCommandBuffer:Fence%d", cbIndex);
+
     GFXSTREAM_DEBUG(
         "Create a new command buffer for queue transfer for a total of %d "
         "transfer command buffers",
         (cbIndex + 1));
-
-    mDebugUtilsHelper.addDebugLabel(commandBuffer, "QueueTransferCommandBuffer:%d", cbIndex);
 
     return std::make_tuple(commandBuffer, fence);
 }
