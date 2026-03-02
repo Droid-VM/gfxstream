@@ -2957,7 +2957,8 @@ class VkDecoderGlobalState::Impl {
         VkResult createRes = VK_SUCCESS;
 
         if (nativeBufferANDROID) {
-            auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
+            auto* physicalDeviceInfo =
+                gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
             if (!physicalDeviceInfo) {
                 return VK_ERROR_DEVICE_LOST;
             }
@@ -2966,7 +2967,8 @@ class VkDecoderGlobalState::Impl {
                 physicalDeviceInfo->memoryPropertiesHelper->getHostMemoryProperties();
 
             anbInfo = AndroidNativeBufferInfo::create(
-                m_vkEmulation, vk, device, *pool, pCreateInfo, nativeBufferANDROID, pAllocator, &memoryProperties);
+                m_vkEmulation, vk, device, *pool, pCreateInfo, nativeBufferANDROID, pAllocator,
+                &memoryProperties, deviceInfo->debugUtilsHelper);
             if (anbInfo == nullptr) {
                 createRes = VK_ERROR_OUT_OF_DEVICE_MEMORY;
             }
