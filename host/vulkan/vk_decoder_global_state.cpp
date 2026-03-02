@@ -171,9 +171,6 @@ static constexpr const char* const kEmulatedInstanceExtensions[] = {
     VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME,
 };
 
-static constexpr uint32_t kMaxSafeVersion = VK_MAKE_VERSION(1, 3, 0);
-static constexpr uint32_t kMinVersion = VK_MAKE_VERSION(1, 0, 0);
-
 static constexpr uint64_t kPageSizeforBlob = 4096;
 static constexpr uint64_t kPageMaskForBlob = ~(0xfff);
 
@@ -1038,14 +1035,10 @@ class VkDecoderGlobalState::Impl {
                                            uint32_t* pApiVersion) {
         if (m_vk->vkEnumerateInstanceVersion) {
             VkResult res = m_vk->vkEnumerateInstanceVersion(pApiVersion);
-
-            if (*pApiVersion > kMaxSafeVersion) {
-                *pApiVersion = kMaxSafeVersion;
-            }
-
+            m_vkEmulation->applyApiVersionLimits(*pApiVersion);
             return res;
         }
-        *pApiVersion = kMinVersion;
+        *pApiVersion = VK_API_VERSION_1_0;
         return VK_SUCCESS;
     }
 
@@ -1328,9 +1321,7 @@ class VkDecoderGlobalState::Impl {
 
                 vk->vkGetPhysicalDeviceProperties(physicalDevices[i], &physdevInfo.props);
 
-                if (physdevInfo.props.apiVersion > kMaxSafeVersion) {
-                    physdevInfo.props.apiVersion = kMaxSafeVersion;
-                }
+                m_vkEmulation->applyApiVersionLimits(physdevInfo.props.apiVersion);
 
                 VkPhysicalDeviceMemoryProperties hostMemoryProperties;
                 vk->vkGetPhysicalDeviceMemoryProperties(physicalDevices[i], &hostMemoryProperties);
@@ -1704,9 +1695,7 @@ class VkDecoderGlobalState::Impl {
 
         vk->vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
 
-        if (pProperties->apiVersion > kMaxSafeVersion) {
-            pProperties->apiVersion = kMaxSafeVersion;
-        }
+        m_vkEmulation->applyApiVersionLimits(pProperties->apiVersion);
     }
 
     void on_vkGetPhysicalDeviceProperties2(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
@@ -1745,9 +1734,7 @@ class VkDecoderGlobalState::Impl {
             vk->vkGetPhysicalDeviceProperties(physicalDevice, &pProperties->properties);
         }
 
-        if (pProperties->properties.apiVersion > kMaxSafeVersion) {
-            pProperties->properties.apiVersion = kMaxSafeVersion;
-        }
+        m_vkEmulation->applyApiVersionLimits(pProperties->properties.apiVersion);
     }
 
     void on_vkGetPhysicalDeviceQueueFamilyProperties(
@@ -6069,6 +6056,7 @@ class VkDecoderGlobalState::Impl {
                 physicalDeviceInfo->memoryPropertiesHelper
                     ->getHostMemoryInfoFromGuestMemoryTypeIndex(localAllocInfo.memoryTypeIndex);
             if (!hostMemoryInfoOpt) {
+                GFXSTREAM_ERROR("Failed to get host memory info.");
                 return VK_ERROR_INCOMPATIBLE_DRIVER;
             }
             const auto& hostMemoryInfo = *hostMemoryInfoOpt;

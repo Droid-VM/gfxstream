@@ -78,8 +78,7 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
     // own sub-windows. If false, this means the caller will use
     // setPostCallback() instead to retrieve the content.
     // Returns true on success, false otherwise.
-    static bool initialize(int width, int height, const FeatureSet& features,
-                           bool useSubWindow);
+    static bool initialize(int width, int height, const FeatureSet& features, bool useSubWindow);
 
     // Finalize the instance.
     static void finalize();
