@@ -232,6 +232,7 @@ class VkDecoderGlobalState::Impl {
         mBufferInfo.clear();
         mMemoryInfo.clear();
         mShaderModuleInfo.clear();
+        mSamplerYcbcrConversionInfo.clear();
         mPipelineCacheInfo.clear();
         mPipelineLayoutInfo.clear();
         mPipelineInfo.clear();
@@ -8882,12 +8883,39 @@ class VkDecoderGlobalState::Impl {
         if (res != VK_SUCCESS) {
             return res;
         }
+
+        VALIDATE_NEW_HANDLE_INFO_ENTRY(mSamplerYcbcrConversionInfo, *pYcbcrConversion);
+        auto& ycbcrConversionInfo = mSamplerYcbcrConversionInfo[*pYcbcrConversion];
+        ycbcrConversionInfo.device = device;
+
         *pYcbcrConversion = new_boxed_non_dispatchable_VkSamplerYcbcrConversion(*pYcbcrConversion);
         return VK_SUCCESS;
     }
 
-    void on_vkDestroySamplerYcbcrConversion(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
-                                            VkDevice boxed_device,
+    void destroySamplerYcbcrConversionWithExclusiveInfo(VkDevice device,
+                                                        VulkanDispatch* deviceDispatch,
+                                                        VkSamplerYcbcrConversion ycbcrConversion,
+                                                        SamplerYcbcrConversionInfo&,
+                                                        const VkAllocationCallbacks* pAllocator) {
+        deviceDispatch->vkDestroySamplerYcbcrConversion(device, ycbcrConversion, pAllocator);
+    }
+
+    void destroySamplerYcbcrConversionLocked(VkDevice device, VulkanDispatch* deviceDispatch,
+                                             VkSamplerYcbcrConversion ycbcrConversion,
+                                             const VkAllocationCallbacks* pAllocator)
+        REQUIRES(mMutex) {
+        auto ycbcrConversionInfoIt = mSamplerYcbcrConversionInfo.find(ycbcrConversion);
+        if (ycbcrConversionInfoIt == mSamplerYcbcrConversionInfo.end()) return;
+        auto& ycbcrConversionInfo = ycbcrConversionInfoIt->second;
+
+        destroySamplerYcbcrConversionWithExclusiveInfo(device, deviceDispatch, ycbcrConversion,
+                                                       ycbcrConversionInfo, pAllocator);
+
+        mSamplerYcbcrConversionInfo.erase(ycbcrConversionInfoIt);
+    }
+
+    void on_vkDestroySamplerYcbcrConversion(gfxstream::base::BumpPool* pool,
+                                            VkSnapshotApiCallHandle, VkDevice boxed_device,
                                             VkSamplerYcbcrConversion ycbcrConversion,
                                             const VkAllocationCallbacks* pAllocator) {
         if (m_vkEmulation->isYcbcrEmulationEnabled() &&
@@ -8896,8 +8924,9 @@ class VkDecoderGlobalState::Impl {
         }
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
-        vk->vkDestroySamplerYcbcrConversion(device, ycbcrConversion, pAllocator);
-        return;
+
+        std::lock_guard<std::mutex> lock(mMutex);
+        destroySamplerYcbcrConversionLocked(device, vk, ycbcrConversion, pAllocator);
     }
 
     VkResult on_vkEnumeratePhysicalDeviceGroups(
@@ -9849,6 +9878,7 @@ class VkDecoderGlobalState::Impl {
         extractInfosWithDeviceInto(device, mEventInfo, deviceObjects.events);
         extractInfosWithDeviceInto(device, mSemaphoreInfo, deviceObjects.semaphores);
         extractInfosWithDeviceInto(device, mShaderModuleInfo, deviceObjects.shaderModules);
+        extractInfosWithDeviceInto(device, mSamplerYcbcrConversionInfo, deviceObjects.samplerYcbcrConversions);
     }
 
     void extractInstanceAndDependenciesLocked(VkInstance instance, InstanceObjects& objects)
@@ -10343,6 +10373,7 @@ class VkDecoderGlobalState::Impl {
     std::unordered_map<VkEvent, EventInfo> mEventInfo GUARDED_BY(mMutex);
     std::unordered_map<VkSemaphore, SemaphoreInfo> mSemaphoreInfo GUARDED_BY(mMutex);
     std::unordered_map<VkShaderModule, ShaderModuleInfo> mShaderModuleInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkSamplerYcbcrConversion, SamplerYcbcrConversionInfo> mSamplerYcbcrConversionInfo GUARDED_BY(mMutex);
 
 #ifdef _WIN32
     int mSemaphoreId = 1;
