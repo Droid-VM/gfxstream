@@ -6216,88 +6216,65 @@ class VkDecoderGlobalState::Impl {
                     .handleTypes = handleTypes,
                 };
                 vk_append_struct(&structChainIter, &*exportAllocateInfo);
-            } else {
-                bool useHostAllocation =
-                    (m_vkEmulation->getFeatures().VulkanAllocateHostMemory.enabled &&
-                     localAllocInfo.pNext == nullptr);
-                if (createBlobInfoPtr && createBlobInfoPtr->blobMem != STREAM_BLOB_MEM_GUEST) {
-                    // Host visible memory requires blob alignment, since we cannot safely expect
-                    // the underlying vulkan driver to return aligned allocations for the mapping
-                    // TODO: optimize this case by manually managing the memory pages and share for
-                    // multiple allocations
-                    useHostAllocation = true;
+            } else if (m_vkEmulation->getFeatures().VulkanAllocateHostMemory.enabled &&
+                       localAllocInfo.pNext == nullptr) {
+                if (!m_vkEmulation || !m_vkEmulation->supportsExternalMemoryHostProperties()) {
+                    GFXSTREAM_ERROR(
+                        "VK_EXT_EXTERNAL_MEMORY_HOST is not supported, cannot use "
+                        "VulkanAllocateHostMemory");
+                    return VK_ERROR_INCOMPATIBLE_DRIVER;
+                }
+                VkDeviceSize alignmentSize =
+                    m_vkEmulation->externalMemoryHostProperties().minImportedHostPointerAlignment;
+                VkDeviceSize alignedSize = ALIGN(localAllocInfo.allocationSize, alignmentSize);
+                localAllocInfo.allocationSize = alignedSize;
+                privateMemory =
+                    std::make_shared<PrivateMemory>(alignmentSize, localAllocInfo.allocationSize);
+                mappedPtr = privateMemory->getAddr();
+
+                if (importHostInfo.pHostPointer != nullptr) {
+                    GFXSTREAM_FATAL("%s: Host pointer info is already used for import operation!",
+                                    __func__);
+                }
+                importHostInfo.pHostPointer = mappedPtr;
+
+                VkMemoryHostPointerPropertiesEXT memoryHostPointerProperties = {
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
+                    .pNext = NULL,
+                    .memoryTypeBits = 0,
+                };
+
+                vk->vkGetMemoryHostPointerPropertiesEXT(
+                    device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, mappedPtr,
+                    &memoryHostPointerProperties);
+
+                if (memoryHostPointerProperties.memoryTypeBits == 0) {
+                    GFXSTREAM_ERROR(
+                        "Cannot find suitable memory type for VulkanAllocateHostMemory");
+                    return VK_ERROR_INCOMPATIBLE_DRIVER;
                 }
 
-                if (useHostAllocation) {
-                    // Check if we can actually use host memory allocation for this case
-                    if (importHostInfo.pHostPointer != nullptr) {
-                        GFXSTREAM_ERROR(
-                            "%s: Host pointer info is already used for import operation!",
-                            __func__);
-                        return VK_ERROR_OUT_OF_HOST_MEMORY;
-                    }
-                    if (!m_vkEmulation->supportsExternalMemoryHostProperties()) {
-                        GFXSTREAM_ERROR(
-                            "VK_EXT_external_memory_host is not supported, cannot use "
-                            "VulkanAllocateHostMemory. BlobID: %lld",
-                            (createBlobInfoPtr ? createBlobInfoPtr->blobId : -1LL));
-                        return VK_ERROR_INCOMPATIBLE_DRIVER;
-                    }
+                if (((1u << localAllocInfo.memoryTypeIndex) &
+                     memoryHostPointerProperties.memoryTypeBits) == 0) {
+                    // TODO Consider assigning the correct memory index earlier, instead of
+                    // switching right before allocation.
 
-                    // Determine size and alignment requirements and allocate a PrivateMemory
-                    VkDeviceSize alignmentSize = m_vkEmulation->externalMemoryHostProperties()
-                                                     .minImportedHostPointerAlignment;
-                    if (createBlobInfoPtr && alignmentSize < kPageSizeforBlob) {
-                        // Align blob allocations to the page size
-                        alignmentSize = kPageSizeforBlob;
-                    }
-
-                    VkDeviceSize alignedSize = ALIGN(localAllocInfo.allocationSize, alignmentSize);
-                    localAllocInfo.allocationSize = alignedSize;
-                    privateMemory = std::make_shared<PrivateMemory>(alignmentSize,
-                                                                    localAllocInfo.allocationSize);
-                    mappedPtr = privateMemory->getAddr();
-
-                    importHostInfo.pHostPointer = mappedPtr;
-
-                    VkMemoryHostPointerPropertiesEXT memoryHostPointerProperties = {
-                        .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
-                        .pNext = NULL,
-                        .memoryTypeBits = 0,
-                    };
-
-                    vk->vkGetMemoryHostPointerPropertiesEXT(
-                        device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, mappedPtr,
-                        &memoryHostPointerProperties);
-
-                    if (memoryHostPointerProperties.memoryTypeBits == 0) {
-                        GFXSTREAM_ERROR(
-                            "Cannot find suitable memory type for VulkanAllocateHostMemory");
-                        return VK_ERROR_INCOMPATIBLE_DRIVER;
-                    }
-
-                    if (((1u << localAllocInfo.memoryTypeIndex) &
-                         memoryHostPointerProperties.memoryTypeBits) == 0) {
-                        // TODO Consider assigning the correct memory index earlier, instead of
-                        // switching right before allocation.
-
-                        // Look for the first available supported memory index and assign it.
-                        for (uint32_t i = 0; i <= 31; ++i) {
-                            if ((memoryHostPointerProperties.memoryTypeBits & (1u << i)) == 0) {
-                                continue;
-                            }
-                            localAllocInfo.memoryTypeIndex = i;
-                            break;
+                    // Look for the first available supported memory index and assign it.
+                    for (uint32_t i = 0; i <= 31; ++i) {
+                        if ((memoryHostPointerProperties.memoryTypeBits & (1u << i)) == 0) {
+                            continue;
                         }
-                        GFXSTREAM_DEBUG(
-                            "Detected memoryTypeIndex violation on requested host memory import. "
-                            "Switching "
-                            "to a supported memory index %d",
-                            localAllocInfo.memoryTypeIndex);
+                        localAllocInfo.memoryTypeIndex = i;
+                        break;
                     }
-
-                    vk_append_struct(&structChainIter, &importHostInfo);
+                    GFXSTREAM_DEBUG(
+                        "Detected memoryTypeIndex violation on requested host memory import. "
+                        "Switching "
+                        "to a supported memory index %d",
+                        localAllocInfo.memoryTypeIndex);
                 }
+
+                vk_append_struct(&structChainIter, &importHostInfo);
             }
         }
 
@@ -6837,15 +6814,11 @@ class VkDecoderGlobalState::Impl {
 
             if (hva != alignedHva) {
                 GFXSTREAM_ERROR(
-                    "%s: vkMapMemory failed, cannot map memory to a page-size (0x%" PRIx64
+                    "Mapping non page-size (0x%" PRIx64
                     ") aligned host virtual address:%p "
                     "using the aligned host virtual address:%p. The underlying resources "
                     "using this blob may be corrupted/offset.",
-                    __func__, kPageSizeforBlob, hva, alignedHva);
-
-                // We cannot continue and add mapping for this unaligned mapping, better
-                // to return an error here, as it may cause crashes otherwise.
-                return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    kPageSizeforBlob, hva, alignedHva);
             }
             ExternalObjectManager::get()->addMapping(virtioGpuContextId, hostBlobId,
                                                      (void*)(uintptr_t)alignedHva, info->caching);
