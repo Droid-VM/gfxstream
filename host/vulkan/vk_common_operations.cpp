@@ -934,6 +934,15 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             }
         }
     }
+#ifdef CONFIG_AEMU
+    // This probably won't work for any vulkan apps, and should not be chosen with the auto gpu
+    // selection system, but provide a warning in case the user enforces an old vulkan driver.
+    if (maxInstanceVersion == VK_VERSION_1_0) {
+        GFXSTREAM_ERROR(
+            "Selected Vulkan driver only supports Vulkan 1.0, Android Emulator is not fully "
+            "supported. Please update your drivers or use software rendering.");
+    }
+#endif
 
     GFXSTREAM_DEBUG("Creating an instance, asking for version %d.%d.%d ...",
                     VK_API_VERSION_MAJOR(appInfo.apiVersion),
@@ -1612,6 +1621,10 @@ void VkEmulation::initFeatures(Features features) {
         GFXSTREAM_INFO("    guestVulkanOnly: %s", features.guestVulkanOnly ? "true" : "false");
         GFXSTREAM_INFO("    useDedicatedAllocations: %s",
                        features.useDedicatedAllocations ? "true" : "false");
+        GFXSTREAM_INFO("    guestVulkanMaxApiVersion: %d.%d.%d",
+                       VK_API_VERSION_MAJOR(features.guestVulkanMaxApiVersion),
+                       VK_API_VERSION_MINOR(features.guestVulkanMaxApiVersion),
+                       VK_API_VERSION_PATCH(features.guestVulkanMaxApiVersion));
     }
 
     mDeviceInfo.glInteropSupported = features.glInteropSupported;
@@ -1623,6 +1636,7 @@ void VkEmulation::initFeatures(Features features) {
     mEnableYcbcrEmulation = features.enableYcbcrEmulation;
     mGuestVulkanOnly = features.guestVulkanOnly;
     mUseDedicatedAllocations = features.useDedicatedAllocations;
+    mGuestVulkanMaxApiVersion = features.guestVulkanMaxApiVersion;
 
     if (features.useVulkanComposition) {
         if (mCompositorVk) {
@@ -1697,6 +1711,8 @@ bool VkEmulation::isYcbcrEmulationEnabled() const { return mEnableYcbcrEmulation
 bool VkEmulation::isEtc2EmulationEnabled() const { return mEnableEtc2Emulation; }
 
 bool VkEmulation::deferredCommandsEnabled() const { return mUseDeferredCommands; }
+
+uint32_t VkEmulation::vulkanInstanceVersion() const { return mVulkanInstanceVersion; }
 
 bool VkEmulation::createResourcesWithRequirementsEnabled() const {
     return mUseCreateResourcesWithRequirements;

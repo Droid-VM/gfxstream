@@ -1318,6 +1318,29 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     impl->m_useVulkanComposition =
         impl->m_features.GuestVulkanOnly.enabled || impl->m_features.VulkanNativeSwapchain.enabled;
 
+    uint32_t maxApiVersion = VK_API_VERSION_1_3;
+    if (impl->m_emulationVk) {
+        if (impl->m_features.guestVulkanMaxApiVersion) {
+            GFXSTREAM_DEBUG("%s: Maximum Vulkan API version will be limited", __func__);
+            maxApiVersion = features.guestVulkanMaxApiVersion.value();
+        } else {
+            // Use maximum available by default
+            maxApiVersion = impl->m_emulationVk->vulkanInstanceVersion();
+            // On Android, CTS will not allow supporting higher Vulkan API versions, limit
+            // them by setting up the maximum api version for the emulation.
+            // TODO: Use android.hardware.vulkan.version system property
+            const int guest_android_api_level = get_gfxstream_guest_android_api_level();
+            if (guest_android_api_level != -1 && guest_android_api_level < 37 &&
+                maxApiVersion > VK_API_VERSION_1_3) {
+                // Older system images should not expose higher than Vulkan 1.3
+                GFXSTREAM_DEBUG(
+                    "%s: Guest API level: %d, maximum Vulkan API version will be limited to 1.3",
+                    __func__, get_gfxstream_guest_android_api_level());
+                maxApiVersion = VK_API_VERSION_1_3;
+            }
+        }
+    }
+
     vk::VkEmulation::Features vkEmulationFeatures = {
         .glInteropSupported = false,  // Set later.
         .deferredCommands =
@@ -1335,6 +1358,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
         .enableYcbcrEmulation = false,
         .guestVulkanOnly = impl->m_features.GuestVulkanOnly.enabled,
         .useDedicatedAllocations = false,  // Set later.
+        .guestVulkanMaxApiVersion = maxApiVersion,
     };
 
     //
@@ -3747,7 +3771,7 @@ void FrameBuffer::Impl::setDisplayActiveConfig(int configId) {
     m_framebufferWidth = mDisplayConfigs[configId].w;
     m_framebufferHeight = mDisplayConfigs[configId].h;
     setDisplayPose(0, 0, 0, getWidth(), getHeight(), 0);
-    GFXSTREAM_INFO("setDisplayActiveConfig %d", configId);
+    GFXSTREAM_INFO("%s: id:%d, %dx%d", __func__, configId, m_framebufferWidth, m_framebufferHeight);
 }
 
 int FrameBuffer::Impl::getDisplayConfigsCount() {
@@ -4920,8 +4944,8 @@ bool FrameBuffer::initialize(int width, int height, const FeatureSet& features, 
 
     std::unique_ptr<FrameBuffer> framebuffer(new FrameBuffer());
 
-    framebuffer->mImpl = FrameBuffer::Impl::Create(framebuffer.get(), width, height, features,
-                                                   useSubWindow);
+    framebuffer->mImpl =
+        FrameBuffer::Impl::Create(framebuffer.get(), width, height, features, useSubWindow);
     if (!framebuffer->mImpl) {
         GFXSTREAM_ERROR("Failed to initialize FrameBuffer().");
         return false;
