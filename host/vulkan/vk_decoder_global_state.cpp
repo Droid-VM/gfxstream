@@ -6238,8 +6238,15 @@ class VkDecoderGlobalState::Impl {
                         "VulkanAllocateHostMemory");
                     return VK_ERROR_INCOMPATIBLE_DRIVER;
                 }
+
+                // Determine size and alignment requirements and allocate a PrivateMemory
                 VkDeviceSize alignmentSize =
                     m_vkEmulation->externalMemoryHostProperties().minImportedHostPointerAlignment;
+                if (createBlobInfoPtr && alignmentSize < kPageSizeforBlob) {
+                    // Align blob allocations to the page size
+                    alignmentSize = kPageSizeforBlob;
+                }
+
                 VkDeviceSize alignedSize = ALIGN(localAllocInfo.allocationSize, alignmentSize);
                 localAllocInfo.allocationSize = alignedSize;
                 privateMemory =
@@ -6247,8 +6254,9 @@ class VkDecoderGlobalState::Impl {
                 mappedPtr = privateMemory->getAddr();
 
                 if (importHostInfo.pHostPointer != nullptr) {
-                    GFXSTREAM_FATAL("%s: Host pointer info is already used for import operation!",
+                    GFXSTREAM_ERROR("%s: Host pointer info is already used for import operation!",
                                     __func__);
+                    return VK_ERROR_INCOMPATIBLE_DRIVER;
                 }
                 importHostInfo.pHostPointer = mappedPtr;
 
@@ -6828,11 +6836,15 @@ class VkDecoderGlobalState::Impl {
 
             if (hva != alignedHva) {
                 GFXSTREAM_ERROR(
-                    "Mapping non page-size (0x%" PRIx64
+                    "%s: vkMapMemory failed, cannot map memory to a page-size (0x%" PRIx64
                     ") aligned host virtual address:%p "
                     "using the aligned host virtual address:%p. The underlying resources "
                     "using this blob may be corrupted/offset.",
-                    kPageSizeforBlob, hva, alignedHva);
+                    __func__, kPageSizeforBlob, hva, alignedHva);
+
+                // We cannot continue and add mapping for this unaligned mapping, better
+                // to return an error here, as it may cause crashes otherwise.
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
             }
             ExternalObjectManager::get()->addMapping(virtioGpuContextId, hostBlobId,
                                                      (void*)(uintptr_t)alignedHva, info->caching);

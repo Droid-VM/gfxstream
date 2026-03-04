@@ -777,8 +777,8 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     std::lock_guard<std::mutex> lock(emulation->mMutex);
 
     emulation->mCallbacks = callbacks;
-    emulation->mFeatures = features;
     emulation->mGvk = gvk;
+    emulation->setFeatures(features);
 
     std::vector<const char*> getPhysicalDeviceProperties2InstanceExtNames = {
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
@@ -1592,6 +1592,13 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         GFXSTREAM_INFO("Sampler Ycbcr conversion is not supported.");
     }
 
+    if (emulation->getFeatures().VulkanAllocateHostMemory.enabled &&
+        !emulation->supportsExternalMemoryHostProperties()) {
+        GFXSTREAM_ERROR(
+            "VulkanAllocateHostMemory is enabled but is not supported, you might encounter errors "
+            "when using vkMapMemory() due to unaligned host mappings.");
+    }
+
     GFXSTREAM_VERBOSE("Vulkan global emulation state successfully initialized.");
 
     return emulation;
@@ -1783,6 +1790,39 @@ DebugUtilsHelper& VkEmulation::getDebugUtilsHelper() { return mDebugUtilsHelper;
 DeviceLostHelper& VkEmulation::getDeviceLostHelper() { return mDeviceLostHelper; }
 
 const gfxstream::host::FeatureSet& VkEmulation::getFeatures() const { return mFeatures; }
+
+void VkEmulation::setFeatures(const gfxstream::host::FeatureSet& features) {
+    mFeatures = features;
+
+    // Some features may require changes based on other features, system and drivers
+
+#ifdef _WIN32
+    // TODO: optimize host visible allocations on the guest side to avoid getting
+    // out of memory cases with lavapipe on other platforms.
+    if (!mFeatures.GlDirectMem.enabled && mFeatures.VirtioGpuNext.enabled) {
+        // Host visible memory that will be mapped into the guest virtual machines
+        // needs to be page aligned in some way:
+        const bool hostVisibleMemoryAllocationModeLikelyAligned =
+            // Vulkan VK_EXT_external_memory_* allocations are expected to be aligned:
+            mFeatures.ExternalBlob.enabled ||
+            // Gfxstream will ensure alignment with memfd/shmem allocations:
+            mFeatures.SystemBlob.enabled ||
+            // Gfxstream will ensure alignment with host allocations:
+            mFeatures.VulkanAllocateHostMemory.enabled;
+
+        if (!hostVisibleMemoryAllocationModeLikelyAligned) {
+            // Enable VulkanAllocateHostMemory as a fallback and avoid unaligned host visible
+            // mappings
+            mFeatures.VulkanAllocateHostMemory.enabled = true;
+            mFeatures.VulkanAllocateHostMemory.reason =
+                "Ensure host allocations are aligned to "
+                "avoid VMM errors when mapping.";
+            GFXSTREAM_INFO("Enabling VulkanAllocateHostMemory: %s",
+                           mFeatures.VulkanAllocateHostMemory.reason.c_str());
+        }
+    }
+#endif
+}
 
 const gfxstream::host::BackendCallbacks& VkEmulation::getCallbacks() const { return mCallbacks; }
 
