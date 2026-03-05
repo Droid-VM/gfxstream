@@ -437,8 +437,8 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
 
     void postWithCallback(HandleType p_colorbuffer, Post::CompletionCallback callback,
                           bool needLockAndBind = true);
-    bool hasGuestPostedAFrame() { return m_guestPostedAFrame; }
-    void resetGuestPostedAFrame() { m_guestPostedAFrame = false; }
+    bool hasGuestPostedAFrame() { return m_guestPostedAFrameTime.has_value(); }
+    void resetGuestPostedAFrame() { m_guestPostedAFrameTime = std::nullopt; }
 
     void doPostCallback(void* pixels, uint32_t displayId);
 
@@ -822,7 +822,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
                          bool needLockAndBind = true, bool repaint = false);
     bool postImplSync(HandleType p_colorbuffer, bool needLockAndBind = true, bool repaint = false);
     void setGuestPostedAFrame() {
-        m_guestPostedAFrame = true;
+        m_guestPostedAFrameTime = std::chrono::steady_clock::now();
         m_framebuffer->fireEvent({FrameBufferChange::FrameReady, mFrameNumber++});
     }
     HandleType createColorBufferWithResourceHandleLocked(int p_width, int p_height,
@@ -906,7 +906,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
         uint32_t height;
     };
     gfxstream::base::WorkerProcessingResult sendReadbackWorkerCmd(const Readback& readback);
-    bool m_guestPostedAFrame = false;
+    std::optional<std::chrono::steady_clock::time_point> m_guestPostedAFrameTime;
 
     struct onPost {
         Renderer::OnPostCallback cb;
@@ -1318,6 +1318,29 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     impl->m_useVulkanComposition =
         impl->m_features.GuestVulkanOnly.enabled || impl->m_features.VulkanNativeSwapchain.enabled;
 
+    uint32_t maxApiVersion = VK_API_VERSION_1_3;
+    if (impl->m_emulationVk) {
+        if (impl->m_features.guestVulkanMaxApiVersion) {
+            GFXSTREAM_DEBUG("%s: Maximum Vulkan API version will be limited", __func__);
+            maxApiVersion = features.guestVulkanMaxApiVersion.value();
+        } else {
+            // Use maximum available by default
+            maxApiVersion = impl->m_emulationVk->vulkanInstanceVersion();
+            // On Android, CTS will not allow supporting higher Vulkan API versions, limit
+            // them by setting up the maximum api version for the emulation.
+            // TODO: Use android.hardware.vulkan.version system property
+            const int guest_android_api_level = get_gfxstream_guest_android_api_level();
+            if (guest_android_api_level != -1 && guest_android_api_level < 37 &&
+                maxApiVersion > VK_API_VERSION_1_3) {
+                // Older system images should not expose higher than Vulkan 1.3
+                GFXSTREAM_DEBUG(
+                    "%s: Guest API level: %d, maximum Vulkan API version will be limited to 1.3",
+                    __func__, get_gfxstream_guest_android_api_level());
+                maxApiVersion = VK_API_VERSION_1_3;
+            }
+        }
+    }
+
     vk::VkEmulation::Features vkEmulationFeatures = {
         .glInteropSupported = false,  // Set later.
         .deferredCommands =
@@ -1335,6 +1358,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
         .enableYcbcrEmulation = false,
         .guestVulkanOnly = impl->m_features.GuestVulkanOnly.enabled,
         .useDedicatedAllocations = false,  // Set later.
+        .guestVulkanMaxApiVersion = maxApiVersion,
     };
 
     //
@@ -3747,7 +3771,7 @@ void FrameBuffer::Impl::setDisplayActiveConfig(int configId) {
     m_framebufferWidth = mDisplayConfigs[configId].w;
     m_framebufferHeight = mDisplayConfigs[configId].h;
     setDisplayPose(0, 0, 0, getWidth(), getHeight(), 0);
-    GFXSTREAM_INFO("setDisplayActiveConfig %d", configId);
+    GFXSTREAM_INFO("%s: id:%d, %dx%d", __func__, configId, m_framebufferWidth, m_framebufferHeight);
 }
 
 int FrameBuffer::Impl::getDisplayConfigsCount() {
@@ -3881,6 +3905,12 @@ void FrameBuffer::Impl::setScreenMask(int width, int height, const uint8_t* rgba
 }
 
 void FrameBuffer::Impl::setScreenBackground(int width, int height, const uint8_t* rgbaData) {
+    // Avoid processing the call before initializing or after finalizing the framebuffer
+    if (!sInitialized.load(std::memory_order_relaxed)) {
+        GFXSTREAM_DEBUG("%s called in an invalid state.", __func__);
+        return;
+    }
+
     if (rgbaData) {
         mScreenBackgroundImage.m_width = width;
         mScreenBackgroundImage.m_height = height;
@@ -3891,6 +3921,21 @@ void FrameBuffer::Impl::setScreenBackground(int width, int height, const uint8_t
     }
 
     m_compositor->setScreenBackground(width, height, rgbaData);
+
+    //  Try to update the display at least 30 times a second, in case the guest is not
+    //  updating the display
+    if (m_guestPostedAFrameTime && m_lastPostedColorBuffer) {
+        const std::chrono::milliseconds maxUpdateLatency(1000 / 30);
+        const auto nowTime = std::chrono::steady_clock::now();
+        bool shouldRepost = (nowTime - m_guestPostedAFrameTime.value()) > maxUpdateLatency;
+        if (shouldRepost) {
+            // This is same as calling repost(), but without redundant checks and logging
+            if (!m_displayVk) {
+                postImplSync(m_lastPostedColorBuffer, true, true);
+            }
+            m_guestPostedAFrameTime = nowTime;
+        }
+    }
 }
 
 #ifdef CONFIG_AEMU
@@ -4899,8 +4944,8 @@ bool FrameBuffer::initialize(int width, int height, const FeatureSet& features, 
 
     std::unique_ptr<FrameBuffer> framebuffer(new FrameBuffer());
 
-    framebuffer->mImpl = FrameBuffer::Impl::Create(framebuffer.get(), width, height, features,
-                                                   useSubWindow);
+    framebuffer->mImpl =
+        FrameBuffer::Impl::Create(framebuffer.get(), width, height, features, useSubWindow);
     if (!framebuffer->mImpl) {
         GFXSTREAM_ERROR("Failed to initialize FrameBuffer().");
         return false;
