@@ -564,6 +564,14 @@ void RendererImpl::setScreenBackground(int width, int height, const uint8_t* rgb
     mRenderWindow->setScreenBackground(width, height, rgbaData);
 }
 
+void RendererImpl::setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect) {
+    if(!mRenderWindow) {
+        GFXSTREAM_ERROR("%s: invalid render window!", __func__);
+        return;
+    }
+    mRenderWindow->setDisplayLayout(screenWidth, screenHeight, displayRect);
+}
+
 void RendererImpl::onGuestGraphicsProcessCreate(uint64_t puid) {
     FrameBuffer::getFB()->createGraphicsProcessResources(puid);
 }

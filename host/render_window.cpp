@@ -597,6 +597,12 @@ void RenderWindow::setScreenBackground(int width, int height, const uint8_t* rgb
     }
 }
 
+void RenderWindow::setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect) {
+    if (FrameBuffer* fb = FrameBuffer::getFB()) {
+        fb->setDisplayLayout(screenWidth, screenHeight, displayRect);
+    }
+}
+
 void RenderWindow::repaint() {
     D("Entering");
     RenderWindowMessage msg = {};

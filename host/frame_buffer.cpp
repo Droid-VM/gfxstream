@@ -509,6 +509,8 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     void setScreenMask(int width, int height, const uint8_t* rgbaData);
     void setScreenBackground(int width, int height, const uint8_t* rgbaData);
 
+    void setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect);
+
     void registerVulkanInstance(uint64_t id, const char* appName) const;
     void unregisterVulkanInstance(uint64_t id) const;
 
@@ -1154,7 +1156,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
                                                              uint32_t width, uint32_t height,
                                                              const FeatureSet& features,
                                                              bool useSubWindow) {
-    GFXSTREAM_DEBUG("FrameBuffer::Impl::initialize");
+    GFXSTREAM_DEBUG("Creating Framebuffer: %dx%d, useSubWindow=%d", width, height, useSubWindow);
 
     gfxstream::host::InitializeTracing();
 
@@ -3938,6 +3940,11 @@ void FrameBuffer::Impl::setScreenBackground(int width, int height, const uint8_t
     }
 }
 
+void FrameBuffer::Impl::setDisplayLayout(int screenWidth, int screenHeight,
+                                         const Rect& displayRect) {
+    m_compositor->setDisplayLayout(screenWidth, screenHeight, displayRect);
+}
+
 #ifdef CONFIG_AEMU
 void FrameBuffer::Impl::registerVulkanInstance(uint64_t id, const char* appName) const {
     auto* tInfo = RenderThreadInfo::get();
@@ -5197,6 +5204,10 @@ void FrameBuffer::setScreenMask(int width, int height, const uint8_t* rgbaData) 
 
 void FrameBuffer::setScreenBackground(int width, int height, const uint8_t* rgbaData) {
     mImpl->setScreenBackground(width, height, rgbaData);
+}
+
+void FrameBuffer::setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect) {
+    mImpl->setDisplayLayout(screenWidth, screenHeight, displayRect);
 }
 
 #ifdef CONFIG_AEMU
