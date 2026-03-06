@@ -542,6 +542,8 @@ class VkEmulation {
                                         void* outPixels,
                                         const std::optional<std::array<float, 16>>& colorTransform);
 
+    void setFeatures(const gfxstream::host::FeatureSet& features);
+
     std::mutex mMutex;
 
     gfxstream::host::BackendCallbacks mCallbacks;
