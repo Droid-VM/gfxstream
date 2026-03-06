@@ -664,7 +664,6 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             bool isMultiDisplay = postCmd.layers.size() > 1;
             bool disableMask = isMultiDisplay;
 
-            drawParams.useScreenBlend = (i == 0) && renderBackground && !disableMask;
             // Prefer per-layer color transform, then global, then none
             if (layer.colorTransform.has_value()) {
                 drawParams.colorTransform = layer.colorTransform;
@@ -716,6 +715,9 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             // Draw Background only if mask is allowed (single display mode)
             if (i == 0 && renderBackground && !disableMask) {
                 m_compositorVk->drawScreenBackground(drawParams);
+
+                // Draw subsequent passes in screen blend mode
+                drawParams.useScreenBlend = true;
             }
 
             m_compositorVk->drawImage(drawParams, sourceImageInfoVk->imageView);
