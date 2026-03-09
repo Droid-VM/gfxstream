@@ -249,6 +249,12 @@ class Renderer {
                                int height,
                                const uint8_t* rgbaData) = 0;
 
+    // setDisplayLayout -
+    //    Set display layout to change position/size of the
+    //    emulation output on the screen.
+    virtual void setDisplayLayout(int screenWidth, int screenHeight,
+                                  const Rect& rect) = 0;
+
     // setMultiDisplay
     //    add/modify/del multi-display window
     virtual void setMultiDisplay(uint32_t id,

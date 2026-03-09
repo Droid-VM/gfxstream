@@ -20,6 +20,7 @@
 
 #include "gfxstream/host/borrowed_image.h"
 #include "hwc2.h"
+#include "render-utils/Renderer.h"
 
 namespace gfxstream {
 namespace host {
@@ -47,6 +48,30 @@ class Compositor {
 
     virtual void setScreenMask(int width, int height, const uint8_t* rgbaData) = 0;
     virtual void setScreenBackground(int width, int height, const uint8_t* rgbaData) = 0;
+
+    struct DisplayLayout {
+        Rect displayRect;
+        int screenWidth;
+        int screenHeight;
+    };
+    std::optional<DisplayLayout> getDisplayLayout() const {
+        return m_displayLayout;
+    }
+    void setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect) {
+        if (displayRect.size.w > 0 && displayRect.size.h > 0) {
+            DisplayLayout layout;
+            layout.screenWidth = screenWidth;
+            layout.screenHeight = screenHeight;
+            layout.displayRect = displayRect;
+            m_displayLayout = layout;
+        } else {
+            // Use to reset
+            m_displayLayout = std::nullopt;
+        }
+    }
+
+   private:
+    std::optional<DisplayLayout> m_displayLayout;
 };
 
 }  // namespace host

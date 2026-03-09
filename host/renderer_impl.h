@@ -88,6 +88,7 @@ public:
 
     void setScreenMask(int width, int height, const uint8_t* rgbaData) final;
     void setScreenBackground(int width, int height, const uint8_t* rgbaData) final;
+    void setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect) final;
     void setMultiDisplay(uint32_t id,
                          int32_t x,
                          int32_t y,
