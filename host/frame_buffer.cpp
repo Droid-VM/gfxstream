@@ -3999,9 +3999,7 @@ void FrameBuffer::Impl::setScreenBackground(int width, int height, const uint8_t
         bool shouldRepost = (nowTime - m_guestPostedAFrameTime.value()) > maxUpdateLatency;
         if (shouldRepost) {
             // This is same as calling repost(), but without redundant checks and logging
-            if (!m_displayVk) {
-                postImplSync(m_lastPostedColorBuffer, true, true);
-            }
+            postImplSync(m_lastPostedColorBuffer, true, true);
             m_guestPostedAFrameTime = nowTime;
         }
     }
