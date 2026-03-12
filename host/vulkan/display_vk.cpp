@@ -465,6 +465,10 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
     if (shouldRecreateSwapchain(acquireRes)) {
         return PostResult{false, std::shared_future<void>()};
     }
+    if (acquireRes == VK_ERROR_SURFACE_LOST_KHR) {
+        GFXSTREAM_ERROR("Cannot post ColorBuffer: Swapchain surface is lost.");
+        return PostResult{false, std::move(completedFuture)};
+    }
     VK_CHECK(acquireRes);
 
     if (m_postResourceFutures[imageIndex].has_value()) {
