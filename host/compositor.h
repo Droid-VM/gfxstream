@@ -70,6 +70,23 @@ class Compositor {
         }
     }
 
+    // Calculates the display rectangle for a target resolution, returns false if there is no
+    // display layout provided for the composition
+    bool getScaledDisplayRect(Rect& outScaledDisplayRect, int targetWidth, int targetHeight) {
+        if (!m_displayLayout) {
+            return false;
+        }
+        const Pos& dPos = m_displayLayout->displayRect.pos;
+        const Size& dSize = m_displayLayout->displayRect.size;
+
+        // Calculate scaled display frame position and size based on the target resolution
+        outScaledDisplayRect.pos.x = (dPos.x * targetWidth) / m_displayLayout->screenWidth;
+        outScaledDisplayRect.pos.y = (dPos.y * targetHeight) / m_displayLayout->screenHeight;
+        outScaledDisplayRect.size.w = (dSize.w * targetWidth) / m_displayLayout->screenWidth;
+        outScaledDisplayRect.size.h = (dSize.h * targetHeight) / m_displayLayout->screenHeight;
+        return true;
+    }
+
    private:
     std::optional<DisplayLayout> m_displayLayout;
 };

@@ -3047,39 +3047,30 @@ int FrameBuffer::Impl::getColorBufferScreenshot(
     const int numChannels = (pixelsFormat == GfxstreamFormat::R8G8B8_UNORM) ? 3 : 4;
 
     // Adjust display rendering if a layout is given
-    std::optional<Compositor::DisplayLayout> layout = m_compositor->getDisplayLayout();
-    if (layout) {
-        const Pos& dPos = layout->displayRect.pos;
-        const Size& dSize = layout->displayRect.size;
-        // Calculate scaled display frame position and size based on the
-        // target resolution
-        const int cbScaledStartX = (dPos.x * targetWidth) / layout->screenWidth;
-        const int cbScaledStartY = (dPos.y * targetHeight) / layout->screenHeight;
-        const int cbScaledWidth = (dSize.w * targetWidth) / layout->screenWidth;
-        const int cbScaledHeight = (dSize.h * targetHeight) / layout->screenHeight;
-
+    Rect scaledDisplayRect = {};
+    if (m_compositor->getScaledDisplayRect(scaledDisplayRect, targetWidth, targetHeight)) {
         // Read the color buffer into a temporary storage
         std::vector<uint8_t> tempBuffer;
-        tempBuffer.resize(cbScaledWidth * cbScaledHeight * numChannels);
-        cb->readToBytesScaled(cbScaledWidth, cbScaledHeight, skinRotation, rect, pixelsFormat,
-                            tempBuffer.data(), colorTransform);
+        tempBuffer.resize(scaledDisplayRect.size.w * scaledDisplayRect.size.h * numChannels);
+        cb->readToBytesScaled(scaledDisplayRect.size.w, scaledDisplayRect.size.h, skinRotation,
+                              rect, pixelsFormat, tempBuffer.data(), colorTransform);
 
         // Copy color buffer into solid black background, based on display layout parameters
         // TODO(b/485981055): optimize this
         for (int y = 0; y < targetHeight; y++) {
             for (int x = 0; x < targetWidth; x++) {
                 const int outPixelIndex = y * targetWidth + x;
-                const int cbX = (x - cbScaledStartX);
-                const int cbY = (y - cbScaledStartY);
+                const int cbX = (x - scaledDisplayRect.pos.x);
+                const int cbY = (y - scaledDisplayRect.pos.y);
 
                 // Check if the pixel is inside the display area
-                const bool sampleCB =
-                    cbX >= 0 && cbX < cbScaledWidth && cbY >= 0 && cbY < cbScaledHeight;
-                const int cbPixelIndex = cbY * cbScaledWidth + cbX;
+                const bool sampleCB = cbX >= 0 && cbX < scaledDisplayRect.size.w && cbY >= 0 &&
+                                      cbY < scaledDisplayRect.size.h;
+                const int cbPixelIndex = cbY * scaledDisplayRect.size.w + cbX;
                 for (int c = 0; c < numChannels; c++) {
                     if (sampleCB) {
-                         outPixelsRGBA[outPixelIndex * numChannels + c] =
-                             tempBuffer[cbPixelIndex * numChannels + c];
+                        outPixelsRGBA[outPixelIndex * numChannels + c] =
+                            tempBuffer[cbPixelIndex * numChannels + c];
                     } else {
                         // outside of the display area, put black with solid alpha
                         outPixelsRGBA[outPixelIndex * numChannels + c] = (c == 3) ? 255 : 0;
@@ -3089,8 +3080,8 @@ int FrameBuffer::Impl::getColorBufferScreenshot(
         }
     } else {
         // Optimized path, directly load the color buffer into the output pixels
-        cb->readToBytesScaled(targetWidth, targetHeight, skinRotation, rect, pixelsFormat, outPixels,
-                            colorTransform);
+        cb->readToBytesScaled(targetWidth, targetHeight, skinRotation, rect, pixelsFormat,
+                              outPixels, colorTransform);
     }
 
     applyScreenshotBackground(targetWidth, targetHeight, numChannels, outPixelsRGBA);
