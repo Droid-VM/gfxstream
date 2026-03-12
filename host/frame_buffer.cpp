@@ -3992,6 +3992,7 @@ void FrameBuffer::Impl::setScreenBackground(int width, int height, const uint8_t
             // This is same as calling repost(), but without redundant checks and logging
             postImplSync(m_lastPostedColorBuffer, true, true);
             m_guestPostedAFrameTime = nowTime;
+            m_framebuffer->fireEvent({FrameBufferChange::FrameReady, mFrameNumber++});
         }
     }
 }
