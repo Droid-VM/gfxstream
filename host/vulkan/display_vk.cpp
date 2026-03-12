@@ -664,7 +664,6 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             bool isMultiDisplay = postCmd.layers.size() > 1;
             bool disableMask = isMultiDisplay;
 
-            drawParams.useScreenBlend = (i == 0) && renderBackground && !disableMask;
             // Prefer per-layer color transform, then global, then none
             if (layer.colorTransform.has_value()) {
                 drawParams.colorTransform = layer.colorTransform;
@@ -716,6 +715,34 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             // Draw Background only if mask is allowed (single display mode)
             if (i == 0 && renderBackground && !disableMask) {
                 m_compositorVk->drawScreenBackground(drawParams);
+
+                // Draw subsequent passes in screen blend mode
+                drawParams.useScreenBlend = true;
+
+                // Adjust display rendering if a layout has been given
+                std::optional<Compositor::DisplayLayout> layout =
+                    m_compositorVk->getDisplayLayout();
+                if (layout) {
+                    // TODO(b/485981055): this is currently only supported with
+                    // transparent displays with a background, unify for other cases
+                    const Pos& dPos = layout->displayRect.pos;
+                    const Size& dSize = layout->displayRect.size;
+                    const int targetWidth = drawParams.targetWidth;
+                    const int targetHeight = drawParams.targetHeight;
+
+                    // Calculate scaled display frame position and size based on the
+                    // target resolution
+                    const int cbScaledStartX = (dPos.x * targetWidth) / layout->screenWidth;
+                    const int cbScaledStartY = (dPos.y * targetHeight) / layout->screenHeight;
+                    const int cbScaledWidth = (dSize.w * targetWidth) / layout->screenWidth;
+                    const int cbScaledHeight = (dSize.h * targetHeight) / layout->screenHeight;
+
+                    drawParams.displayFrame.left = cbScaledStartX;
+                    drawParams.displayFrame.top = cbScaledStartY;
+                    drawParams.displayFrame.right = drawParams.displayFrame.left + cbScaledWidth;
+                    drawParams.displayFrame.bottom = drawParams.displayFrame.top + cbScaledHeight;
+                }
+
             }
 
             m_compositorVk->drawImage(drawParams, sourceImageInfoVk->imageView);

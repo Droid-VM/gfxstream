@@ -229,6 +229,7 @@ class VkDecoderGlobalState::Impl {
         mBufferInfo.clear();
         mMemoryInfo.clear();
         mShaderModuleInfo.clear();
+        mSamplerYcbcrConversionInfo.clear();
         mPipelineCacheInfo.clear();
         mPipelineLayoutInfo.clear();
         mPipelineInfo.clear();
@@ -6238,8 +6239,15 @@ class VkDecoderGlobalState::Impl {
                         "VulkanAllocateHostMemory");
                     return VK_ERROR_INCOMPATIBLE_DRIVER;
                 }
+
+                // Determine size and alignment requirements and allocate a PrivateMemory
                 VkDeviceSize alignmentSize =
                     m_vkEmulation->externalMemoryHostProperties().minImportedHostPointerAlignment;
+                if (createBlobInfoPtr && alignmentSize < kPageSizeforBlob) {
+                    // Align blob allocations to the page size
+                    alignmentSize = kPageSizeforBlob;
+                }
+
                 VkDeviceSize alignedSize = ALIGN(localAllocInfo.allocationSize, alignmentSize);
                 localAllocInfo.allocationSize = alignedSize;
                 privateMemory =
@@ -6247,8 +6255,9 @@ class VkDecoderGlobalState::Impl {
                 mappedPtr = privateMemory->getAddr();
 
                 if (importHostInfo.pHostPointer != nullptr) {
-                    GFXSTREAM_FATAL("%s: Host pointer info is already used for import operation!",
+                    GFXSTREAM_ERROR("%s: Host pointer info is already used for import operation!",
                                     __func__);
+                    return VK_ERROR_INCOMPATIBLE_DRIVER;
                 }
                 importHostInfo.pHostPointer = mappedPtr;
 
@@ -6828,11 +6837,15 @@ class VkDecoderGlobalState::Impl {
 
             if (hva != alignedHva) {
                 GFXSTREAM_ERROR(
-                    "Mapping non page-size (0x%" PRIx64
+                    "%s: vkMapMemory failed, cannot map memory to a page-size (0x%" PRIx64
                     ") aligned host virtual address:%p "
                     "using the aligned host virtual address:%p. The underlying resources "
                     "using this blob may be corrupted/offset.",
-                    kPageSizeforBlob, hva, alignedHva);
+                    __func__, kPageSizeforBlob, hva, alignedHva);
+
+                // We cannot continue and add mapping for this unaligned mapping, better
+                // to return an error here, as it may cause crashes otherwise.
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
             }
             ExternalObjectManager::get()->addMapping(virtioGpuContextId, hostBlobId,
                                                      (void*)(uintptr_t)alignedHva, info->caching);
@@ -8870,12 +8883,39 @@ class VkDecoderGlobalState::Impl {
         if (res != VK_SUCCESS) {
             return res;
         }
+
+        VALIDATE_NEW_HANDLE_INFO_ENTRY(mSamplerYcbcrConversionInfo, *pYcbcrConversion);
+        auto& ycbcrConversionInfo = mSamplerYcbcrConversionInfo[*pYcbcrConversion];
+        ycbcrConversionInfo.device = device;
+
         *pYcbcrConversion = new_boxed_non_dispatchable_VkSamplerYcbcrConversion(*pYcbcrConversion);
         return VK_SUCCESS;
     }
 
-    void on_vkDestroySamplerYcbcrConversion(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
-                                            VkDevice boxed_device,
+    void destroySamplerYcbcrConversionWithExclusiveInfo(VkDevice device,
+                                                        VulkanDispatch* deviceDispatch,
+                                                        VkSamplerYcbcrConversion ycbcrConversion,
+                                                        SamplerYcbcrConversionInfo&,
+                                                        const VkAllocationCallbacks* pAllocator) {
+        deviceDispatch->vkDestroySamplerYcbcrConversion(device, ycbcrConversion, pAllocator);
+    }
+
+    void destroySamplerYcbcrConversionLocked(VkDevice device, VulkanDispatch* deviceDispatch,
+                                             VkSamplerYcbcrConversion ycbcrConversion,
+                                             const VkAllocationCallbacks* pAllocator)
+        REQUIRES(mMutex) {
+        auto ycbcrConversionInfoIt = mSamplerYcbcrConversionInfo.find(ycbcrConversion);
+        if (ycbcrConversionInfoIt == mSamplerYcbcrConversionInfo.end()) return;
+        auto& ycbcrConversionInfo = ycbcrConversionInfoIt->second;
+
+        destroySamplerYcbcrConversionWithExclusiveInfo(device, deviceDispatch, ycbcrConversion,
+                                                       ycbcrConversionInfo, pAllocator);
+
+        mSamplerYcbcrConversionInfo.erase(ycbcrConversionInfoIt);
+    }
+
+    void on_vkDestroySamplerYcbcrConversion(gfxstream::base::BumpPool* pool,
+                                            VkSnapshotApiCallHandle, VkDevice boxed_device,
                                             VkSamplerYcbcrConversion ycbcrConversion,
                                             const VkAllocationCallbacks* pAllocator) {
         if (m_vkEmulation->isYcbcrEmulationEnabled() &&
@@ -8884,8 +8924,9 @@ class VkDecoderGlobalState::Impl {
         }
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
-        vk->vkDestroySamplerYcbcrConversion(device, ycbcrConversion, pAllocator);
-        return;
+
+        std::lock_guard<std::mutex> lock(mMutex);
+        destroySamplerYcbcrConversionLocked(device, vk, ycbcrConversion, pAllocator);
     }
 
     VkResult on_vkEnumeratePhysicalDeviceGroups(
@@ -9837,6 +9878,7 @@ class VkDecoderGlobalState::Impl {
         extractInfosWithDeviceInto(device, mEventInfo, deviceObjects.events);
         extractInfosWithDeviceInto(device, mSemaphoreInfo, deviceObjects.semaphores);
         extractInfosWithDeviceInto(device, mShaderModuleInfo, deviceObjects.shaderModules);
+        extractInfosWithDeviceInto(device, mSamplerYcbcrConversionInfo, deviceObjects.samplerYcbcrConversions);
     }
 
     void extractInstanceAndDependenciesLocked(VkInstance instance, InstanceObjects& objects)
@@ -10331,6 +10373,7 @@ class VkDecoderGlobalState::Impl {
     std::unordered_map<VkEvent, EventInfo> mEventInfo GUARDED_BY(mMutex);
     std::unordered_map<VkSemaphore, SemaphoreInfo> mSemaphoreInfo GUARDED_BY(mMutex);
     std::unordered_map<VkShaderModule, ShaderModuleInfo> mShaderModuleInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkSamplerYcbcrConversion, SamplerYcbcrConversionInfo> mSamplerYcbcrConversionInfo GUARDED_BY(mMutex);
 
 #ifdef _WIN32
     int mSemaphoreId = 1;

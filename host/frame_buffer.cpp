@@ -509,6 +509,8 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     void setScreenMask(int width, int height, const uint8_t* rgbaData);
     void setScreenBackground(int width, int height, const uint8_t* rgbaData);
 
+    void setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect);
+
     void registerVulkanInstance(uint64_t id, const char* appName) const;
     void unregisterVulkanInstance(uint64_t id) const;
 
@@ -536,6 +538,13 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     int getScreenshot(unsigned int nChannels, unsigned int* width, unsigned int* height,
                       uint8_t* pixels, size_t* cPixels, int displayId, int desiredWidth,
                       int desiredHeight, int desiredRotation, Rect rect = {{0, 0}, {0, 0}});
+
+    // Saves a screenshot from a color buffer, applies post processing like color transform,
+    // display layout and background blending.
+    int getColorBufferScreenshot(ColorBuffer* cb, int targetWidth, int targetHeight,
+                                 int skinRotation, GfxstreamFormat pixelsFormat, void* outPixels,
+                                 const Rect& rect,
+                                 const std::optional<std::array<float, 16>>& colorTransform);
 
     void onLastColorBufferRef(uint32_t handle);
     ColorBufferPtr findColorBuffer(HandleType p_colorbuffer);
@@ -1154,7 +1163,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
                                                              uint32_t width, uint32_t height,
                                                              const FeatureSet& features,
                                                              bool useSubWindow) {
-    GFXSTREAM_DEBUG("FrameBuffer::Impl::initialize");
+    GFXSTREAM_DEBUG("Creating Framebuffer: %dx%d, useSubWindow=%d", width, height, useSubWindow);
 
     gfxstream::host::InitializeTracing();
 
@@ -1719,14 +1728,9 @@ std::future<void> FrameBuffer::Impl::sendPostWorkerCmd(Post post) {
     res.wait();
     if (shouldPostOnlyOnMainThread && (PostCmd::Screenshot == post.cmd) &&
         get_gfxstream_window_operations().is_current_thread_ui_thread()) {
-        post.cb->readToBytesScaled(post.screenshot.screenwidth, post.screenshot.screenheight,
-                                   post.screenshot.rotation, post.screenshot.rect,
-                                   post.screenshot.pixelsFormat, post.screenshot.pixels,
-                                   post.colorTransform);
-
-        const int bpp = (post.screenshot.pixelsFormat == GfxstreamFormat::R8G8B8_UNORM) ? 3 : 4;
-        applyScreenshotBackground(post.screenshot.screenwidth, post.screenshot.screenheight, bpp,
-                                  reinterpret_cast<uint8_t*>(post.screenshot.pixels));
+        getColorBufferScreenshot(post.cb, post.screenshot.screenwidth, post.screenshot.screenheight,
+                                 post.screenshot.rotation, post.screenshot.pixelsFormat,
+                                 post.screenshot.pixels, post.screenshot.rect, post.colorTransform);
     } else {
         std::future<void> completeFuture =
             m_postThread.enqueue(Post(std::move(post)));
@@ -2915,7 +2919,7 @@ int FrameBuffer::Impl::getScreenshot(unsigned int nChannels, unsigned int* width
 #endif
 
     AutoLock mutex(m_lock);
-    uint32_t w, h, cb, screenWidth, screenHeight;
+    uint32_t w, h, cb;
     if (!get_gfxstream_multi_display_operations().get_display_info(displayId, nullptr, nullptr, &w,
                                                                    &h, nullptr, nullptr, nullptr)) {
         GFXSTREAM_ERROR("Screenshot of invalid display %d", displayId);
@@ -2943,8 +2947,14 @@ int FrameBuffer::Impl::getScreenshot(unsigned int nChannels, unsigned int* width
         return -1;
     }
 
-    screenWidth = (desiredWidth == 0) ? w : desiredWidth;
-    screenHeight = (desiredHeight == 0) ? h : desiredHeight;
+    // Find screen resolution based on desired resolution and display layout
+    std::optional<Compositor::DisplayLayout> displayLayout = m_compositor->getDisplayLayout();
+    int screenWidth = (desiredWidth != 0)
+                          ? desiredWidth
+                          : (displayLayout.has_value() ? displayLayout->screenWidth : w);
+    int screenHeight = (desiredHeight != 0)
+                           ? desiredHeight
+                           : (displayLayout.has_value() ? displayLayout->screenHeight : h);
 
     bool useSnipping = (rect.size.w != 0 && rect.size.h != 0);
     if (useSnipping) {
@@ -3026,6 +3036,65 @@ int FrameBuffer::Impl::getScreenshot(unsigned int nChannels, unsigned int* width
 
     mutex.unlock();
     completeFuture.wait();
+    return 0;
+}
+
+int FrameBuffer::Impl::getColorBufferScreenshot(
+    ColorBuffer* cb, int targetWidth, int targetHeight, int skinRotation,
+    GfxstreamFormat pixelsFormat, void* outPixels, const Rect& rect,
+    const std::optional<std::array<float, 16>>& colorTransform) {
+    uint8_t* outPixelsRGBA = reinterpret_cast<uint8_t*>(outPixels);
+    const int numChannels = (pixelsFormat == GfxstreamFormat::R8G8B8_UNORM) ? 3 : 4;
+
+    // Adjust display rendering if a layout is given
+    std::optional<Compositor::DisplayLayout> layout = m_compositor->getDisplayLayout();
+    if (layout) {
+        const Pos& dPos = layout->displayRect.pos;
+        const Size& dSize = layout->displayRect.size;
+        // Calculate scaled display frame position and size based on the
+        // target resolution
+        const int cbScaledStartX = (dPos.x * targetWidth) / layout->screenWidth;
+        const int cbScaledStartY = (dPos.y * targetHeight) / layout->screenHeight;
+        const int cbScaledWidth = (dSize.w * targetWidth) / layout->screenWidth;
+        const int cbScaledHeight = (dSize.h * targetHeight) / layout->screenHeight;
+
+        // Read the color buffer into a temporary storage
+        std::vector<uint8_t> tempBuffer;
+        tempBuffer.resize(cbScaledWidth * cbScaledHeight * numChannels);
+        cb->readToBytesScaled(cbScaledWidth, cbScaledHeight, skinRotation, rect, pixelsFormat,
+                            tempBuffer.data(), colorTransform);
+
+        // Copy color buffer into solid black background, based on display layout parameters
+        // TODO(b/485981055): optimize this
+        for (int y = 0; y < targetHeight; y++) {
+            for (int x = 0; x < targetWidth; x++) {
+                const int outPixelIndex = y * targetWidth + x;
+                const int cbX = (x - cbScaledStartX);
+                const int cbY = (y - cbScaledStartY);
+
+                // Check if the pixel is inside the display area
+                const bool sampleCB =
+                    cbX >= 0 && cbX < cbScaledWidth && cbY >= 0 && cbY < cbScaledHeight;
+                const int cbPixelIndex = cbY * cbScaledWidth + cbX;
+                for (int c = 0; c < numChannels; c++) {
+                    if (sampleCB) {
+                         outPixelsRGBA[outPixelIndex * numChannels + c] =
+                             tempBuffer[cbPixelIndex * numChannels + c];
+                    } else {
+                        // outside of the display area, put black with solid alpha
+                        outPixelsRGBA[outPixelIndex * numChannels + c] = (c == 3) ? 255 : 0;
+                    }
+                }
+            }
+        }
+    } else {
+        // Optimized path, directly load the color buffer into the output pixels
+        cb->readToBytesScaled(targetWidth, targetHeight, skinRotation, rect, pixelsFormat, outPixels,
+                            colorTransform);
+    }
+
+    applyScreenshotBackground(targetWidth, targetHeight, numChannels, outPixelsRGBA);
+
     return 0;
 }
 
@@ -3930,12 +3999,16 @@ void FrameBuffer::Impl::setScreenBackground(int width, int height, const uint8_t
         bool shouldRepost = (nowTime - m_guestPostedAFrameTime.value()) > maxUpdateLatency;
         if (shouldRepost) {
             // This is same as calling repost(), but without redundant checks and logging
-            if (!m_displayVk) {
-                postImplSync(m_lastPostedColorBuffer, true, true);
-            }
+            postImplSync(m_lastPostedColorBuffer, true, true);
             m_guestPostedAFrameTime = nowTime;
         }
     }
+}
+
+void FrameBuffer::Impl::setDisplayLayout(int screenWidth, int screenHeight,
+                                         const Rect& displayRect) {
+    AutoLock mutex(m_lock);
+    m_compositor->setDisplayLayout(screenWidth, screenHeight, displayRect);
 }
 
 #ifdef CONFIG_AEMU
@@ -5199,6 +5272,10 @@ void FrameBuffer::setScreenBackground(int width, int height, const uint8_t* rgba
     mImpl->setScreenBackground(width, height, rgbaData);
 }
 
+void FrameBuffer::setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect) {
+    mImpl->setDisplayLayout(screenWidth, screenHeight, displayRect);
+}
+
 #ifdef CONFIG_AEMU
 void FrameBuffer::registerVulkanInstance(uint64_t id, const char* appName) const {
     mImpl->registerVulkanInstance(id, appName);
@@ -5216,6 +5293,14 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsi
                                int desiredHeight, int desiredRotation, Rect rect) {
     return mImpl->getScreenshot(nChannels, width, height, pixels, cPixels, displayId, desiredWidth,
                                 desiredHeight, desiredRotation, rect);
+}
+
+int FrameBuffer::getColorBufferScreenshot(
+    ColorBuffer* cb, int targetWidth, int targetHeight, int skinRotation,
+    GfxstreamFormat pixelsFormat, void* outPixels, const Rect& rect,
+    const std::optional<std::array<float, 16>>& colorTransform) {
+    return mImpl->getColorBufferScreenshot(cb, targetWidth, targetHeight, skinRotation,
+                                           pixelsFormat, outPixels, rect, colorTransform);
 }
 
 void FrameBuffer::onLastColorBufferRef(uint32_t handle) { mImpl->onLastColorBufferRef(handle); }
