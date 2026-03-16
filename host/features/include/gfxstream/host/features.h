@@ -14,8 +14,10 @@
 
 #pragma once
 
-#include <string>
+#include <cstdint>
 #include <map>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace gfxstream {
@@ -24,19 +26,14 @@ namespace host {
 struct FeatureInfo;
 
 using FeatureMap = std::map<std::string, FeatureInfo*>;
-//type used for returning success or a string with the concatenated errors (missing features)
+// type used for returning success or a string with the concatenated errors (missing features)
 using FeatureResult = std::pair<bool, std::string>;
 
 struct FeatureInfo {
     FeatureInfo(const FeatureInfo& rhs) = default;
 
-    FeatureInfo(const char* name,
-                const char* description,
-                FeatureMap* map) :
-            name(name),
-            description(description),
-            enabled(false),
-            reason("Default value") {
+    FeatureInfo(const char* name, const char* description, FeatureMap* map)
+        : name(name), description(description), enabled(false), reason("Default value") {
         if (map) {
             (*map)[std::string(name)] = this;
         }
@@ -57,6 +54,10 @@ struct FeatureSet {
     FeatureSet& operator=(const FeatureSet& rhs);
 
     FeatureMap map;
+
+    // This represents the maximum vulkan api version that should be reported to the guest and is
+    // not related to the host vulkan level available or used.
+    std::optional<uint32_t> guestVulkanMaxApiVersion;
 
     FeatureInfo AsyncComposeSupport = {
         "AsyncComposeSupport",
@@ -358,8 +359,7 @@ struct FeatureSet {
 };
 
 #define GFXSTREAM_SET_FEATURE_ON_CONDITION(set, feature, condition) \
-    do                                                              \
-    {                                                               \
+    do {                                                            \
         {                                                           \
             (set)->feature.enabled = condition;                     \
             (set)->feature.reason = #condition;                     \
