@@ -670,7 +670,10 @@ bool CompositorVk::setUpFences() {
 
 bool CompositorVk::createImage(CompositorVkBase::Image& imageOut, uint32_t width, uint32_t height,
                                const uint8_t* rgbaData, const std::string& debugName) {
+#if 0
+    // TODO(b/473742723): optimize this, and avoid re-creating of images for runtime updates
     GFXSTREAM_VERBOSE("%s: %s with size %d x %d", __func__, debugName.c_str(), width, height);
+#endif
     imageOut = {};
 
     const VkImageCreateInfo imageCreateInfo = {

@@ -143,6 +143,9 @@ class RenderWindow {
     // Receive a background and pass it to TextureDraw
     void setScreenBackground(int width, int height, const uint8_t* rgbaData);
 
+    // Set display layout to change position/size of the emulation output on the screen
+    void setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect);
+
     // Force a repaint of the whole content into the sub-window.
     void repaint();
 

@@ -15,6 +15,11 @@ GFXSTREAM_COMMON_COPTS = [
     "-Wno-unused-variable",
     "-Wno-thread-safety-analysis",
     "-Wno-thread-safety-attributes",
+    "-Wno-c++98-compat-pedantic",
+    "-Wno-old-style-cast",
+    "-Wno-pre-c++17-compat",
+    "-Wno-pre-c++20-compat-pedantic",
+    "-Wno-unsafe-buffer-usage",
 ] + select({
     "@platforms//os:linux": [
         "-Werror",
