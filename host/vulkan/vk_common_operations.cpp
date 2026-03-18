@@ -384,15 +384,22 @@ bool VkEmulation::StagingBuffer::create(VulkanDispatch* vk, VkDevice device,
 }
 
 void VkEmulation::StagingBuffer::destroy(VulkanDispatch* vk, VkDevice device) {
+    if (!vk || device == VK_NULL_HANDLE) {
+        GFXSTREAM_WARNING("StagingBuffer::destroy: invalid parameters");
+        return;
+    }
     if (mMappedPtr) {
         vk->vkUnmapMemory(device, mMemory);
         mMappedPtr = nullptr;
     }
-    vk->vkDestroyBuffer(device, mBuffer, nullptr);
-    vk->vkFreeMemory(device, mMemory, nullptr);
-
-    mMemory = VK_NULL_HANDLE;
-    mBuffer = VK_NULL_HANDLE;
+    if (mBuffer != VK_NULL_HANDLE) {
+        vk->vkDestroyBuffer(device, mBuffer, nullptr);
+        mBuffer = VK_NULL_HANDLE;
+    }
+    if (mMemory != VK_NULL_HANDLE) {
+        vk->vkFreeMemory(device, mMemory, nullptr);
+        mMemory = VK_NULL_HANDLE;
+    }
 }
 
 ExternalMemory::Mode VkEmulation::getExternalMemoryMode() const {
@@ -1694,23 +1701,29 @@ VkEmulation::~VkEmulation() {
     mDisplayVk.reset();
     mUdmabufCreator.reset();
 
-    for (auto& [cb,fence] : mTransferQueueCommandBufferPool) {
-        mDvk->vkDestroyFence(mDevice, fence, nullptr);
-        mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cb);
+    if (mDvk) {
+        for (auto& [cb,fence] : mTransferQueueCommandBufferPool) {
+            mDvk->vkDestroyFence(mDevice, fence, nullptr);
+            mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cb);
+        }
+
+        mStaging.destroy(mDvk, mDevice);
+
+        mDvk->vkDestroyFence(mDevice, mCommandBufferFence, nullptr);
+        mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &mCommandBuffer);
+        mDvk->vkDestroyCommandPool(mDevice, mCommandPool, nullptr);
     }
     mTransferQueueCommandBufferPool.clear();
 
     mYcbcrSamplerPool.destroy();
 
-    mStaging.destroy(mDvk, mDevice);
+    if (mIvk && mDevice != VK_NULL_HANDLE) {
+        mIvk->vkDestroyDevice(mDevice, nullptr);
+    }
 
-    mDvk->vkDestroyFence(mDevice, mCommandBufferFence, nullptr);
-    mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &mCommandBuffer);
-    mDvk->vkDestroyCommandPool(mDevice, mCommandPool, nullptr);
-
-    mIvk->vkDestroyDevice(mDevice, nullptr);
-
-    mGvk->vkDestroyInstance(mInstance, nullptr);
+    if (mGvk && mInstance != VK_NULL_HANDLE) {
+        mGvk->vkDestroyInstance(mInstance, nullptr);
+    }
 }
 
 bool VkEmulation::isYcbcrEmulationEnabled() const { return mEnableYcbcrEmulation; }
