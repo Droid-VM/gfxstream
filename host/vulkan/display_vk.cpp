@@ -465,6 +465,10 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
     if (shouldRecreateSwapchain(acquireRes)) {
         return PostResult{false, std::shared_future<void>()};
     }
+    if (acquireRes == VK_ERROR_SURFACE_LOST_KHR) {
+        GFXSTREAM_ERROR("Cannot post ColorBuffer: Swapchain surface is lost.");
+        return PostResult{false, std::move(completedFuture)};
+    }
     VK_CHECK(acquireRes);
 
     if (m_postResourceFutures[imageIndex].has_value()) {
@@ -540,7 +544,7 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             .image = currentSwapchainImage,
             .subresourceRange = subresourceRange,
         };
-        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                   &barrier);
 
@@ -568,7 +572,7 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             .image = currentSwapchainImage,
             .subresourceRange = subresourceRange,
         };
-        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                   &acquireSwapchainImageBarrier);
         currentSwapchainLayout = acquireSwapchainImageBarrier.newLayout;
@@ -632,7 +636,7 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
                 .image = currentSwapchainImage,
                 .subresourceRange = subresourceRange,
             };
-            m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr,
                                       0, nullptr, 1, &transitionSwapchainToAttachmentBarrier);
             currentSwapchainLayout = transitionSwapchainToAttachmentBarrier.newLayout;
@@ -664,7 +668,6 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             bool isMultiDisplay = postCmd.layers.size() > 1;
             bool disableMask = isMultiDisplay;
 
-            drawParams.useScreenBlend = (i == 0) && renderBackground && !disableMask;
             // Prefer per-layer color transform, then global, then none
             if (layer.colorTransform.has_value()) {
                 drawParams.colorTransform = layer.colorTransform;
@@ -706,7 +709,7 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
                     .image = currentSwapchainImage,
                     .subresourceRange = subresourceRange,
                 };
-                m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
                                           nullptr, 0, nullptr, 1, &transitionToAttachment);
                 currentSwapchainLayout = transitionToAttachment.newLayout;
@@ -716,6 +719,23 @@ DisplayVk::PostResult DisplayVk::postImpl(const Post& postCmd) {
             // Draw Background only if mask is allowed (single display mode)
             if (i == 0 && renderBackground && !disableMask) {
                 m_compositorVk->drawScreenBackground(drawParams);
+
+                // Draw subsequent passes in screen blend mode
+                drawParams.useScreenBlend = true;
+
+                // Adjust display rendering if a layout has been given
+                const int targetWidth = drawParams.targetWidth;
+                const int targetHeight = drawParams.targetHeight;
+                Rect scaledDisplayRect = {};
+                if (m_compositorVk->getScaledDisplayRect(scaledDisplayRect, targetWidth,
+                                                         targetHeight)) {
+                    drawParams.displayFrame.left = scaledDisplayRect.pos.x;
+                    drawParams.displayFrame.top = scaledDisplayRect.pos.y;
+                    drawParams.displayFrame.right =
+                        drawParams.displayFrame.left + scaledDisplayRect.size.w;
+                    drawParams.displayFrame.bottom =
+                        drawParams.displayFrame.top + scaledDisplayRect.size.h;
+                }
             }
 
             m_compositorVk->drawImage(drawParams, sourceImageInfoVk->imageView);
