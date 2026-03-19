@@ -214,16 +214,6 @@ static std::optional<ExternalHandleInfo> dupExternalMemory(std::optional<Externa
         .handle = reinterpret_cast<ExternalHandleType>(res),
         .streamHandleType = handleInfo->streamHandleType,
     };
-#elif defined(__QNX__)
-    if (STREAM_HANDLE_TYPE_PLATFORM_SCREEN_BUFFER_QNX == handleInfo->streamHandleType) {
-        // No dup required for the screen_buffer handle
-        return ExternalHandleInfo{
-            .handle = handleInfo->handle,
-            .streamHandleType = handleInfo->streamHandleType,
-        };
-    }
-    // TODO(aruby@blackberry.com): Support dup-ing for OPAQUE_FD or DMABUF types on QNX
-    return std::nullopt;
 #elif defined(__ANDROID__)
     // Android uses AHardwareBuffer* which is not required to dup
     return ExternalHandleInfo{
@@ -231,7 +221,6 @@ static std::optional<ExternalHandleInfo> dupExternalMemory(std::optional<Externa
         .streamHandleType = handleInfo->streamHandleType,
     };
 #else
-    // TODO(aruby@blackberry.com): Check handleType?
     return ExternalHandleInfo{
         .handle = handleInfo->dupFd(),
         .streamHandleType = handleInfo->streamHandleType,
@@ -1317,25 +1306,40 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                    VK_API_VERSION_MAJOR(deviceVersion), VK_API_VERSION_MINOR(deviceVersion),
                    VK_API_VERSION_PATCH(deviceVersion));
 
+    GFXSTREAM_INFO("Using Vulkan externalMemoryMode: %s for VkEmulation",
+                   ExternalMemory::to_string(emulation->mDeviceInfo.externalMemoryMode));
+
+    GFXSTREAM_DEBUG("VkEmulation deviceInfo:");
+    GFXSTREAM_DEBUG("    hasGraphicsQueueFamily = %s",
+                    emulation->mDeviceInfo.hasGraphicsQueueFamily ? "true" : "false");
+    GFXSTREAM_DEBUG("    hasComputeQueueFamily = %s",
+                    emulation->mDeviceInfo.hasComputeQueueFamily ? "true" : "false");
+    GFXSTREAM_DEBUG("    externalMemoryMode = %s",
+                    ExternalMemory::to_string(emulation->mDeviceInfo.externalMemoryMode));
+    GFXSTREAM_DEBUG("    supportsExternalMemoryImport = %s",
+                    emulation->mDeviceInfo.supportsExternalMemoryImport ? "true" : "false");
+    GFXSTREAM_DEBUG("    supportsExternalMemoryExport = %s",
+                    emulation->mDeviceInfo.supportsExternalMemoryExport ? "true" : "false");
+    GFXSTREAM_DEBUG("    supportsDmaBuf = %s",
+                    emulation->mDeviceInfo.supportsDmaBuf ? "true" : "false");
+    GFXSTREAM_DEBUG("    supportsDriverProperties = %s",
+                    emulation->mDeviceInfo.supportsDriverProperties ? "true" : "false");
+    GFXSTREAM_DEBUG("    supportsExternalMemoryHostProps = %s",
+                    emulation->mDeviceInfo.supportsExternalMemoryHostProps ? "true" : "false");
+    GFXSTREAM_DEBUG("    hasSamplerYcbcrConversionExtension = %s",
+                    emulation->mDeviceInfo.hasSamplerYcbcrConversionExtension ? "true" : "false");
+    GFXSTREAM_DEBUG("    supportsSamplerYcbcrConversion = %s",
+                    emulation->mDeviceInfo.supportsSamplerYcbcrConversion ? "true" : "false");
+    GFXSTREAM_DEBUG("    glInteropSupported = %s",
+                    emulation->mDeviceInfo.glInteropSupported ? "true" : "false");
     GFXSTREAM_DEBUG(
-        "deviceInfo: \n"
-        "hasGraphicsQueueFamily = %d\n"
-        "hasComputeQueueFamily = %d\n"
-        "externalMemoryMode = %s\n"
-        "supportsExternalMemoryImport = %d\n"
-        "supportsExternalMemoryExport = %d\n"
-        "supportsDriverProperties = %d\n"
-        "hasSamplerYcbcrConversionExtension = %d\n"
-        "supportsSamplerYcbcrConversion = %d\n"
-        "glInteropSupported = %d",
-        emulation->mDeviceInfo.hasGraphicsQueueFamily, emulation->mDeviceInfo.hasComputeQueueFamily,
-        ExternalMemory::to_string(emulation->mDeviceInfo.externalMemoryMode),
-        emulation->mDeviceInfo.supportsExternalMemoryImport,
-        emulation->mDeviceInfo.supportsExternalMemoryExport,
-        emulation->mDeviceInfo.supportsDriverProperties,
-        emulation->mDeviceInfo.hasSamplerYcbcrConversionExtension,
-        emulation->mDeviceInfo.supportsSamplerYcbcrConversion,
-        emulation->mDeviceInfo.glInteropSupported);
+        "    hasNvidiaDeviceDiagnosticCheckpointsExtension = %s",
+        emulation->mDeviceInfo.hasNvidiaDeviceDiagnosticCheckpointsExtension ? "true" : "false");
+    GFXSTREAM_DEBUG(
+        "    supportsNvidiaDeviceDiagnosticCheckpoints = %s",
+        emulation->mDeviceInfo.supportsNvidiaDeviceDiagnosticCheckpoints ? "true" : "false");
+    GFXSTREAM_DEBUG("    supportsPrivateData = %s",
+                    emulation->mDeviceInfo.supportsPrivateData ? "true" : "false");
 
     float priority = 1.0f;
     VkDeviceQueueCreateInfo dqCi = {
@@ -2330,7 +2334,6 @@ void VkEmulation::freeExternalMemoryLocked(VulkanDispatch* vk,
             case STREAM_HANDLE_TYPE_MEM_DMABUF:
                 close(info->handleInfo->handle);
                 break;
-            case STREAM_HANDLE_TYPE_PLATFORM_SCREEN_BUFFER_QNX:
             default:
                 break;
         }
@@ -2661,40 +2664,6 @@ std::unique_ptr<VkImageCreateInfo> VkEmulation::generateColorBufferVkImageCreate
     return generateColorBufferVkImageCreateInfoLocked(format, width, height, tiling, mipLevels);
 }
 
-bool VkEmulation::updateMemReqsForExtMem(std::optional<ExternalHandleInfo> extMemHandleInfo,
-                                         VkMemoryRequirements* pMemReqs) {
-#if defined(__QNX__)
-    if (STREAM_HANDLE_TYPE_PLATFORM_SCREEN_BUFFER_QNX == extMemHandleInfo->streamHandleType) {
-        VkScreenBufferPropertiesQNX screenBufferProps = {
-            VK_STRUCTURE_TYPE_SCREEN_BUFFER_PROPERTIES_QNX,
-            0,
-        };
-        VkResult queryRes = dvk->vkGetScreenBufferPropertiesQNX(
-            device, (screen_buffer_t)extMemHandleInfo->handle, &screenBufferProps);
-        if (VK_SUCCESS != queryRes) {
-            GFXSTREAM_ERROR("Failed to get QNX Screen Buffer properties, VK error: %s",
-                            string_VkResult(queryRes));
-            return false;
-        }
-        if (screenBufferProps.allocationSize < pMemReqs->size) {
-            GFXSTREAM_ERROR(
-                "QNX Screen buffer allocationSize (0x%lx) is not large enough for ColorBuffer "
-                "image "
-                "size requirements (0x%lx)",
-                screenBufferProps.allocationSize, pMemReqs->size);
-            return false;
-        }
-        // Change memory requirements to the actual allocationSize; this may be larger
-        // than the original memory requirements
-        pMemReqs->size = screenBufferProps.allocationSize;
-        // Mask the memoryTypeBits with the ones available for screen_buffer import
-        pMemReqs->memoryTypeBits = screenBufferProps.memoryTypeBits;
-    }
-#endif
-
-    return true;
-}
-
 std::optional<GfxstreamFormat>
 VkEmulation::GetInternalFormatLocked(GfxstreamFormat format) {
     // TODO: This should probably check for format support via
@@ -2762,16 +2731,6 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
     }
     const VkFormat vkFormat = *vkFormatOpt;
 
-    // Check the ExternalObjectManager for an external memory handle provided for import
-    auto extMemHandleInfo =
-        ExternalObjectManager::get()->removeResourceExternalHandleInfo(colorBufferHandle);
-    if (extMemHandleInfo && !mDeviceInfo.supportsExternalMemoryImport) {
-        GFXSTREAM_ERROR(
-            "Failed to initialize Vk ColorBuffer -- extMemHandleInfo provided, but device does "
-            "not support externalMemoryImport");
-        return false;
-    }
-
     // Requesting invalid texture sizes can crash some drivers, early out to gracefully handle
     // the errors and avoid total emulator crash.
     if (width > mDeviceInfo.physdevProps.limits.maxFramebufferWidth ||
@@ -2832,7 +2791,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
 
     VkResult createRes = vk->vkCreateImage(mDevice, imageCi.get(), nullptr, &infoPtr->image);
     if (createRes != VK_SUCCESS) {
-        GFXSTREAM_DEBUG("Failed to create Vulkan image for ColorBuffer %d, error: %s",
+        GFXSTREAM_ERROR("Failed to create Vulkan image for ColorBuffer %d, error: %s",
                         colorBufferHandle, string_VkResult(createRes));
         return false;
     }
@@ -2854,26 +2813,6 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
         infoPtr->imageMemReqs = reqs.memoryRequirements;
     } else {
         vk->vkGetImageMemoryRequirements(mDevice, infoPtr->image, &infoPtr->imageMemReqs);
-    }
-
-    if (extMemHandleInfo) {
-        infoPtr->memory.handleInfo = extMemHandleInfo;
-        infoPtr->memory.dedicatedAllocation = true;
-        // External memory might change the memReqs for allocation
-        if (!updateMemReqsForExtMem(extMemHandleInfo, &infoPtr->imageMemReqs)) {
-            GFXSTREAM_ERROR(
-                "Failed to update memReqs for ColorBuffer memory allocation with external memory: "
-                "%d\n",
-                colorBufferHandle);
-            return false;
-        }
-#ifdef __APPLE_
-        // importExtMemoryHandleToVkColorBuffer is not supported with external memory metal
-        if (getExternalMemoryMode() == ExternalMemory::Mode::Metal) {
-            GFXSTREAM_WARNING("extMemhandleInfo import in ColorBuffer creation is unexpected.");
-            infoPtr->memory.externalMetalHandle = nullptr;
-        }
-#endif
     }
 
     // Currently we only care about two memory properties: DEVICE_LOCAL
@@ -2898,37 +2837,16 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
         infoPtr->memoryProperty);
 
     const bool isHostVisible = (infoPtr->memoryProperty & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-    Optional<uint64_t> deviceAlignment = (!extMemHandleInfo && isHostVisible)
-                                             ? Optional<uint64_t>(infoPtr->imageMemReqs.alignment)
-                                             : kNullopt;
+    Optional<uint64_t> deviceAlignment = isHostVisible ? Optional<uint64_t>(infoPtr->imageMemReqs.alignment) : kNullopt;
     Optional<VkImage> dedicatedImage = useDedicated ? Optional<VkImage>(infoPtr->image) : kNullopt;
-    if (extMemHandleInfo) {
-        VkMemoryDedicatedAllocateInfo dedicatedInfo = {
-            VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
-            nullptr,
-            VK_NULL_HANDLE,
-            VK_NULL_HANDLE,
-        };
-        VkMemoryDedicatedAllocateInfo* dedicatedInfoPtr = nullptr;
-        if (useDedicated) {
-            dedicatedInfo.image = *dedicatedImage;
-            dedicatedInfoPtr = &dedicatedInfo;
-        }
-        if (!importExternalMemory(vk, mDevice, &infoPtr->memory, dedicatedInfoPtr,
-                                  &infoPtr->memory.memory)) {
-            GFXSTREAM_ERROR("Failed to import external memory%s for colorBuffer: %d\n",
-                            dedicatedInfoPtr ? " (dedicated)" : "", colorBufferHandle);
-            return false;
-        }
 
-        infoPtr->externalMemoryCompatible = true;
-    } else {
-        bool allocRes = allocExternalMemory(vk, &infoPtr->memory, deviceAlignment, kNullopt,
-                                            dedicatedImage, infoPtr);
-        if (!allocRes) {
-            GFXSTREAM_ERROR("Failed to allocate ColorBuffer with Vulkan backing.");
-            return false;
-        }
+    // Allocate (ideally) external memory. Note: This funciton will set ColorBufferInfo::externalMemoryCompatible to denote if the allocation actually resulted in a memory allocation
+    // that is external-able.
+    bool allocRes = allocExternalMemory(vk, &infoPtr->memory,
+                                        deviceAlignment, kNullopt, dedicatedImage, infoPtr);
+    if (!allocRes) {
+        GFXSTREAM_ERROR("Failed to allocate ColorBuffer with Vulkan backing.");
+        return false;
     }
 
     infoPtr->memory.pageOffset = reinterpret_cast<uint64_t>(infoPtr->memory.mappedPtr) % kPageSize;
@@ -2991,7 +2909,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
     };
     createRes = vk->vkCreateImageView(mDevice, &imageViewCi, nullptr, &infoPtr->imageView);
     if (createRes != VK_SUCCESS) {
-        GFXSTREAM_DEBUG("Failed to create Vulkan image view for ColorBuffer %d, Error: %s",
+        GFXSTREAM_ERROR("Failed to create Vulkan image view for ColorBuffer %d, Error: %s",
                         colorBufferHandle, string_VkResult(createRes));
         return false;
     }
@@ -3019,7 +2937,7 @@ bool VkEmulation::createVkColorBuffer(uint32_t width, uint32_t height, Gfxstream
     std::lock_guard<std::mutex> lock(mMutex);
     auto infoPtr = gfxstream::base::find(mColorBuffers, colorBufferHandle);
     if (infoPtr) {
-        GFXSTREAM_DEBUG("ColorBuffer already exists for handle: %d", colorBufferHandle);
+        GFXSTREAM_ERROR("ColorBuffer already exists for handle: %d", colorBufferHandle);
         return false;
     }
 
@@ -3144,7 +3062,7 @@ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, std::vector
 
     auto colorBufferInfo = gfxstream::base::find(mColorBuffers, colorBufferHandle);
     if (!colorBufferInfo) {
-        GFXSTREAM_DEBUG("Failed to read from ColorBuffer:%d, not found.", colorBufferHandle);
+        GFXSTREAM_ERROR("Failed to read from ColorBuffer:%d, not found.", colorBufferHandle);
         bytes->clear();
         return false;
     }
@@ -3775,7 +3693,7 @@ bool VkEmulation::updateColorBufferFromBytes(uint32_t colorBufferHandle,
 
     auto colorBufferInfo = gfxstream::base::find(mColorBuffers, colorBufferHandle);
     if (!colorBufferInfo) {
-        GFXSTREAM_DEBUG("Failed to update ColorBuffer:%d, not found.", colorBufferHandle);
+        GFXSTREAM_ERROR("Failed to update ColorBuffer:%d, not found.", colorBufferHandle);
         return false;
     }
 

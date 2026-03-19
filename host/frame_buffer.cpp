@@ -3816,7 +3816,7 @@ bool FrameBuffer::Impl::invalidateColorBufferForVk(HandleType colorBufferHandle)
     AutoLock mutex(m_lock);
     auto colorBuffer = findColorBuffer(colorBufferHandle);
     if (!colorBuffer) {
-        GFXSTREAM_DEBUG("Failed to find ColorBuffer: %d", colorBufferHandle);
+        GFXSTREAM_ERROR("Failed to find ColorBuffer: %d", colorBufferHandle);
         return false;
     }
     return colorBuffer->invalidateForVk();
@@ -4564,7 +4564,7 @@ bool FrameBuffer::Impl::flushColorBufferFromGl(HandleType colorBufferHandle) {
 bool FrameBuffer::Impl::invalidateColorBufferForGl(HandleType colorBufferHandle) {
     auto colorBuffer = findColorBuffer(colorBufferHandle);
     if (!colorBuffer) {
-        GFXSTREAM_DEBUG("Failed to find ColorBuffer: %d", colorBufferHandle);
+        GFXSTREAM_ERROR("Failed to find ColorBuffer: %d", colorBufferHandle);
         return false;
     }
     return colorBuffer->invalidateForGl();
