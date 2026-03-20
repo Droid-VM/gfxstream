@@ -3058,6 +3058,10 @@ bool VkEmulation::teardownVkColorBufferLocked(uint32_t colorBufferHandle) {
         freeExternalMemoryLocked(vk, &info.memory);
     }
 
+    if (Compositor* c = getCompositor()) {
+        c->onImageDestroyed(colorBufferHandle);
+    }
+
     mColorBuffers.erase(colorBufferHandle);
 
     return true;
