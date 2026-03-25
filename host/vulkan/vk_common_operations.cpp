@@ -1900,7 +1900,7 @@ std::string VkEmulation::getDeviceExtensionsString() const {
     return builder.str();
 }
 
-void VkEmulation::getVulkanEmulationDeviceInfo(char** device_name, char** driver_info,
+bool VkEmulation::getVulkanEmulationDeviceInfo(char** device_name, char** driver_info,
                                                uint32_t* driver_version, uint32_t* api_version,
                                                uint32_t* vendor_id, uint32_t* device_id,
                                                uint32_t* device_type, uint64_t* device_memory) {
@@ -1922,6 +1922,8 @@ void VkEmulation::getVulkanEmulationDeviceInfo(char** device_name, char** driver
             *device_memory += mDeviceInfo.memProps.memoryHeaps[i].size;
         }
     }
+
+    return true;
 }
 
 const VkPhysicalDeviceProperties VkEmulation::getPhysicalDeviceProperties() const {

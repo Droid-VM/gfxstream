@@ -103,7 +103,7 @@ class Renderer {
         std::string version;
     };
     virtual HardwareStrings getHardwareStrings() = 0;
-    virtual void getVulkanEmulationDeviceInfo(char** device_name, char** driver_info,
+    virtual bool getVulkanEmulationDeviceInfo(char** device_name, char** driver_info,
                                               uint32_t* driver_version, uint32_t* api_version,
                                               uint32_t* vendor_id, uint32_t* device_id,
                                               uint32_t* device_type, uint64_t* device_memory) = 0;
