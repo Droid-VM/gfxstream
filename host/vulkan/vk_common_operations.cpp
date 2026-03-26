@@ -384,15 +384,22 @@ bool VkEmulation::StagingBuffer::create(VulkanDispatch* vk, VkDevice device,
 }
 
 void VkEmulation::StagingBuffer::destroy(VulkanDispatch* vk, VkDevice device) {
+    if (!vk || device == VK_NULL_HANDLE) {
+        GFXSTREAM_WARNING("StagingBuffer::destroy: invalid parameters");
+        return;
+    }
     if (mMappedPtr) {
         vk->vkUnmapMemory(device, mMemory);
         mMappedPtr = nullptr;
     }
-    vk->vkDestroyBuffer(device, mBuffer, nullptr);
-    vk->vkFreeMemory(device, mMemory, nullptr);
-
-    mMemory = VK_NULL_HANDLE;
-    mBuffer = VK_NULL_HANDLE;
+    if (mBuffer != VK_NULL_HANDLE) {
+        vk->vkDestroyBuffer(device, mBuffer, nullptr);
+        mBuffer = VK_NULL_HANDLE;
+    }
+    if (mMemory != VK_NULL_HANDLE) {
+        vk->vkFreeMemory(device, mMemory, nullptr);
+        mMemory = VK_NULL_HANDLE;
+    }
 }
 
 ExternalMemory::Mode VkEmulation::getExternalMemoryMode() const {
@@ -1317,12 +1324,16 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     }
 
     auto deviceVersion = emulation->mDeviceInfo.physdevProps.apiVersion;
-    GFXSTREAM_INFO("Selecting Vulkan device: %s, Version: %d.%d.%d",
+    char deviceInitInfo[1024];
+    snprintf(deviceInitInfo, sizeof(deviceInitInfo),
+        "Selecting Vulkan device: %s, Version: %d.%d.%d",
                    emulation->mDeviceInfo.physdevProps.deviceName,
                    VK_API_VERSION_MAJOR(deviceVersion), VK_API_VERSION_MINOR(deviceVersion),
                    VK_API_VERSION_PATCH(deviceVersion));
+    GFXSTREAM_INFO(deviceInitInfo);
+    get_gfxstream_vm_operations().add_crash_reporter_log(deviceInitInfo);
 
-    GFXSTREAM_DEBUG(
+    snprintf(deviceInitInfo, sizeof(deviceInitInfo),
         "deviceInfo: \n"
         "hasGraphicsQueueFamily = %d\n"
         "hasComputeQueueFamily = %d\n"
@@ -1330,6 +1341,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         "supportsExternalMemoryImport = %d\n"
         "supportsExternalMemoryExport = %d\n"
         "supportsDriverProperties = %d\n"
+        "supportsExternalMemoryHostProps = %d\n"
         "hasSamplerYcbcrConversionExtension = %d\n"
         "supportsSamplerYcbcrConversion = %d\n"
         "glInteropSupported = %d",
@@ -1338,9 +1350,12 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         emulation->mDeviceInfo.supportsExternalMemoryImport,
         emulation->mDeviceInfo.supportsExternalMemoryExport,
         emulation->mDeviceInfo.supportsDriverProperties,
+        emulation->mDeviceInfo.supportsExternalMemoryHostProps,
         emulation->mDeviceInfo.hasSamplerYcbcrConversionExtension,
         emulation->mDeviceInfo.supportsSamplerYcbcrConversion,
         emulation->mDeviceInfo.glInteropSupported);
+    GFXSTREAM_DEBUG(deviceInitInfo);
+    get_gfxstream_vm_operations().add_crash_reporter_log(deviceInitInfo);
 
     float priority = 1.0f;
     VkDeviceQueueCreateInfo dqCi = {
@@ -1600,6 +1615,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     }
 
     GFXSTREAM_VERBOSE("Vulkan global emulation state successfully initialized.");
+    get_gfxstream_vm_operations().add_crash_reporter_log("Vulkan emulation initialized");
 
     return emulation;
 }
@@ -1694,23 +1710,29 @@ VkEmulation::~VkEmulation() {
     mDisplayVk.reset();
     mUdmabufCreator.reset();
 
-    for (auto& [cb,fence] : mTransferQueueCommandBufferPool) {
-        mDvk->vkDestroyFence(mDevice, fence, nullptr);
-        mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cb);
+    if (mDvk) {
+        for (auto& [cb,fence] : mTransferQueueCommandBufferPool) {
+            mDvk->vkDestroyFence(mDevice, fence, nullptr);
+            mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cb);
+        }
+
+        mStaging.destroy(mDvk, mDevice);
+
+        mDvk->vkDestroyFence(mDevice, mCommandBufferFence, nullptr);
+        mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &mCommandBuffer);
+        mDvk->vkDestroyCommandPool(mDevice, mCommandPool, nullptr);
     }
     mTransferQueueCommandBufferPool.clear();
 
     mYcbcrSamplerPool.destroy();
 
-    mStaging.destroy(mDvk, mDevice);
+    if (mIvk && mDevice != VK_NULL_HANDLE) {
+        mIvk->vkDestroyDevice(mDevice, nullptr);
+    }
 
-    mDvk->vkDestroyFence(mDevice, mCommandBufferFence, nullptr);
-    mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &mCommandBuffer);
-    mDvk->vkDestroyCommandPool(mDevice, mCommandPool, nullptr);
-
-    mIvk->vkDestroyDevice(mDevice, nullptr);
-
-    mGvk->vkDestroyInstance(mInstance, nullptr);
+    if (mGvk && mInstance != VK_NULL_HANDLE) {
+        mGvk->vkDestroyInstance(mInstance, nullptr);
+    }
 }
 
 bool VkEmulation::isYcbcrEmulationEnabled() const { return mEnableYcbcrEmulation; }
@@ -3034,6 +3056,10 @@ bool VkEmulation::teardownVkColorBufferLocked(uint32_t colorBufferHandle) {
         vk->vkDestroyImageView(mDevice, info.imageView, nullptr);
         vk->vkDestroyImage(mDevice, info.image, nullptr);
         freeExternalMemoryLocked(vk, &info.memory);
+    }
+
+    if (Compositor* c = getCompositor()) {
+        c->onImageDestroyed(colorBufferHandle);
     }
 
     mColorBuffers.erase(colorBufferHandle);
