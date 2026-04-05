@@ -31,7 +31,9 @@ using gfxstream::base::SharedMemory;
 RingBlob::RingBlob(uint32_t id,
                    uint64_t size,
                    uint64_t alignment,
-                   std::variant<std::unique_ptr<AlignedMemory>, std::unique_ptr<SharedMemory>> memory) :
+                   std::variant<std::unique_ptr<AlignedMemory>,
+                                std::unique_ptr<SharedMemory>,
+                                std::unique_ptr<ExternalMemory>> memory) :
     mId(id), mSize(size), mAlignment(alignment), mMemory(std::move(memory)) {}
 
 bool RingBlob::isExportable() const {
@@ -66,6 +68,8 @@ gfxstream::base::SharedMemory::handle_type RingBlob::dupHandle() {
 void* RingBlob::map() {
     if (std::holds_alternative<std::unique_ptr<AlignedMemory>>(mMemory)) {
         return std::get<std::unique_ptr<AlignedMemory>>(mMemory)->addr;
+    } else if (std::holds_alternative<std::unique_ptr<ExternalMemory>>(mMemory)) {
+        return std::get<std::unique_ptr<ExternalMemory>>(mMemory)->addr;
     } else {
         return std::get<std::unique_ptr<SharedMemory>>(mMemory)->get();
     }
@@ -94,6 +98,17 @@ std::unique_ptr<RingBlob> RingBlob::CreateWithHostMemory(uint32_t id, uint64_t s
     }
 
     return std::unique_ptr<RingBlob>(new RingBlob(id, size, alignment, std::move(memory)));
+}
+
+/*static*/
+std::unique_ptr<RingBlob> RingBlob::CreateWithExternalMemory(uint32_t id, void* addr, uint64_t size) {
+    if (addr == nullptr) {
+        GFXSTREAM_ERROR("Failed to create ring blob: null external memory address.");
+        return nullptr;
+    }
+
+    auto memory = std::make_unique<ExternalMemory>(addr);
+    return std::unique_ptr<RingBlob>(new RingBlob(id, size, 1, std::move(memory)));
 }
 
 #ifdef GFXSTREAM_BUILD_WITH_SNAPSHOT_FRONTEND_SUPPORT

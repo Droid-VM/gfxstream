@@ -767,7 +767,8 @@ void VirtioGpuFrontend::flushResource(uint32_t res_handle) {
 
 int VirtioGpuFrontend::createBlob(uint32_t contextId, uint32_t resourceId,
                                   const struct stream_renderer_create_blob* createBlobArgs,
-                                  const struct stream_renderer_handle* handle) {
+                                  const struct stream_renderer_handle* handle,
+                                  const struct iovec* iovecs, uint32_t numIovs) {
     auto contextIt = mContexts.find(contextId);
     if (contextIt == mContexts.end()) {
         fprintf(stderr, "BLOBDIAG2: createBlob res=%u FAIL context-%u-missing\n", resourceId,
@@ -785,7 +786,8 @@ int VirtioGpuFrontend::createBlob(uint32_t contextId, uint32_t resourceId,
 
     auto resourceOpt =
         VirtioGpuResource::Create(mFeatures, mPageSize, contextId, resourceId,
-                                  createArgs ? &*createArgs : nullptr, createBlobArgs, handle);
+                                  createArgs ? &*createArgs : nullptr, createBlobArgs, handle,
+                                  iovecs, numIovs);
     if (!resourceOpt) {
         fprintf(stderr, "BLOBDIAG2: createBlob res=%u FAIL Create-returned-nullopt\n", resourceId);
         GFXSTREAM_ERROR("failed to create blob resource %u.", resourceId);

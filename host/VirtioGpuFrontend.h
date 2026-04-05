@@ -95,7 +95,8 @@ class VirtioGpuFrontend {
 
     int createBlob(uint32_t ctx_id, uint32_t res_handle,
                    const struct stream_renderer_create_blob* create_blob,
-                   const struct stream_renderer_handle* handle);
+                   const struct stream_renderer_handle* handle,
+                   const struct iovec* iovecs = nullptr, uint32_t num_iovs = 0);
 
     int resourceMap(uint32_t resourceId, void** hvaOut, uint64_t* sizeOut);
     int resourceUnmap(uint32_t res_handle);

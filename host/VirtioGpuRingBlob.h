@@ -46,11 +46,26 @@ struct AlignedMemory {
     AlignedMemory& operator=(AlignedMemory&& other) = delete;
 };
 
+// Borrowed external memory (e.g. guest DMA coherent backing on Gunyah).
+// Does NOT own the memory — caller must ensure lifetime.
+struct ExternalMemory {
+    void* addr = nullptr;
+
+    explicit ExternalMemory(void* ptr) : addr(ptr) {}
+    ~ExternalMemory() = default;
+
+    ExternalMemory(const ExternalMemory&) = delete;
+    ExternalMemory& operator=(const ExternalMemory&) = delete;
+    ExternalMemory(ExternalMemory&&) = delete;
+    ExternalMemory& operator=(ExternalMemory&&) = delete;
+};
+
 // Memory used as a ring buffer for communication between the guest and host.
 class RingBlob {
    public:
     static std::unique_ptr<RingBlob> CreateWithShmem(uint32_t id, uint64_t size);
     static std::unique_ptr<RingBlob> CreateWithHostMemory(uint32_t, uint64_t size, uint64_t alignment);
+    static std::unique_ptr<RingBlob> CreateWithExternalMemory(uint32_t id, void* addr, uint64_t size);
 
     bool isExportable() const;
 
@@ -80,13 +95,15 @@ class RingBlob {
              uint64_t size,
              uint64_t alignment,
              std::variant<std::unique_ptr<AlignedMemory>,
-                          std::unique_ptr<gfxstream::base::SharedMemory>> memory);
+                          std::unique_ptr<gfxstream::base::SharedMemory>,
+                          std::unique_ptr<ExternalMemory>> memory);
 
     const uint64_t mId;
     const uint64_t mSize;
     const uint64_t mAlignment;
     std::variant<std::unique_ptr<AlignedMemory>,
-                 std::unique_ptr<gfxstream::base::SharedMemory>> mMemory;
+                 std::unique_ptr<gfxstream::base::SharedMemory>,
+                 std::unique_ptr<ExternalMemory>> mMemory;
 };
 
 // LINT.ThenChange(VirtioGpuRingBlobSnapshot.h:virtio_gpu_ring_blob)

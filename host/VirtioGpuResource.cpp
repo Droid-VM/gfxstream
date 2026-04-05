@@ -345,7 +345,8 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
     const gfxstream::host::FeatureSet& features, uint32_t pageSize, uint32_t contextId,
     uint32_t resourceId, const struct stream_renderer_resource_create_args* createArgs,
     const struct stream_renderer_create_blob* createBlobArgs,
-    const struct stream_renderer_handle* handle) {
+    const struct stream_renderer_handle* handle,
+    const struct iovec* iovecs, uint32_t numIovs) {
     VirtioGpuResource resource;
 
     std::optional<BlobDescriptorInfo> descriptorInfoOpt;
@@ -390,15 +391,28 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
 
     if (createBlobArgs->blob_id == 0) {
         RingBlobMemory memory;
-        if (ShouldPinRingBlobsForGunyah()) {
+        if (createBlobArgs->blob_mem == STREAM_BLOB_MEM_HOST3D_GUEST &&
+            iovecs != nullptr && numIovs > 0) {
+            // Guest provided DMA coherent backing (e.g. Gunyah SHARE memory).
+            // Use it directly as ring buffer — zero-copy host/guest shared memory.
+            GFXSTREAM_INFO("Ring blob %u: using guest external memory at %p size %lu",
+                           resourceId, iovecs[0].iov_base,
+                           (unsigned long)createBlobArgs->size);
+            memory = RingBlob::CreateWithExternalMemory(
+                resourceId, iovecs[0].iov_base, createBlobArgs->size);
+        } else if (ShouldPinRingBlobsForGunyah()) {
             // Gunyah workaround: reuse a pinned same-size RingBlob (same physical
             // pages) if one is free, else allocate and pin a new one. This keeps the
             // pages stable across unmap/remap, which Gunyah's permanent SHARE requires.
             memory = AcquireGunyahRingBlob(resourceId, createBlobArgs->size, pageSize,
                                            features.ExternalBlob.enabled);
         } else if (features.ExternalBlob.enabled) {
+            GFXSTREAM_INFO("Ring blob %u: using shmem (blob_mem=%u, iovecs=%p, numIovs=%u)",
+                           resourceId, createBlobArgs->blob_mem, iovecs, numIovs);
             memory = RingBlob::CreateWithShmem(resourceId, createBlobArgs->size);
         } else {
+            GFXSTREAM_INFO("Ring blob %u: using host memory (blob_mem=%u, iovecs=%p, numIovs=%u)",
+                           resourceId, createBlobArgs->blob_mem, iovecs, numIovs);
             memory = RingBlob::CreateWithHostMemory(resourceId, createBlobArgs->size, pageSize);
         }
         if (!memory) {

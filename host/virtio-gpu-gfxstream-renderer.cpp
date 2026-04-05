@@ -54,6 +54,39 @@ static VirtioGpuFrontend* sFrontend() {
     return p;
 }
 
+std::optional<LogLevel> GetGfxstreamLogLevelFromEnvironment() {
+    if (gfxstream::base::getEnvironmentVariable("GFXSTREAM_LOG_VERBOSE") == "1") {
+        return LogLevel::kVerbose;
+    }
+
+    const std::string logLevelStr = gfxstream::base::getEnvironmentVariable("GFXSTREAM_LOG_LEVEL");
+    if (logLevelStr.empty()) {
+        return std::nullopt;
+    }
+
+    if (logLevelStr == "error") {
+        return LogLevel::kError;
+    }
+    if (logLevelStr == "warning") {
+        return LogLevel::kWarning;
+    }
+    if (logLevelStr == "info") {
+        return LogLevel::kInfo;
+    }
+    if (logLevelStr == "debug") {
+        return LogLevel::kDebug;
+    }
+    if (logLevelStr == "verbose") {
+        return LogLevel::kVerbose;
+    }
+
+    GFXSTREAM_ERROR(
+        "Invalid setting for environment variable GFXSTREAM_LOG_LEVEL: %s, valid options: "
+        "[error, warning, info, debug, verbose]",
+        logLevelStr.c_str());
+    return std::nullopt;
+}
+
 std::optional<gfxstream::host::FeatureSet>
 ParseGfxstreamFeatures(const int rendererFlags,
                         const std::string& rendererFeatures) {
@@ -488,7 +521,7 @@ VG_EXPORT int stream_renderer_create_blob(uint32_t ctx_id, uint32_t res_handle,
     GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY,
                           "stream_renderer_create_blob()");
 
-    int blobRc = sFrontend()->createBlob(ctx_id, res_handle, create_blob, handle);
+    int blobRc = sFrontend()->createBlob(ctx_id, res_handle, create_blob, handle, iovecs, num_iovs);
     fprintf(stderr,
             "BLOBDIAG: createBlob res=%u ctx=%u blob_id=%llu blob_mem=%u blob_flags=0x%x size=%llu "
             "rc=%d\n",
@@ -829,6 +862,10 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
 
             log_callback(log_user_data, &log_info);
         });
+    }
+
+    if (auto logLevel = GetGfxstreamLogLevelFromEnvironment()) {
+        gfxstream::host::SetGfxstreamLogLevel(*logLevel);
     }
 
     GFXSTREAM_DEBUG("Finished reading parameters");

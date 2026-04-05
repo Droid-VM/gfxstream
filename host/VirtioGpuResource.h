@@ -65,7 +65,8 @@ class VirtioGpuResource {
         const gfxstream::host::FeatureSet& features, uint32_t pageSize, uint32_t contextId,
         uint32_t resourceId, const struct stream_renderer_resource_create_args* createArgs,
         const struct stream_renderer_create_blob* createBlobArgs,
-        const struct stream_renderer_handle* handle);
+        const struct stream_renderer_handle* handle,
+        const struct iovec* iovecs = nullptr, uint32_t numIovs = 0);
 
     int Destroy();
 
