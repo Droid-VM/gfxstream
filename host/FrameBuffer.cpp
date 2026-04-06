@@ -1772,8 +1772,9 @@ HandleType FrameBuffer::Impl::createColorBufferWithResourceHandleLocked(
         ColorBuffer::create(m_emulationGl.get(), m_emulationVk.get(), p_width, p_height,
                             p_internalFormat, p_frameworkFormat, handle, nullptr /*stream*/);
     if (cb.get() == nullptr) {
-        GFXSTREAM_FATAL("Failed to create ColorBuffer:%d format:%d framework-format:%d with:%d height:%d",
+        GFXSTREAM_ERROR("Failed to create ColorBuffer:%d format:%d framework-format:%d with:%d height:%d",
                         handle, p_internalFormat, p_frameworkFormat, p_width, p_height);
+        return 0;
     }
 
     assert(m_colorbuffers.count(handle) == 0);

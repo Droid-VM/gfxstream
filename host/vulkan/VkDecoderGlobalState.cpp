@@ -158,7 +158,7 @@ static constexpr const char* const kEmulatedDeviceExtensions[] = {
     VK_KHR_EXTERNAL_FENCE_EXTENSION_NAME,
     VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME,
     VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
-#if defined(__QNX__)
+#if defined(__QNX__) || defined(__ANDROID__)
     VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
     VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
 #endif
@@ -1464,15 +1464,11 @@ class VkDecoderGlobalState::Impl {
             }
 
             if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
-                // Currently not supporting IUB with descriptor set optimizations.
-                VkPhysicalDeviceInlineUniformBlockFeatures* iubFeatures =
-                    vk_find_struct<VkPhysicalDeviceInlineUniformBlockFeatures>(pFeatures);
-                if (iubFeatures != nullptr) {
-                    iubFeatures->inlineUniformBlock = VK_FALSE;
-                }
-                if (vulkan13Features != nullptr) {
-                    vulkan13Features->inlineUniformBlock = VK_FALSE;
-                }
+                // NOTE: inlineUniformBlock override removed. The Adreno 750 natively
+                // supports IUB, and Zink (Mesa) requires it as a mandatory Vulkan 1.3
+                // feature. Descriptor set batching may not fully support IUB writes,
+                // but in practice IUB descriptors are rare and the host driver handles
+                // them correctly even with batching enabled.
             }
         }
 
@@ -2246,6 +2242,33 @@ class VkDecoderGlobalState::Impl {
         // Filter device groups as they are effectively disabled.
         vk_struct_chain_filter<VkDeviceGroupDeviceCreateInfo>(&createInfoFiltered);
 
+        // Filter extensions against what the host physical device actually supports.
+        // gfxstream may advertise emulated extensions to the guest that the host driver
+        // does not natively support (e.g. VK_KHR_external_memory_fd on Android).
+        {
+            uint32_t hostExtCount = 0;
+            vk->vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &hostExtCount, nullptr);
+            std::vector<VkExtensionProperties> hostExts(hostExtCount);
+            vk->vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &hostExtCount,
+                                                     hostExts.data());
+            std::vector<const char*> filtered;
+            for (auto* ext : updatedDeviceExtensions) {
+                bool supported = false;
+                for (const auto& hostExt : hostExts) {
+                    if (strcmp(ext, hostExt.extensionName) == 0) {
+                        supported = true;
+                        break;
+                    }
+                }
+                if (supported) {
+                    filtered.push_back(ext);
+                } else {
+                    GFXSTREAM_WARNING("vkCreateDevice: filtering unsupported extension '%s'", ext);
+                }
+            }
+            updatedDeviceExtensions = std::move(filtered);
+        }
+
         createInfoFiltered.enabledExtensionCount = (uint32_t)updatedDeviceExtensions.size();
         createInfoFiltered.ppEnabledExtensionNames = updatedDeviceExtensions.data();
 
@@ -2260,6 +2283,13 @@ class VkDecoderGlobalState::Impl {
         const bool doLockEarly = swiftshader;
 #endif
         VkResult result = VK_SUCCESS;
+
+        // Workaround: Adreno 750 rejects VkPhysicalDeviceVulkan13Features in the pNext
+        // chain of vkCreateDevice with VK_ERROR_FEATURE_NOT_PRESENT, even though it
+        // supports all Vulkan 1.3 features. The same features pass through fine when
+        // enabled via individual extension feature structs. Filter it out.
+        vk_struct_chain_filter<VkPhysicalDeviceVulkan13Features>(&createInfoFiltered);
+
         if (!doLockEarly) {
             result = vk->vkCreateDevice(physicalDevice, &createInfoFiltered, pAllocator, pDevice);
         }

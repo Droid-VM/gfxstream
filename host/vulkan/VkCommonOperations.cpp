@@ -3005,6 +3005,43 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
                 memReqs.memoryTypeBits);
     }
 
+    // Fallback: if external memory caused memReqs.size == 0 (e.g. Adreno 750 with AHB export
+    // for unsupported format), retry without external memory.
+    if (memReqs.size == 0 && extImageCiPtr != nullptr) {
+        GFXSTREAM_WARNING(
+            "ColorBuffer %u: memReqs.size == 0 with external memory handle type 0x%x. "
+            "Retrying without external memory.",
+            colorBufferHandle, extImageCiPtr->handleTypes);
+
+        vk->vkDestroyImage(mDevice, infoPtr->image, nullptr);
+        infoPtr->image = VK_NULL_HANDLE;
+
+        imageCi->pNext = nullptr;
+        extImageCiPtr = nullptr;
+
+        VkResult retryRes = vk->vkCreateImage(mDevice, imageCi.get(), nullptr, &infoPtr->image);
+        if (retryRes != VK_SUCCESS) {
+            GFXSTREAM_ERROR("ColorBuffer %u: retry vkCreateImage without external memory failed: %s",
+                            colorBufferHandle, string_VkResult(retryRes));
+            return false;
+        }
+        infoPtr->imageCreateInfoShallow = vk_make_orphan_copy(*imageCi);
+
+        useDedicated = mUseDedicatedAllocations;
+        if (!useDedicated && vk->vkGetImageMemoryRequirements2KHR) {
+            VkMemoryDedicatedRequirements dr{
+                VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS, nullptr};
+            VkMemoryRequirements2 r2{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
+            VkImageMemoryRequirementsInfo2 ii{VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
+                                              nullptr, infoPtr->image};
+            vk->vkGetImageMemoryRequirements2KHR(mDevice, &ii, &r2);
+            useDedicated = dr.requiresDedicatedAllocation;
+            memReqs = r2.memoryRequirements;
+        } else {
+            vk->vkGetImageMemoryRequirements(mDevice, infoPtr->image, &memReqs);
+        }
+    }
+
     if (extMemHandleInfo) {
         infoPtr->memory.handleInfo = extMemHandleInfo;
         infoPtr->memory.dedicatedAllocation = true;
@@ -3070,6 +3107,32 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         }
 
         infoPtr->externalMemoryCompatible = true;
+    } else if (extImageCiPtr == nullptr) {
+        // External memory was disabled (fallback path). Allocate plain device memory.
+        VkMemoryAllocateInfo allocInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .allocationSize = infoPtr->memory.size,
+            .memoryTypeIndex = infoPtr->memory.typeIndex,
+        };
+        VkMemoryDedicatedAllocateInfo dedicatedAllocInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .image = VK_NULL_HANDLE,
+            .buffer = VK_NULL_HANDLE,
+        };
+        if (useDedicated) {
+            dedicatedAllocInfo.image = infoPtr->image;
+            allocInfo.pNext = &dedicatedAllocInfo;
+        }
+        VkResult allocResult = vk->vkAllocateMemory(mDevice, &allocInfo, nullptr, &infoPtr->memory.memory);
+        if (allocResult != VK_SUCCESS) {
+            GFXSTREAM_ERROR(
+                "Failed to allocate non-external memory for ColorBuffer %u: %s",
+                colorBufferHandle, string_VkResult(allocResult));
+            return false;
+        }
+        infoPtr->externalMemoryCompatible = false;
     } else {
         // Tell allocExternalMemory whether this image was created as external; if not, it must
         // allocate plain (non-exportable) memory so the bind to the non-external image succeeds.
