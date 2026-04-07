@@ -1335,14 +1335,28 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     }
 
 #if GFXSTREAM_ENABLE_HOST_GLES
-    // Do not initialize GL emulation if the guest is using ANGLE.
     const bool needEmulationGl = !impl->m_features.GuestVulkanOnly.enabled;
-    if (needEmulationGl) {
-        impl->m_emulationGl =
-            EmulationGl::create(width, height, impl->m_features, useSubWindow);
-        if (!impl->m_emulationGl) {
-            GFXSTREAM_ERROR("Failed to initialize GL emulation.");
+#ifdef CONFIG_AEMU
+    // Always initialize EGL/GLES dispatchers for the Android Emulator, as they
+    // are needed for offscreen rendering on qemu-level.
+    const bool needGlDispatchers = true;
+#else
+    const bool needGlDispatchers = needEmulationGl;
+#endif
+    if (needGlDispatchers) {
+        if (!EmulationGl::initDispatchers(impl->m_features.EglOnEgl.enabled)) {
+            GFXSTREAM_ERROR("Failed to initialize GL dispatchers.");
             return nullptr;
+        }
+
+        // Do not initialize GL emulation if the guest is using ANGLE.
+        if (needEmulationGl) {
+            impl->m_emulationGl =
+                EmulationGl::create(width, height, impl->m_features, useSubWindow);
+            if (!impl->m_emulationGl) {
+                GFXSTREAM_ERROR("Failed to initialize GL emulation.");
+                return nullptr;
+            }
         }
     }
 #endif
@@ -4960,19 +4974,11 @@ void FrameBuffer::Impl::asyncWaitForGpuWithCb(uint64_t eglsync, FenceCompletionC
 }
 
 const gl::GLESv2Dispatch* FrameBuffer::Impl::getGles2Dispatch() {
-    if (!m_emulationGl) {
-        // This is ok, returned value should be checked
-        return nullptr;
-    }
-    return m_emulationGl->getGles2Dispatch();
+    return EmulationGl::getGles2Dispatch();
 }
 
 const gl::EGLDispatch* FrameBuffer::Impl::getEglDispatch() {
-    if (!m_emulationGl) {
-        // This is ok, returned value should be checked
-        return nullptr;
-    }
-    return m_emulationGl->getEglDispatch();
+    return EmulationGl::getEglDispatch();
 }
 
 #endif  // GFXSTREAM_ENABLE_HOST_GLES
