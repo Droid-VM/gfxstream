@@ -5508,6 +5508,35 @@ class VkDecoderGlobalState::Impl {
 
         updateImageMemorySizeLocked(device, pInfo->image, &pMemoryRequirements->memoryRequirements);
 
+        // AHB dedicated export returns size=0 per Vulkan spec (VUID-01874).
+        // Guest Zink doesn't understand AHB semantics and will fail on size=0.
+        // Re-query without external memory to get the real size for the guest,
+        // while the host image remains AHB-backed for blob export.
+        if (pMemoryRequirements->memoryRequirements.size == 0) {
+            auto* imageInfo = gfxstream::base::find(mImageInfo, pInfo->image);
+            if (imageInfo) {
+                VkImageCreateInfo convergeCi = imageInfo->imageCreateInfoShallow;
+                convergeCi.pNext = nullptr;  // strip external memory info
+                VkImage convergenceImage;
+                if (vk->vkCreateImage(device, &convergeCi, nullptr, &convergenceImage) ==
+                    VK_SUCCESS) {
+                    VkMemoryRequirements convergenceReqs;
+                    vk->vkGetImageMemoryRequirements(
+                        device, convergenceImage, &convergenceReqs);
+                    uint32_t originalTypeBits =
+                        pMemoryRequirements->memoryRequirements.memoryTypeBits;
+                    pMemoryRequirements->memoryRequirements.size = convergenceReqs.size;
+                    pMemoryRequirements->memoryRequirements.alignment =
+                        convergenceReqs.alignment;
+                    pMemoryRequirements->memoryRequirements.memoryTypeBits =
+                        (originalTypeBits != 0) ? originalTypeBits
+                                                : convergenceReqs.memoryTypeBits;
+                    vk->vkDestroyImage(device, convergenceImage, nullptr);
+                }
+            }
+        }
+        // Last-resort fallback if the convergence query could not produce a size:
+        // estimate a linear layout so the guest never sees size=0.
         if (pMemoryRequirements->memoryRequirements.size == 0) {
             uint64_t fallback = emulatedLinearImageSizeLocked(pInfo->image);
             fprintf(stderr,
@@ -6465,6 +6494,17 @@ class VkDecoderGlobalState::Impl {
             virtioGpuContextId = *virtioGpuContextIdOpt;
         }
 
+        // AHB dedicated export: per VUID-VkMemoryAllocateInfo-pNext-01874,
+        // allocationSize must be 0 when exporting AHB with a dedicated image.
+        // Detect by probing host image memory requirements (AHB returns size=0).
+        bool needAhbDedicatedExport = false;
+        if (shouldUseDedicatedAllocInfo && localDedicatedAllocInfo.image != VK_NULL_HANDLE &&
+            !importCbInfoPtr && !importBufferInfoPtr) {
+            VkMemoryRequirements probeReqs;
+            vk->vkGetImageMemoryRequirements(device, localDedicatedAllocInfo.image, &probeReqs);
+            needAhbDedicatedExport = (probeReqs.size == 0);
+        }
+
         if (shouldUseDedicatedAllocInfo) {
             vk_append_struct(&structChainIter, &localDedicatedAllocInfo);
         }
@@ -6477,6 +6517,17 @@ class VkDecoderGlobalState::Impl {
                     (void*)localDedicatedAllocInfo.image,
                     (unsigned long long)localAllocInfo.allocationSize,
                     localAllocInfo.memoryTypeIndex);
+        }
+
+        VkExportMemoryAllocateInfo ahbExportAllocInfo = {
+            .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
+        };
+        VkDeviceSize guestRequestedSize = localAllocInfo.allocationSize;
+        if (needAhbDedicatedExport) {
+            localAllocInfo.allocationSize = 0;
+            vk_append_struct(&structChainIter, &ahbExportAllocInfo);
         }
 
         // Host visible memory often needs special handling by gfxstream and the virtual machine
@@ -6740,7 +6791,8 @@ class VkDecoderGlobalState::Impl {
         VALIDATE_NEW_HANDLE_INFO_ENTRY(mMemoryInfo, *pMemory);
         mMemoryInfo[*pMemory] = MemoryInfo();
         auto& memoryInfo = mMemoryInfo[*pMemory];
-        memoryInfo.size = localAllocInfo.allocationSize;
+        memoryInfo.size = needAhbDedicatedExport ? guestRequestedSize
+                                                  : localAllocInfo.allocationSize;
         memoryInfo.device = device;
         memoryInfo.memoryIndex = localAllocInfo.memoryTypeIndex;
 
