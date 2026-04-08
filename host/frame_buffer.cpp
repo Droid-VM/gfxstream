@@ -1296,21 +1296,41 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
         impl->m_emulationVk = vk::VkEmulation::create(vkDispatch, callbacks, impl->m_features);
         if (!impl->m_emulationVk) {
             GFXSTREAM_ERROR(
-                "Failed to initialize global Vulkan emulation requested. Vulkan feature should be "
-                "disabled.");
+                "Failed to initialize global Vulkan emulation requested. Try updating your GPU "
+                "drivers, using software rendering or disabling Vulkan feature support.");
+
+#ifdef CONFIG_AEMU
+            // This happens frequently enough to try to recover by disabling Vulkan support
+            if (impl->m_features.VulkanNativeSwapchain.enabled ||
+                impl->m_features.GuestVulkanOnly.enabled) {
+                // Do not try to recover if Vulkan is mandatory for other features
+                GFXSTREAM_ERROR(
+                    "Requested Vulkan related features, but Vulkan could not be initialized!");
+                return nullptr;
+            } else {
+                GFXSTREAM_WARNING(
+                    "Emulator will try disabling Vulkan support, this is an unsupported path.");
+                impl->m_vulkanEnabled = false;
+                impl->m_vkInstance = VK_NULL_HANDLE;
+                impl->m_features.Vulkan.enabled = false;
+            }
+#else
             return nullptr;
+#endif
         }
+        else
+        {
+            impl->m_vulkanEnabled = true;
+            if (impl->m_features.VulkanNativeSwapchain.enabled) {
+                impl->m_vkInstance = impl->m_emulationVk->getInstance();
+            }
 
-        impl->m_vulkanEnabled = true;
-        if (impl->m_features.VulkanNativeSwapchain.enabled) {
-            impl->m_vkInstance = impl->m_emulationVk->getInstance();
-        }
-
-        auto vulkanUuidOpt = impl->m_emulationVk->getDeviceUuid();
-        if (vulkanUuidOpt) {
-            impl->m_vulkanUUID = *vulkanUuidOpt;
-        } else {
-            GFXSTREAM_WARNING("Doesn't support id properties, no vulkan device UUID");
+            auto vulkanUuidOpt = impl->m_emulationVk->getDeviceUuid();
+            if (vulkanUuidOpt) {
+                impl->m_vulkanUUID = *vulkanUuidOpt;
+            } else {
+                GFXSTREAM_WARNING("Doesn't support id properties, no vulkan device UUID");
+            }
         }
     }
 
@@ -1327,8 +1347,8 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     }
 #endif
 
-    impl->m_useVulkanComposition =
-        impl->m_features.GuestVulkanOnly.enabled || impl->m_features.VulkanNativeSwapchain.enabled;
+    impl->m_useVulkanComposition = impl->m_emulationVk &&
+        (impl->m_features.GuestVulkanOnly.enabled || impl->m_features.VulkanNativeSwapchain.enabled);
 
     uint32_t maxApiVersion = VK_API_VERSION_1_3;
     if (impl->m_emulationVk) {
@@ -1501,7 +1521,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     }
 
     // VkDecoderGlobalState must be initialized after m_emulationVk initialization is complete
-    if (impl->m_features.Vulkan.enabled) {
+    if (impl->m_vulkanEnabled) {
         vk::VkDecoderGlobalState::initialize(impl->m_emulationVk.get());
     }
 
