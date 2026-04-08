@@ -2285,10 +2285,21 @@ class VkDecoderGlobalState::Impl {
         VkResult result = VK_SUCCESS;
 
         // Workaround: Adreno 750 rejects VkPhysicalDeviceVulkan13Features in the pNext
-        // chain of vkCreateDevice with VK_ERROR_FEATURE_NOT_PRESENT, even though it
-        // supports all Vulkan 1.3 features. The same features pass through fine when
-        // enabled via individual extension feature structs. Filter it out.
-        vk_struct_chain_filter<VkPhysicalDeviceVulkan13Features>(&createInfoFiltered);
+        // chain of vkCreateDevice with VK_ERROR_FEATURE_NOT_PRESENT when any field is
+        // VK_TRUE. Zero out all fields so Adreno accepts it, while keeping the struct
+        // present so the driver knows we're creating a Vulkan 1.3 device. The actual
+        // 1.3 features are enabled through their individual extension feature structs
+        // (e.g. VkPhysicalDeviceSynchronization2Features) which Adreno handles correctly.
+        {
+            auto* vk13 = vk_find_struct<VkPhysicalDeviceVulkan13Features>(&createInfoFiltered);
+            if (vk13) {
+                VkStructureType savedSType = vk13->sType;
+                void* savedPNext = vk13->pNext;
+                memset(vk13, 0, sizeof(*vk13));
+                vk13->sType = savedSType;
+                vk13->pNext = savedPNext;
+            }
+        }
 
         if (!doLockEarly) {
             result = vk->vkCreateDevice(physicalDevice, &createInfoFiltered, pAllocator, pDevice);
