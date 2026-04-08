@@ -3005,40 +3005,36 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
                 memReqs.memoryTypeBits);
     }
 
-    // Fallback: if external memory caused memReqs.size == 0 (e.g. Adreno 750 with AHB export
-    // for unsupported format), retry without external memory.
-    if (memReqs.size == 0 && extImageCiPtr != nullptr) {
-        GFXSTREAM_WARNING(
-            "ColorBuffer %u: memReqs.size == 0 with external memory handle type 0x%x. "
-            "Retrying without external memory.",
-            colorBufferHandle, extImageCiPtr->handleTypes);
+    // Per Vulkan spec VUID-VkMemoryAllocateInfo-pNext-01874:
+    // For AHB export with dedicated image, memReqs.size == 0 is expected.
+    // The driver determines the actual size internally during vkAllocateMemory.
+    bool ahbDedicatedExport = false;
+    if (memReqs.size == 0 && extImageCiPtr != nullptr &&
+        (extImageCiPtr->handleTypes &
+         VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID)) {
+        ahbDedicatedExport = true;
+        useDedicated = true;
 
-        vk->vkDestroyImage(mDevice, infoPtr->image, nullptr);
-        infoPtr->image = VK_NULL_HANDLE;
-
-        imageCi->pNext = nullptr;
-        extImageCiPtr = nullptr;
-
-        VkResult retryRes = vk->vkCreateImage(mDevice, imageCi.get(), nullptr, &infoPtr->image);
-        if (retryRes != VK_SUCCESS) {
-            GFXSTREAM_ERROR("ColorBuffer %u: retry vkCreateImage without external memory failed: %s",
-                            colorBufferHandle, string_VkResult(retryRes));
-            return false;
+        // AHB does not support B8G8R8A8 formats. Substitute with the RGBA equivalent
+        // (same memory layout, different channel interpretation). The compositor handles
+        // the swizzle via VkImageView components.
+        VkFormat ahbFormat = imageCi->format;
+        switch (imageCi->format) {
+            case VK_FORMAT_B8G8R8A8_UNORM: ahbFormat = VK_FORMAT_R8G8B8A8_UNORM; break;
+            case VK_FORMAT_B8G8R8A8_SRGB:  ahbFormat = VK_FORMAT_R8G8B8A8_SRGB;  break;
+            default: break;
         }
-        infoPtr->imageCreateInfoShallow = vk_make_orphan_copy(*imageCi);
-
-        useDedicated = mUseDedicatedAllocations;
-        if (!useDedicated && vk->vkGetImageMemoryRequirements2KHR) {
-            VkMemoryDedicatedRequirements dr{
-                VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS, nullptr};
-            VkMemoryRequirements2 r2{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
-            VkImageMemoryRequirementsInfo2 ii{VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
-                                              nullptr, infoPtr->image};
-            vk->vkGetImageMemoryRequirements2KHR(mDevice, &ii, &r2);
-            useDedicated = dr.requiresDedicatedAllocation;
-            memReqs = r2.memoryRequirements;
-        } else {
-            vk->vkGetImageMemoryRequirements(mDevice, infoPtr->image, &memReqs);
+        if (ahbFormat != imageCi->format) {
+            vk->vkDestroyImage(mDevice, infoPtr->image, nullptr);
+            imageCi->format = ahbFormat;
+            VkResult ahbCreateRes = vk->vkCreateImage(mDevice, imageCi.get(), nullptr, &infoPtr->image);
+            if (ahbCreateRes != VK_SUCCESS) {
+                GFXSTREAM_ERROR("ColorBuffer %u: AHB format substitution (%d→%d) failed: %s",
+                                colorBufferHandle, infoPtr->imageCreateInfoShallow.format,
+                                ahbFormat, string_VkResult(ahbCreateRes));
+                return false;
+            }
+            infoPtr->imageCreateInfoShallow = vk_make_orphan_copy(*imageCi);
         }
     }
 
@@ -3070,9 +3066,15 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
 
     infoPtr->memory.size = memReqs.size;
 
-    // Determine memory type.
-    infoPtr->memory.typeIndex =
-        getValidMemoryTypeIndex(memReqs.memoryTypeBits, infoPtr->memoryProperty);
+    // Determine memory type. For AHB dedicated export, memoryTypeBits may be 0
+    // since the driver determines the memory type internally (VUID-01874).
+    // Use DEVICE_LOCAL type 0 as fallback.
+    if (ahbDedicatedExport && memReqs.memoryTypeBits == 0) {
+        infoPtr->memory.typeIndex = 0;
+    } else {
+        infoPtr->memory.typeIndex =
+            getValidMemoryTypeIndex(memReqs.memoryTypeBits, infoPtr->memoryProperty);
+    }
 
     const VkFormat imageVkFormat = infoPtr->imageCreateInfoShallow.format;
     GFXSTREAM_DEBUG(
