@@ -3925,7 +3925,8 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                     ((VkImageSubresource*)pSubresource)->aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                 }
                 if (CC_LIKELY(vk)) {
-                    vk->vkGetImageSubresourceLayout(unboxed_device, image, pSubresource, pLayout);
+                    m_state->on_vkGetImageSubresourceLayout(&m_pool, snapshotApiCallHandle,
+                                                            device, image, pSubresource, pLayout);
                 }
                 // gfxstream-zerocopy fix: the host Qualcomm driver refuses to report the layout of
                 // an external LINEAR image (returns rowPitch=0). For the emulated DRM-modifier WSI

@@ -5483,6 +5483,27 @@ class VkDecoderGlobalState::Impl {
         physicalDeviceMemHelper->transformToGuestMemoryRequirements(pMemoryRequirements);
     }
 
+    void on_vkGetImageSubresourceLayout(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                                        VkDevice boxed_device, VkImage image,
+                                        const VkImageSubresource* pSubresource,
+                                        VkSubresourceLayout* pLayout) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto vk = dispatch_VkDevice(boxed_device);
+        vk->vkGetImageSubresourceLayout(device, image, pSubresource, pLayout);
+
+        if (pLayout && pLayout->rowPitch == 0) {
+            // Adreno returns rowPitch=0 for AHB-backed images before memory is bound.
+            // Compute a fallback stride from the image format and width.
+            // All scanout formats (RGBA8, BGRA8, etc.) are 4 bytes per pixel.
+            std::lock_guard<std::mutex> lock(mMutex);
+            auto* imageInfo = gfxstream::base::find(mImageInfo, image);
+            if (imageInfo) {
+                uint32_t width = imageInfo->imageCreateInfoShallow.extent.width;
+                pLayout->rowPitch = width * 4;
+            }
+        }
+    }
+
     void on_vkGetImageMemoryRequirements2(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
                                           VkDevice boxed_device,
                                           const VkImageMemoryRequirementsInfo2* pInfo,
@@ -11571,6 +11592,12 @@ void VkDecoderGlobalState::on_vkGetImageMemoryRequirements2KHR(
     gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle, VkDevice device,
     const VkImageMemoryRequirementsInfo2* pInfo, VkMemoryRequirements2* pMemoryRequirements) {
     mImpl->on_vkGetImageMemoryRequirements2(pool, apiCallHandle, device, pInfo, pMemoryRequirements);
+}
+
+void VkDecoderGlobalState::on_vkGetImageSubresourceLayout(
+    gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle, VkDevice device,
+    VkImage image, const VkImageSubresource* pSubresource, VkSubresourceLayout* pLayout) {
+    mImpl->on_vkGetImageSubresourceLayout(pool, apiCallHandle, device, image, pSubresource, pLayout);
 }
 
 void VkDecoderGlobalState::on_vkGetBufferMemoryRequirements(
