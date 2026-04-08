@@ -701,6 +701,18 @@ int VirtioGpuResource::GetCaching(uint32_t* outCaching) const {
 // copy into display buffers.
 int VirtioGpuResource::TransferRead(uint64_t offset, stream_renderer_box* box,
                                     std::optional<std::vector<struct iovec>> iovs) {
+    // Blob-backed ColorBuffer/Buffer resources may not have mLinear allocated
+    // (AttachIov is never called for blob resources). Lazy-allocate here.
+    if (mLinear.empty() && mCreateArgs) {
+        auto formatInfo = VirglFormatInfo(mCreateArgs->format);
+        if (formatInfo) {
+            size_t linearSize = (size_t)mCreateArgs->width * mCreateArgs->height * formatInfo->bpp;
+            if (linearSize > 0) {
+                mLinear.resize(linearSize, 0);
+            }
+        }
+    }
+
     // First, copy from the underlying backend resource to this resource's linear buffer:
     int ret = 0;
     if (mResourceType == VirtioGpuResourceType::BLOB) {
@@ -740,6 +752,17 @@ int VirtioGpuResource::TransferRead(uint64_t offset, stream_renderer_box* box,
 // Corresponds to Virtio GPU "TransferToHost" commands.
 int VirtioGpuResource::TransferWrite(uint64_t offset, stream_renderer_box* box,
                                      std::optional<std::vector<struct iovec>> iovs) {
+    // Blob-backed ColorBuffer/Buffer resources may not have mLinear allocated.
+    if (mLinear.empty() && mCreateArgs) {
+        auto formatInfo = VirglFormatInfo(mCreateArgs->format);
+        if (formatInfo) {
+            size_t linearSize = (size_t)mCreateArgs->width * mCreateArgs->height * formatInfo->bpp;
+            if (linearSize > 0) {
+                mLinear.resize(linearSize, 0);
+            }
+        }
+    }
+
     // First, copy from the desired iov to this resource's linear buffer:
     int ret = 0;
     if (iovs) {
