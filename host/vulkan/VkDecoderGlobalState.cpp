@@ -2642,11 +2642,46 @@ class VkDecoderGlobalState::Impl {
 
         const VkFormat format = pInfo->pCreateInfo->format;
         bool needDecompression = gfxstream::vk::isEtc2(format) || gfxstream::vk::isAstc(format);
-        if (!needDecompression) {
-            // No modifications needed
-            return;
+
+        if (needDecompression) {
+            std::lock_guard<std::mutex> lock(mMutex);
+
+            auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+            if (!deviceInfo) {
+                GFXSTREAM_ERROR("%s: Failed to find device info for device: %p", __func__, device);
+                return;
+            }
+
+            needDecompression = deviceInfo->needEmulatedDecompression(format);
+            if (needDecompression) {
+                // Create CompressedImageInfo on the fly to get requirements
+                CompressedImageInfo cmpInfo =
+                    CompressedImageInfo(device, *pInfo->pCreateInfo,
+                                        deviceInfo->decompPipelines.get());
+                {
+                    VkImageCreateInfo decompInfo =
+                        cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo);
+                    VkImage tempImage;
+                    VkResult createRes =
+                        vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
+                    if (createRes != VK_SUCCESS) {
+                        GFXSTREAM_ERROR("%s: vkCreateImage failed for decompression: %d",
+                                        __func__, createRes);
+                        return;
+                    }
+
+                    cmpInfo.setOutputImage(tempImage);
+                    cmpInfo.createCompressedMipmapImages(vk, decompInfo);
+                }
+
+                pMemoryRequirements->memoryRequirements = cmpInfo.getMemoryRequirements();
+                cmpInfo.destroy(vk);
+            }
         }
 
+        // Always transform memoryTypeBits from host to guest indices.
+        // (Previously this was only done for compressed formats, causing
+        // guest to receive unmapped host memory type bits.)
         std::lock_guard<std::mutex> lock(mMutex);
 
         auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
@@ -2654,31 +2689,6 @@ class VkDecoderGlobalState::Impl {
             GFXSTREAM_ERROR("%s: Failed to find device info for device: %p", __func__, device);
             return;
         }
-
-        needDecompression = deviceInfo->needEmulatedDecompression(format);
-        if (!needDecompression) {
-            // No modifications needed
-            return;
-        }
-
-        // Create CompressedImageInfo on the fly to get requirements to use when creating the image
-        CompressedImageInfo cmpInfo =
-            CompressedImageInfo(device, *pInfo->pCreateInfo, deviceInfo->decompPipelines.get());
-        {
-            VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo);
-            VkImage tempImage;
-            VkResult createRes = vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
-            if (createRes != VK_SUCCESS) {
-                GFXSTREAM_ERROR("%s: Failed to find device info for device: %p", __func__, device);
-                return;
-            }
-
-            cmpInfo.setOutputImage(tempImage);
-            cmpInfo.createCompressedMipmapImages(vk, decompInfo);
-        }
-
-        pMemoryRequirements->memoryRequirements = cmpInfo.getMemoryRequirements();
-        cmpInfo.destroy(vk);
 
         auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
         if (!physicalDeviceInfo) {
