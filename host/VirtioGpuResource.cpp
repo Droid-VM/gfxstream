@@ -28,6 +28,10 @@
 #include <sys/mman.h>
 #endif
 
+#ifdef __ANDROID__
+#include <vndk/hardware_buffer.h>
+#endif
+
 #include "FrameBuffer.h"
 #include "VirtioGpuFormatUtils.h"
 
@@ -467,11 +471,40 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
         auto memoryMappingOpt =
             ExternalObjectManager::get()->removeMapping(contextId, createBlobArgs->blob_id);
         if (!memoryMappingOpt) {
-            fprintf(stderr, "BLOBDIAG2: res=%u FAIL no-external-blob-mapping\n", resourceId);
+            fprintf(stderr, "BLOBDIAG2: res=%u no-premapped-external-blob-mapping\n", resourceId);
+#if defined(__ANDROID__)
+            // No pre-registered mapping (e.g. AHB device-local memory).
+            // Try to get the ColorBuffer descriptor and lock the AHB for CPU access.
+            if (!descriptorInfoOpt) {
+                descriptorInfoOpt = ExternalObjectManager::get()->removeBlobDescriptorInfo(
+                    contextId, createBlobArgs->blob_id);
+            }
+            if (descriptorInfoOpt &&
+                descriptorInfoOpt->descriptorInfo.streamHandleType == STREAM_HANDLE_TYPE_MEM_AHB) {
+                auto* ahb = reinterpret_cast<AHardwareBuffer*>(
+                    descriptorInfoOpt->descriptorInfo.handle);
+                void* lockedPtr = nullptr;
+                if (ahb &&
+                    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
+                                              AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
+                                         -1, nullptr, &lockedPtr) == 0 &&
+                    lockedPtr != nullptr) {
+                    resource.mBlobMemory.emplace(HostMemInfo{lockedPtr, MAP_CACHE_CACHED});
+                } else {
+                    GFXSTREAM_ERROR("Failed to create blob: AHardwareBuffer_lock failed.");
+                    return std::nullopt;
+                }
+            } else {
+                GFXSTREAM_ERROR("Failed to create blob: no external blob mapping.");
+                return std::nullopt;
+            }
+#else
             GFXSTREAM_ERROR("Failed to create blob: no external blob mapping.");
             return std::nullopt;
+#endif
+        } else {
+            resource.mBlobMemory.emplace(std::move(*memoryMappingOpt));
         }
-        resource.mBlobMemory.emplace(std::move(*memoryMappingOpt));
     }
 
     fprintf(stderr, "BLOBDIAG2: res=%u Create OK type=%d hasBlobMemory=%d\n", resourceId,

@@ -3324,8 +3324,29 @@ std::optional<VkEmulation::VkColorBufferMemoryExport> VkEmulation::exportColorBu
 
     auto handleInfo = info->memory.handleInfo;
     if (!handleInfo) {
-        GFXSTREAM_ERROR("Could not export ColorBuffer memory, no external handle info available");
-        return std::nullopt;
+#if defined(__ANDROID__)
+        // AHB-exported memory: export handle on demand.
+        if (info->externalMemoryCompatible && info->memory.memory != VK_NULL_HANDLE &&
+            mDeviceInfo.getMemoryHandleFunc) {
+            VkMemoryGetAndroidHardwareBufferInfoANDROID getAhbInfo = {
+                .sType = VK_STRUCTURE_TYPE_MEMORY_GET_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+                .pNext = nullptr,
+                .memory = info->memory.memory,
+            };
+            AHardwareBuffer* ahb = nullptr;
+            if (mDeviceInfo.getMemoryHandleFunc(mDevice, &getAhbInfo, &ahb) == VK_SUCCESS && ahb) {
+                info->memory.handleInfo = ExternalHandleInfo{
+                    .handle = reinterpret_cast<ExternalHandleType>(ahb),
+                    .streamHandleType = STREAM_HANDLE_TYPE_MEM_AHB,
+                };
+                handleInfo = info->memory.handleInfo;
+            }
+        }
+#endif
+        if (!handleInfo) {
+            GFXSTREAM_ERROR("Could not export ColorBuffer memory, no external handle info available");
+            return std::nullopt;
+        }
     }
 
     auto dupHandle = dupExternalMemory(handleInfo);
