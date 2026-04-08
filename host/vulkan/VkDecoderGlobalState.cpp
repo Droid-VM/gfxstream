@@ -3191,6 +3191,21 @@ class VkDecoderGlobalState::Impl {
                 *pImage = anbInfo->getImage();
             }
         } else {
+            // AHB doesn't have a BGRA8 format entry (only AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM).
+            // Adreno 750 accepts vkCreateImage with BGRA8+AHB but fails vkAllocateMemory for it.
+            // BGRA8 and RGBA8 have identical memory layout (4 Bpp), so swap the format for the
+            // host image. Channel reinterpretation happens at the image view level.
+            const auto* extMemInfo =
+                vk_find_struct<VkExternalMemoryImageCreateInfo>(pCreateInfo);
+            VkImageCreateInfo bgraFixedCi;
+            if (extMemInfo &&
+                (extMemInfo->handleTypes &
+                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) &&
+                pCreateInfo->format == VK_FORMAT_B8G8R8A8_UNORM) {
+                bgraFixedCi = *pCreateInfo;
+                bgraFixedCi.format = VK_FORMAT_R8G8B8A8_UNORM;
+                pCreateInfo = &bgraFixedCi;
+            }
             createRes = vk->vkCreateImage(device, pCreateInfo, pAllocator, pImage);
         }
 
