@@ -8884,6 +8884,7 @@ class VkDecoderGlobalState::Impl {
             return res;
         }
 
+        std::lock_guard<std::mutex> lock(mMutex);
         VALIDATE_NEW_HANDLE_INFO_ENTRY(mSamplerYcbcrConversionInfo, *pYcbcrConversion);
         auto& ycbcrConversionInfo = mSamplerYcbcrConversionInfo[*pYcbcrConversion];
         ycbcrConversionInfo.device = device;
