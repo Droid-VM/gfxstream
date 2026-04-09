@@ -1635,6 +1635,7 @@ FrameBuffer::Impl::~Impl() {
         m_emulationGl.reset();
     }
     if (m_emulationVk) {
+        vk::VkDecoderGlobalState::reset();
         m_emulationVk.reset();
     }
 }
