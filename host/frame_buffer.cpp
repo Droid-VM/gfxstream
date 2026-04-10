@@ -156,7 +156,7 @@ std::optional<GfxstreamFormat> GetGfxstreamFormat(
             return GfxstreamFormat::YV12;
         }
         case FRAMEWORK_FORMAT_YUV_420_888: {
-            if (features.Yuv420888ToNv21.enabled) {
+            if (features.Yuv420888ToNv21.enabled()) {
                 return GfxstreamFormat::NV21;
             } else {
                 return GfxstreamFormat::YV21;
@@ -292,7 +292,7 @@ std::optional<GfxstreamFormat> GetGfxstreamFormat(
         case FRAMEWORK_FORMAT_P010:
             return GfxstreamFormat::P010;
         case FRAMEWORK_FORMAT_YUV_420_888: {
-            if (features.Yuv420888ToNv21.enabled) {
+            if (features.Yuv420888ToNv21.enabled()) {
                 return GfxstreamFormat::NV21;
             } else {
                 return GfxstreamFormat::YV21;
@@ -1249,7 +1249,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     // preventing new contexts from being created that share
     // against those contexts.
     vk::VulkanDispatch* vkDispatch = nullptr;
-    if (impl->m_features.Vulkan.enabled) {
+    if (impl->m_features.Vulkan.enabled()) {
         vkDispatch = vk::vkDispatch(false /* not for testing */);
 
         gfxstream::host::BackendCallbacks callbacks{
@@ -1301,8 +1301,8 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
 
 #ifdef CONFIG_AEMU
             // This happens frequently enough to try to recover by disabling Vulkan support
-            if (impl->m_features.VulkanNativeSwapchain.enabled ||
-                impl->m_features.GuestVulkanOnly.enabled) {
+            if (impl->m_features.VulkanNativeSwapchain.enabled() ||
+                impl->m_features.GuestVulkanOnly.enabled()) {
                 // Do not try to recover if Vulkan is mandatory for other features
                 GFXSTREAM_ERROR(
                     "Requested Vulkan related features, but Vulkan could not be initialized!");
@@ -1312,7 +1312,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
                     "Emulator will try disabling Vulkan support, this is an unsupported path.");
                 impl->m_vulkanEnabled = false;
                 impl->m_vkInstance = VK_NULL_HANDLE;
-                impl->m_features.Vulkan.enabled = false;
+                impl->m_features.Vulkan.setEnabled(false);
             }
 #else
             return nullptr;
@@ -1321,7 +1321,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
         else
         {
             impl->m_vulkanEnabled = true;
-            if (impl->m_features.VulkanNativeSwapchain.enabled) {
+            if (impl->m_features.VulkanNativeSwapchain.enabled()) {
                 impl->m_vkInstance = impl->m_emulationVk->getInstance();
             }
 
@@ -1335,7 +1335,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     }
 
 #if GFXSTREAM_ENABLE_HOST_GLES
-    const bool needEmulationGl = !impl->m_features.GuestVulkanOnly.enabled;
+    const bool needEmulationGl = !impl->m_features.GuestVulkanOnly.enabled();
 #ifdef CONFIG_AEMU
     // Always initialize EGL/GLES dispatchers for the Android Emulator, as they
     // are needed for offscreen rendering on qemu-level.
@@ -1344,7 +1344,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     const bool needGlDispatchers = needEmulationGl;
 #endif
     if (needGlDispatchers) {
-        if (!EmulationGl::initDispatchers(impl->m_features.EglOnEgl.enabled)) {
+        if (!EmulationGl::initDispatchers(impl->m_features.EglOnEgl.enabled())) {
             GFXSTREAM_ERROR("Failed to initialize GL dispatchers.");
             return nullptr;
         }
@@ -1362,7 +1362,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
 #endif
 
     impl->m_useVulkanComposition = impl->m_emulationVk &&
-        (impl->m_features.GuestVulkanOnly.enabled || impl->m_features.VulkanNativeSwapchain.enabled);
+        (impl->m_features.GuestVulkanOnly.enabled() || impl->m_features.VulkanNativeSwapchain.enabled());
 
     uint32_t maxApiVersion = VK_API_VERSION_1_3;
     if (impl->m_emulationVk) {
@@ -1397,12 +1397,12 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
                 "ANDROID_EMU_VK_DISABLE_USE_CREATE_RESOURCES_WITH_REQUIREMENTS")
                 .empty(),
         .useVulkanComposition = impl->m_useVulkanComposition,
-        .useVulkanNativeSwapchain = impl->m_features.VulkanNativeSwapchain.enabled,
+        .useVulkanNativeSwapchain = impl->m_features.VulkanNativeSwapchain.enabled(),
         .guestRenderDoc = std::move(renderDocMultipleVkInstances),
         .astcLdrEmulationMode = AstcEmulationMode::Gpu,
         .enableEtc2Emulation = true,
         .enableYcbcrEmulation = false,
-        .guestVulkanOnly = impl->m_features.GuestVulkanOnly.enabled,
+        .guestVulkanOnly = impl->m_features.GuestVulkanOnly.enabled(),
         .useDedicatedAllocations = false,  // Set later.
         .guestVulkanMaxApiVersion = maxApiVersion,
     };
@@ -1412,8 +1412,8 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     // current-context when asked for them.
     //
     bool useVulkanGraphicsDiagInfo = impl->m_emulationVk &&
-                                     impl->m_features.VulkanNativeSwapchain.enabled &&
-                                     impl->m_features.GuestVulkanOnly.enabled;
+                                     impl->m_features.VulkanNativeSwapchain.enabled() &&
+                                     impl->m_features.GuestVulkanOnly.enabled();
 
     if (useVulkanGraphicsDiagInfo) {
         impl->m_graphicsAdapterVendor = impl->m_emulationVk->getGpuVendor();
@@ -1479,7 +1479,7 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
 
     GFXSTREAM_DEBUG("glvk interop final: %d", vulkanInteropSupported);
     vkEmulationFeatures.glInteropSupported = vulkanInteropSupported;
-    if (impl->m_emulationVk && impl->m_features.Vulkan.enabled) {
+    if (impl->m_emulationVk && impl->m_features.Vulkan.enabled()) {
         impl->m_emulationVk->initFeatures(std::move(vkEmulationFeatures));
 
         auto* display = impl->m_emulationVk->getDisplay();
@@ -1570,9 +1570,9 @@ FrameBuffer::Impl::Impl(FrameBuffer* framebuffer, int p_width, int p_height,
         [this](FrameBuffer::Impl::Readback&& readback) {
             return sendReadbackWorkerCmd(readback);
         }),
-      m_refCountPipeEnabled(features.RefCountPipe.enabled),
-      m_noDelayCloseColorBufferEnabled(features.NoDelayCloseColorBuffer.enabled ||
-                                       features.Minigbm.enabled),
+      m_refCountPipeEnabled(features.RefCountPipe.enabled()),
+      m_noDelayCloseColorBufferEnabled(features.NoDelayCloseColorBuffer.enabled() ||
+                                       features.Minigbm.enabled()),
       m_postThread(
         []() {
             GFXSTREAM_TRACE_NAME_THREAD("Gfxstream Post Worker");
@@ -3336,7 +3336,7 @@ void FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
 #endif
 
     // TODO(b/309858017): remove if when ready to bump snapshot version
-    if (m_features.VulkanSnapshots.enabled) {
+    if (m_features.VulkanSnapshots.enabled()) {
         AutoLock procResourceLock(m_procOwnedResourcesLock);
         stream->putBe64(m_procOwnedResources.size());
         for (const auto& element : m_procOwnedResources) {
@@ -3346,7 +3346,7 @@ void FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
     }
 
     // Save Vulkan state
-    if (m_features.VulkanSnapshots.enabled && vk::VkDecoderGlobalState::get()) {
+    if (m_features.VulkanSnapshots.enabled() && vk::VkDecoderGlobalState::get()) {
         vk::VkDecoderGlobalState::get()->save(stream);
     }
 
@@ -3574,7 +3574,7 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
     loadProcOwnedCollection(stream, &m_procOwnedEmulatedEglContexts);
 #endif
     // TODO(b/309858017): remove if when ready to bump snapshot version
-    if (m_features.VulkanSnapshots.enabled) {
+    if (m_features.VulkanSnapshots.enabled()) {
         size_t resourceCount = stream->getBe64();
         for (size_t i = 0; i < resourceCount; i++) {
             uint64_t puid = stream->getBe64();
@@ -3619,7 +3619,7 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
     }
 
     // Restore Vulkan state
-    if (m_features.VulkanSnapshots.enabled && vk::VkDecoderGlobalState::get()) {
+    if (m_features.VulkanSnapshots.enabled() && vk::VkDecoderGlobalState::get()) {
         lock.unlock();
         GfxApiLogger gfxLogger;
         vk::VkDecoderGlobalState::get()->load(stream, gfxLogger);
@@ -3938,7 +3938,7 @@ bool FrameBuffer::Impl::invalidateColorBufferForVk(HandleType colorBufferHandle)
     AutoLock mutex(m_lock);
     auto colorBuffer = findColorBuffer(colorBufferHandle);
     if (!colorBuffer) {
-        GFXSTREAM_DEBUG("Failed to find ColorBuffer: %d", colorBufferHandle);
+        GFXSTREAM_ERROR("Failed to find ColorBuffer: %d", colorBufferHandle);
         return false;
     }
     return colorBuffer->invalidateForVk();
@@ -4691,7 +4691,7 @@ bool FrameBuffer::Impl::flushColorBufferFromGl(HandleType colorBufferHandle) {
 bool FrameBuffer::Impl::invalidateColorBufferForGl(HandleType colorBufferHandle) {
     auto colorBuffer = findColorBuffer(colorBufferHandle);
     if (!colorBuffer) {
-        GFXSTREAM_DEBUG("Failed to find ColorBuffer: %d", colorBufferHandle);
+        GFXSTREAM_ERROR("Failed to find ColorBuffer: %d", colorBufferHandle);
         return false;
     }
     return colorBuffer->invalidateForGl();
