@@ -53,16 +53,22 @@ static uint32_t get_ring_pos(uint32_t index) {
     return index & RING_BUFFER_MASK;
 }
 
+// NOTE: write_pos and read_pos are atomically updated from the producer and
+// consumer threads respectively. All reads must go through __atomic_load_n
+// to avoid mixing atomic and non-atomic accesses on the same location, which
+// is UB in C11 and miscompiles at -O3 (producer/consumer deadlock on certain
+// step sizes).
+
 bool ring_buffer_can_write(const struct ring_buffer* r, uint32_t bytes) {
-    uint32_t read_view;
-    __atomic_load(&r->read_pos, &read_view, __ATOMIC_SEQ_CST);
-    return get_ring_pos(read_view - r->write_pos - 1) >= bytes;
+    uint32_t read_view = __atomic_load_n(&r->read_pos, __ATOMIC_SEQ_CST);
+    uint32_t write_view = __atomic_load_n(&r->write_pos, __ATOMIC_SEQ_CST);
+    return get_ring_pos(read_view - write_view - 1) >= bytes;
 }
 
 bool ring_buffer_can_read(const struct ring_buffer* r, uint32_t bytes) {
-    uint32_t write_view;
-    __atomic_load(&r->write_pos, &write_view, __ATOMIC_SEQ_CST);
-    return get_ring_pos(write_view - r->read_pos) >= bytes;
+    uint32_t write_view = __atomic_load_n(&r->write_pos, __ATOMIC_SEQ_CST);
+    uint32_t read_view = __atomic_load_n(&r->read_pos, __ATOMIC_SEQ_CST);
+    return get_ring_pos(write_view - read_view) >= bytes;
 }
 
 long ring_buffer_write(
@@ -76,23 +82,25 @@ long ring_buffer_write(
             return (long)i;
         }
 
+        uint32_t write_pos = __atomic_load_n(&r->write_pos, __ATOMIC_SEQ_CST);
+
         // Needs to be split up into 2 writes for the edge case.
         uint32_t available_at_end =
-            RING_BUFFER_SIZE - get_ring_pos(r->write_pos);
+            RING_BUFFER_SIZE - get_ring_pos(write_pos);
 
         if (step_size > available_at_end) {
             uint32_t remaining = step_size - available_at_end;
             memcpy(
-                &r->buf[get_ring_pos(r->write_pos)],
+                &r->buf[get_ring_pos(write_pos)],
                 data_bytes + i * step_size,
                 available_at_end);
             memcpy(
-                &r->buf[get_ring_pos(r->write_pos + available_at_end)],
+                &r->buf[get_ring_pos(write_pos + available_at_end)],
                 data_bytes + i * step_size + available_at_end,
                 remaining);
         } else {
             memcpy(
-                &r->buf[get_ring_pos(r->write_pos)],
+                &r->buf[get_ring_pos(write_pos)],
                 data_bytes + i * step_size,
                 step_size);
         }
@@ -115,24 +123,26 @@ long ring_buffer_read(
             return (long)i;
         }
 
+        uint32_t read_pos = __atomic_load_n(&r->read_pos, __ATOMIC_SEQ_CST);
+
         // Needs to be split up into 2 reads for the edge case.
         uint32_t available_at_end =
-            RING_BUFFER_SIZE - get_ring_pos(r->read_pos);
+            RING_BUFFER_SIZE - get_ring_pos(read_pos);
 
         if (step_size > available_at_end) {
             uint32_t remaining = step_size - available_at_end;
             memcpy(
                 data_bytes + i * step_size,
-                &r->buf[get_ring_pos(r->read_pos)],
+                &r->buf[get_ring_pos(read_pos)],
                 available_at_end);
             memcpy(
                 data_bytes + i * step_size + available_at_end,
-                &r->buf[get_ring_pos(r->read_pos + available_at_end)],
+                &r->buf[get_ring_pos(read_pos + available_at_end)],
                 remaining);
         } else {
             memcpy(
                 data_bytes + i * step_size,
-                &r->buf[get_ring_pos(r->read_pos)],
+                &r->buf[get_ring_pos(read_pos)],
                 step_size);
         }
 
@@ -227,45 +237,45 @@ bool ring_buffer_view_can_write(
     const struct ring_buffer* r,
     const struct ring_buffer_view* v,
     uint32_t bytes) {
-    uint32_t read_view;
-    __atomic_load(&r->read_pos, &read_view, __ATOMIC_SEQ_CST);
+    uint32_t read_view = __atomic_load_n(&r->read_pos, __ATOMIC_SEQ_CST);
+    uint32_t write_view = __atomic_load_n(&r->write_pos, __ATOMIC_SEQ_CST);
     return ring_buffer_view_get_ring_pos(
-            v, read_view - r->write_pos - 1) >= bytes;
+            v, read_view - write_view - 1) >= bytes;
 }
 
 bool ring_buffer_view_can_read(
     const struct ring_buffer* r,
     const struct ring_buffer_view* v,
     uint32_t bytes) {
-    uint32_t write_view;
-    __atomic_load(&r->write_pos, &write_view, __ATOMIC_SEQ_CST);
+    uint32_t write_view = __atomic_load_n(&r->write_pos, __ATOMIC_SEQ_CST);
+    uint32_t read_view = __atomic_load_n(&r->read_pos, __ATOMIC_SEQ_CST);
     return ring_buffer_view_get_ring_pos(
-            v, write_view - r->read_pos) >= bytes;
+            v, write_view - read_view) >= bytes;
 }
 
 uint32_t ring_buffer_available_read(
     const struct ring_buffer* r,
     const struct ring_buffer_view* v) {
-    uint32_t write_view;
-    __atomic_load(&r->write_pos, &write_view, __ATOMIC_SEQ_CST);
+    uint32_t write_view = __atomic_load_n(&r->write_pos, __ATOMIC_SEQ_CST);
+    uint32_t read_view = __atomic_load_n(&r->read_pos, __ATOMIC_SEQ_CST);
     if (v) {
         return ring_buffer_view_get_ring_pos(
-                v, write_view - r->read_pos);
+                v, write_view - read_view);
     } else {
-        return get_ring_pos(write_view - r->read_pos);
+        return get_ring_pos(write_view - read_view);
     }
 }
 
 uint32_t ring_buffer_available_write(
     const struct ring_buffer* r,
     const struct ring_buffer_view* v) {
-    uint32_t read_view;
-    __atomic_load(&r->read_pos, &read_view, __ATOMIC_SEQ_CST);
+    uint32_t read_view = __atomic_load_n(&r->read_pos, __ATOMIC_SEQ_CST);
+    uint32_t write_view = __atomic_load_n(&r->write_pos, __ATOMIC_SEQ_CST);
     if (v) {
         return ring_buffer_view_get_ring_pos(
-                v, read_view - r->write_pos - 1);
+                v, read_view - write_view - 1);
     } else {
-        return get_ring_pos(read_view - r->write_pos - 1);
+        return get_ring_pos(read_view - write_view - 1);
     }
 }
 
@@ -277,14 +287,15 @@ int ring_buffer_copy_contents(
 
     uint32_t total_available =
         ring_buffer_available_read(r, v);
+    uint32_t read_pos = __atomic_load_n(&r->read_pos, __ATOMIC_SEQ_CST);
     uint32_t available_at_end = 0;
 
     if (v) {
         available_at_end =
-            v->size - ring_buffer_view_get_ring_pos(v, r->read_pos);
+            v->size - ring_buffer_view_get_ring_pos(v, read_pos);
     } else {
         available_at_end =
-            RING_BUFFER_SIZE - get_ring_pos(r->write_pos);
+            RING_BUFFER_SIZE - get_ring_pos(read_pos);
     }
 
     if (total_available < wanted_bytes) {
@@ -295,28 +306,28 @@ int ring_buffer_copy_contents(
         if (wanted_bytes > available_at_end) {
             uint32_t remaining = wanted_bytes - available_at_end;
             memcpy(res,
-                   &v->buf[ring_buffer_view_get_ring_pos(v, r->read_pos)],
+                   &v->buf[ring_buffer_view_get_ring_pos(v, read_pos)],
                    available_at_end);
             memcpy(res + available_at_end,
-                   &v->buf[ring_buffer_view_get_ring_pos(v, r->read_pos + available_at_end)],
+                   &v->buf[ring_buffer_view_get_ring_pos(v, read_pos + available_at_end)],
                    remaining);
         } else {
             memcpy(res,
-                   &v->buf[ring_buffer_view_get_ring_pos(v, r->read_pos)],
+                   &v->buf[ring_buffer_view_get_ring_pos(v, read_pos)],
                    wanted_bytes);
         }
     } else {
         if (wanted_bytes > available_at_end) {
             uint32_t remaining = wanted_bytes - available_at_end;
             memcpy(res,
-                   &r->buf[get_ring_pos(r->read_pos)],
+                   &r->buf[get_ring_pos(read_pos)],
                    available_at_end);
             memcpy(res + available_at_end,
-                   &r->buf[get_ring_pos(r->read_pos + available_at_end)],
+                   &r->buf[get_ring_pos(read_pos + available_at_end)],
                    remaining);
         } else {
             memcpy(res,
-                   &r->buf[get_ring_pos(r->read_pos)],
+                   &r->buf[get_ring_pos(read_pos)],
                    wanted_bytes);
         }
     }
@@ -337,23 +348,25 @@ long ring_buffer_view_write(
             return (long)i;
         }
 
+        uint32_t write_pos = __atomic_load_n(&r->write_pos, __ATOMIC_SEQ_CST);
+
         // Needs to be split up into 2 writes for the edge case.
         uint32_t available_at_end =
-            v->size - ring_buffer_view_get_ring_pos(v, r->write_pos);
+            v->size - ring_buffer_view_get_ring_pos(v, write_pos);
 
         if (step_size > available_at_end) {
             uint32_t remaining = step_size - available_at_end;
             memcpy(
-                &v->buf[ring_buffer_view_get_ring_pos(v, r->write_pos)],
+                &v->buf[ring_buffer_view_get_ring_pos(v, write_pos)],
                 data_bytes + i * step_size,
                 available_at_end);
             memcpy(
-                &v->buf[ring_buffer_view_get_ring_pos(v, r->write_pos + available_at_end)],
+                &v->buf[ring_buffer_view_get_ring_pos(v, write_pos + available_at_end)],
                 data_bytes + i * step_size + available_at_end,
                 remaining);
         } else {
             memcpy(
-                &v->buf[ring_buffer_view_get_ring_pos(v, r->write_pos)],
+                &v->buf[ring_buffer_view_get_ring_pos(v, write_pos)],
                 data_bytes + i * step_size,
                 step_size);
         }
@@ -379,23 +392,25 @@ long ring_buffer_view_read(
             return (long)i;
         }
 
+        uint32_t read_pos = __atomic_load_n(&r->read_pos, __ATOMIC_SEQ_CST);
+
         // Needs to be split up into 2 reads for the edge case.
         uint32_t available_at_end =
-            v->size - ring_buffer_view_get_ring_pos(v, r->read_pos);
+            v->size - ring_buffer_view_get_ring_pos(v, read_pos);
 
         if (step_size > available_at_end) {
             uint32_t remaining = step_size - available_at_end;
             memcpy(
                 data_bytes + i * step_size,
-                &v->buf[ring_buffer_view_get_ring_pos(v, r->read_pos)],
+                &v->buf[ring_buffer_view_get_ring_pos(v, read_pos)],
                 available_at_end);
             memcpy(
                 data_bytes + i * step_size + available_at_end,
-                &v->buf[ring_buffer_view_get_ring_pos(v, r->read_pos + available_at_end)],
+                &v->buf[ring_buffer_view_get_ring_pos(v, read_pos + available_at_end)],
                 remaining);
         } else {
             memcpy(data_bytes + i * step_size,
-                   &v->buf[ring_buffer_view_get_ring_pos(v, r->read_pos)],
+                   &v->buf[ring_buffer_view_get_ring_pos(v, read_pos)],
                    step_size);
         }
         __atomic_add_fetch(&r->read_pos, step_size, __ATOMIC_SEQ_CST);
