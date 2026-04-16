@@ -186,12 +186,12 @@ class VkDecoderGlobalState::Impl {
         }
         m_vkEmulation = emulation;
         mRenderDocWithMultipleVkInstances = m_vkEmulation->getRenderDoc();
-        mSnapshotsEnabled = m_vkEmulation->getFeatures().VulkanSnapshots.enabled;
+        mSnapshotsEnabled = m_vkEmulation->getFeatures().VulkanSnapshots.enabled();
         mBatchedDescriptorSetUpdateEnabled =
-            m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled;
+            m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled();
         mDisableSparseBindingSupport = false;
 #ifdef CONFIG_AEMU
-        if (!m_vkEmulation->getFeatures().BypassVulkanDeviceFeatureOverrides.enabled) {
+        if (!m_vkEmulation->getFeatures().BypassVulkanDeviceFeatureOverrides.enabled()) {
             // TODO(b/407982047) Disable sparse binding features on Android
             // These are not supported widely on real devices and causes crashes
             GFXSTREAM_INFO("Disabling sparse binding feature support");
@@ -564,7 +564,7 @@ class VkDecoderGlobalState::Impl {
             const DescriptorPoolInfo& poolInfo = mDescriptorPoolInfo[unboxedDescriptorPool];
 
             auto poolIds = poolInfo.poolIds;
-            if (!m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+            if (!m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled()) {
                 poolIds.clear();
                 // we need to fake pool ids
                 for (auto it : poolInfo.allocedSetsToBoxed) {
@@ -878,7 +878,7 @@ class VkDecoderGlobalState::Impl {
             }
             sort(sortedBoxedDescriptorPools.begin(), sortedBoxedDescriptorPools.end());
             const bool needToUnboxDescriptorSet =
-                !(m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled);
+                !(m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled());
             for (const auto& boxedDescriptorPool : sortedBoxedDescriptorPools) {
                 auto unboxedDescriptorPool = unbox_VkDescriptorPool(boxedDescriptorPool);
                 const DescriptorPoolInfo& poolInfo = mDescriptorPoolInfo[unboxedDescriptorPool];
@@ -889,7 +889,7 @@ class VkDecoderGlobalState::Impl {
                 std::vector<uint32_t> writeStartingIndices;
 
                 auto allpoolIds = poolInfo.poolIds;
-                if (!m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+                if (!m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled()) {
                     allpoolIds.clear();
                     for (auto it : poolInfo.allocedSetsToBoxed) {
                         auto boxedSet = it.second;
@@ -1428,7 +1428,7 @@ class VkDecoderGlobalState::Impl {
         }
 
         // Disable a set of Vulkan features if BypassVulkanDeviceFeatureOverrides is NOT enabled.
-        if (!m_vkEmulation->getFeatures().BypassVulkanDeviceFeatureOverrides.enabled) {
+        if (!m_vkEmulation->getFeatures().BypassVulkanDeviceFeatureOverrides.enabled()) {
             VkPhysicalDeviceVulkan11Features* vk11Features =
                 vk_find_struct<VkPhysicalDeviceVulkan11Features>(pFeatures);
             VkPhysicalDeviceVulkan13Features* vulkan13Features =
@@ -1445,7 +1445,7 @@ class VkDecoderGlobalState::Impl {
                 vk11Features->protectedMemory = VK_FALSE;
             }
 
-            if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+            if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled()) {
                 // Currently not supporting IUB with descriptor set optimizations.
                 VkPhysicalDeviceInlineUniformBlockFeatures* iubFeatures =
                     vk_find_struct<VkPhysicalDeviceInlineUniformBlockFeatures>(pFeatures);
@@ -1875,7 +1875,8 @@ class VkDecoderGlobalState::Impl {
 
         bool shouldPassthrough = !m_vkEmulation->isYcbcrEmulationEnabled();
 #if defined(__APPLE__)
-        shouldPassthrough = shouldPassthrough && !m_vkEmulation->supportsExternalMemoryMetal();
+        shouldPassthrough = shouldPassthrough && !(m_vkEmulation->getExternalMemoryMode() ==
+                                                   ExternalMemory::Mode::Metal);
 #endif
         if (shouldPassthrough) {
             return vk->vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName,
@@ -1903,7 +1904,7 @@ class VkDecoderGlobalState::Impl {
 
 #if defined(__APPLE__) && defined(VK_MVK_moltenvk)
         // Guest will check for VK_MVK_moltenvk extension for enabling AHB support
-        if (m_vkEmulation->supportsExternalMemoryMetal() &&
+        if ((m_vkEmulation->getExternalMemoryMode() == ExternalMemory::Mode::Metal) &&
             !hasDeviceExtension(properties, VK_MVK_MOLTENVK_EXTENSION_NAME)) {
             // TODO(b/433496880): make sure any relevant guest image will check external memory
             // metal instead
@@ -2116,7 +2117,7 @@ class VkDecoderGlobalState::Impl {
 
         VkDeviceQueueCreateInfo filteredQueueCreateInfo = {};
         // Use VulkanVirtualQueue directly to avoid locking for hasVirtualGraphicsQueue call.
-        if (m_vkEmulation->getFeatures().VulkanVirtualQueue.enabled &&
+        if (m_vkEmulation->getFeatures().VulkanVirtualQueue.enabled() &&
             (createInfoFiltered.queueCreateInfoCount == 1) &&
             (createInfoFiltered.pQueueCreateInfos[0].queueCount == 2)) {
             // In virtual secondary queue mode, we should filter the queue count
@@ -2695,7 +2696,7 @@ class VkDecoderGlobalState::Impl {
 
         VkExternalMemoryBufferCreateInfo externalCI = {
             VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
-        if (m_vkEmulation->getFeatures().VulkanAllocateHostMemory.enabled) {
+        if (m_vkEmulation->getFeatures().VulkanAllocateHostMemory.enabled()) {
             localCreateInfo = *pCreateInfo;
             // Hint that we 'may' use host allocation for this buffer. This will only be used for
             // host visible memory.
@@ -2745,7 +2746,7 @@ class VkDecoderGlobalState::Impl {
 
         destroyBufferWithExclusiveInfo(device, deviceDispatch, buffer, bufferInfo, pAllocator);
         auto* memoryInfo = gfxstream::base::find(mMemoryInfo, bufferInfo.memory);
-        if (memoryInfo && m_vkEmulation->getFeatures().VulkanDisableCoherentMemoryAndEmulate.enabled) {
+        if (memoryInfo && m_vkEmulation->getFeatures().VulkanDisableCoherentMemoryAndEmulate.enabled()) {
             unbindFromBufferLocked(memoryInfo, buffer);
         }
 
@@ -2777,7 +2778,7 @@ class VkDecoderGlobalState::Impl {
             GFXSTREAM_WARNING("Failed to find VkDeviceMemory:%p", memory);
             return VK_ERROR_OUT_OF_HOST_MEMORY;
         }
-        if (m_vkEmulation->getFeatures().VulkanDisableCoherentMemoryAndEmulate.enabled) {
+        if (m_vkEmulation->getFeatures().VulkanDisableCoherentMemoryAndEmulate.enabled()) {
             bindToBufferLocked(memoryInfo, buffer, memoryOffset, bufferInfo->size);
         }
         if (memoryInfo->boundBuffer) {
@@ -3311,6 +3312,19 @@ class VkDecoderGlobalState::Impl {
     VkResult on_vkCreateSampler(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
                                 VkDevice boxed_device, const VkSamplerCreateInfo* pCreateInfo,
                                 const VkAllocationCallbacks* pAllocator, VkSampler* pSampler) {
+        if (pCreateInfo->borderColor == VK_BORDER_COLOR_FLOAT_CUSTOM_EXT ||
+            pCreateInfo->borderColor == VK_BORDER_COLOR_INT_CUSTOM_EXT) {
+            const VkSamplerCustomBorderColorCreateInfoEXT* customColorCI =
+                vk_find_struct<VkSamplerCustomBorderColorCreateInfoEXT>(pCreateInfo);
+            if (!customColorCI) {
+                // Avoid invalid usage and crashes on the driver, ref: b/495478375
+                GFXSTREAM_ERROR("%s: Invalid usage with missing custom border color structure.",
+                                __func__);
+                const_cast<VkSamplerCreateInfo*>(pCreateInfo)->borderColor =
+                    VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+            }
+        }
+
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
         VkResult result = vk->vkCreateSampler(device, pCreateInfo, pAllocator, pSampler);
@@ -3459,7 +3473,7 @@ class VkDecoderGlobalState::Impl {
          *  We just don't support this here since neither Android or Zink use this feature
          *  with timeline semaphores yet.
          */
-        if (m_vkEmulation->getFeatures().VulkanExternalSync.enabled && !timelineSemaphore) {
+        if (m_vkEmulation->getFeatures().VulkanExternalSync.enabled() && !timelineSemaphore) {
             localExportSemaphoreCi.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
             localExportSemaphoreCi.pNext = nullptr;
 
@@ -3793,7 +3807,7 @@ class VkDecoderGlobalState::Impl {
     VkResult on_vkGetSemaphoreGOOGLE(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
                                      VkDevice boxed_device, VkSemaphore semaphore,
                                      uint64_t syncId) {
-        if (!m_vkEmulation->getFeatures().VulkanExternalSync.enabled) {
+        if (!m_vkEmulation->getFeatures().VulkanExternalSync.enabled()) {
             return VK_ERROR_FEATURE_NOT_PRESENT;
         }
 
@@ -4047,7 +4061,7 @@ class VkDecoderGlobalState::Impl {
             return res;
         }
 
-        if (m_vkEmulation->getFeatures().VulkanVirtualQueue.enabled) {
+        if (m_vkEmulation->getFeatures().VulkanVirtualQueue.enabled()) {
             res = onSemaphoreSignalledOnSharedQueue(deviceDispatch, pSignalInfo->semaphore,
                                                     pSignalInfo->value);
             if (res != VK_SUCCESS) {
@@ -4217,7 +4231,7 @@ class VkDecoderGlobalState::Impl {
                 info.pools.push_back(state);
             }
 
-            if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+            if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled()) {
                 for (uint32_t i = 0; i < pCreateInfo->maxSets; ++i) {
                     info.poolIds.push_back(
                         (uint64_t)new_boxed_non_dispatchable_VkDescriptorSet(VK_NULL_HANDLE));
@@ -4241,12 +4255,12 @@ class VkDecoderGlobalState::Impl {
             auto unboxedSet = it.first;
             auto boxedSet = it.second;
             descriptorSetInfos.erase(unboxedSet);
-            if (!m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+            if (!m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled()) {
                 delete_VkDescriptorSet(boxedSet);
             }
         }
 
-        if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+        if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled()) {
             if (isDestroy) {
                 for (auto poolId : descriptorPoolInfo.poolIds) {
                     delete_VkDescriptorSet((VkDescriptorSet)poolId);
@@ -4372,7 +4386,7 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::mutex> lock(mMutex);
 
-        if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+        if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled()) {
             auto allocValidationRes = validateDescriptorSetAllocLocked(pAllocateInfo);
             if (allocValidationRes != VK_SUCCESS) return allocValidationRes;
         }
@@ -4423,7 +4437,7 @@ class VkDecoderGlobalState::Impl {
 
                 auto handleInfo = sBoxedHandleManager.get((uint64_t)*descSetAllocedEntry);
                 if (handleInfo) {
-                    if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+                    if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled()) {
                         handleInfo->underlying = reinterpret_cast<uint64_t>(VK_NULL_HANDLE);
                     } else {
                         delete_VkDescriptorSet(*descSetAllocedEntry);
@@ -5653,8 +5667,8 @@ class VkDecoderGlobalState::Impl {
     bool mapHostVisibleMemoryToGuestPhysicalAddressLocked(VulkanDispatch* vk, VkDevice device,
                                                           VkDeviceMemory memory, uint64_t physAddr)
         REQUIRES(mMutex) {
-        if (!m_vkEmulation->getFeatures().GlDirectMem.enabled &&
-            !m_vkEmulation->getFeatures().VirtioGpuNext.enabled) {
+        if (!m_vkEmulation->getFeatures().GlDirectMem.enabled() &&
+            !m_vkEmulation->getFeatures().VirtioGpuNext.enabled()) {
             // GFXSTREAM_INFO("%s: Tried to use direct mapping "
             // "while GlDirectMem is not enabled!");
         }
@@ -5856,7 +5870,7 @@ class VkDecoderGlobalState::Impl {
             } else {
                 shouldUseDedicatedAllocInfo &= colorBufferMemoryUsesDedicatedAlloc;
 
-                if (!m_vkEmulation->getFeatures().GuestVulkanOnly.enabled) {
+                if (!m_vkEmulation->getFeatures().GuestVulkanOnly.enabled()) {
                     m_vkEmulation->getCallbacks().invalidateColorBuffer(
                         importCbInfoPtr->colorBuffer);
                 }
@@ -5866,7 +5880,7 @@ class VkDecoderGlobalState::Impl {
 #if defined(__APPLE__)
                 // Use metal object extension on host-vulkan mode for color buffer import,
                 // other paths on MacOS will use FD handles
-                if (m_vkEmulation->supportsExternalMemoryMetal()) {
+                if (m_vkEmulation->getExternalMemoryMode() == ExternalMemory::Mode::Metal) {
                     MTLResource_id cbExtMemoryHandle =
                         m_vkEmulation->getColorBufferMetalMemoryHandle(
                             importCbInfoPtr->colorBuffer);
@@ -5885,7 +5899,27 @@ class VkDecoderGlobalState::Impl {
                     opaqueFd = false;
                 }
 #endif
+#if defined(__QNX__)
+                // Use QNX Screen buffer extension on host-vulkan mode for color buffer import,
+                // other paths on QNX may use FD handles ...
+                if (m_vkEmulation->getExternalMemoryMode() ==
+                    ExternalMemory::Mode::QnxScreenBuffer) {
+                    screen_buffer_t cbExtMemoryHandle =
+                        m_vkEmulation->getColorBufferScreenBufferQnxHandle(
+                            importCbInfoPtr->colorBuffer);
 
+                    if (cbExtMemoryHandle == nullptr) {
+                        GFXSTREAM_ERROR(
+                            "%s: VK_ERROR_OUT_OF_DEVICE_MEMORY: "
+                            "colorBuffer 0x%x does not have Vulkan external memory backing",
+                            __func__, importCbInfoPtr->colorBuffer);
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
+                    importScreenBufferInfo.buffer = cbExtMemoryHandle;
+                    vk_append_struct(&structChainIter, &importScreenBufferInfo);
+                    opaqueFd = false;
+                }
+#endif
                 if (m_vkEmulation->getExternalMemoryMode() == ExternalMemory::Mode::HostAllocation) {
                     importHostInfo.pHostPointer =
                         m_vkEmulation->getColorBufferHostPointer(importCbInfoPtr->colorBuffer);
@@ -5917,20 +5951,6 @@ class VkDecoderGlobalState::Impl {
                     importWin32HandleInfo.handle =
                         managedHandle.get().value_or(static_cast<HANDLE>(NULL));
                     vk_append_struct(&structChainIter, &importWin32HandleInfo);
-#elif defined(__QNX__)
-                    if (STREAM_HANDLE_TYPE_PLATFORM_SCREEN_BUFFER_QNX ==
-                        dupHandleInfo->streamHandleType) {
-                        importScreenBufferInfo.buffer = static_cast<screen_buffer_t>(
-                            reinterpret_cast<void*>(dupHandleInfo->handle));
-                        vk_append_struct(&structChainIter, &importScreenBufferInfo);
-                    } else {
-                        // TODO(aruby@blackberry.com): Fall through to the importFdInfo sequence
-                        // below to support non-screenbuffer external object imports on QNX?
-                        GFXSTREAM_ERROR(
-                            "Stream mem handleType: 0x%x not support for ColorBuffer import",
-                            dupHandleInfo->streamHandleType);
-                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-                    }
 #elif defined(__ANDROID__)
                     importInfo.buffer = static_cast<AHardwareBuffer*>(
                         reinterpret_cast<void*>(dupHandleInfo->handle));
@@ -5955,7 +5975,7 @@ class VkDecoderGlobalState::Impl {
 
             bool opaqueFd = true;
 #ifdef __APPLE__
-            if (m_vkEmulation->supportsExternalMemoryMetal()) {
+            if (m_vkEmulation->getExternalMemoryMode() == ExternalMemory::Mode::Metal) {
                 MTLResource_id bufferMetalMemoryHandle =
                     m_vkEmulation->getBufferMetalMemoryHandle(importBufferInfoPtr->buffer);
 
@@ -5976,6 +5996,17 @@ class VkDecoderGlobalState::Impl {
                 opaqueFd = false;
             }
 #endif
+#if defined(__QNX__)
+            if (m_vkEmulation->getExternalMemoryMode() == ExternalMemory::Mode::QnxScreenBuffer) {
+                GFXSTREAM_ERROR(
+                    "%s: VK_ERROR_OUT_OF_DEVICE_MEMORY: "
+                    "ExternalMemory::Mode::QnxScreenBuffer does not support memory externalization "
+                    "for gfxstream BufferVk objects.",
+                    __func__);
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            }
+#endif
+
             if (m_vkEmulation->getExternalMemoryMode() == ExternalMemory::Mode::HostAllocation) {
                 importHostInfo.pHostPointer =
                     m_vkEmulation->getBufferHostPointer(importBufferInfoPtr->buffer);
@@ -6008,19 +6039,6 @@ class VkDecoderGlobalState::Impl {
                 importWin32HandleInfo.handle =
                     managedHandle.get().value_or(static_cast<HANDLE>(NULL));
                 vk_append_struct(&structChainIter, &importWin32HandleInfo);
-#elif defined(__QNX__)
-                if (STREAM_HANDLE_TYPE_PLATFORM_SCREEN_BUFFER_QNX == dupHandleInfo->streamHandleType) {
-                    importScreenBufferInfo.buffer = static_cast<screen_buffer_t>(
-                        reinterpret_cast<void*>(dupHandleInfo->handle));
-                    vk_append_struct(&structChainIter, &importScreenBufferInfo);
-                } else {
-                    // TODO(aruby@blackberry.com): Fall through to the importFdInfo sequence below
-                    // to support non-screenbuffer external object imports on QNX?
-                    GFXSTREAM_ERROR(
-                        "Stream mem handleType: 0x%x not support for Buffer object import",
-                        dupHandleInfo->streamHandleType);
-                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-                }
 #elif !defined(__ANDROID__)
                 importFdInfo.fd = dupHandleInfo->getFd();
                 vk_append_struct(&structChainIter, &importFdInfo);
@@ -6142,8 +6160,8 @@ class VkDecoderGlobalState::Impl {
                 GFXSTREAM_ERROR("Guest Handle flow should not work here");
                 return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 #endif
-            } else if (m_vkEmulation->getFeatures().SystemBlob.enabled ||
-                       m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled) {
+            } else if (m_vkEmulation->getFeatures().SystemBlob.enabled() ||
+                       m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled()) {
                 // Ensure size is page-aligned.
                 VkDeviceSize alignedSize = ALIGN(localAllocInfo.allocationSize, kPageSizeforBlob);
                 if (alignedSize != localAllocInfo.allocationSize) {
@@ -6155,7 +6173,7 @@ class VkDecoderGlobalState::Impl {
                 auto memory = SharedMemory("shared-memory-vk-" + std::to_string(sUniqueShmemId++),
                                            localAllocInfo.allocationSize);
 
-                if (m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled) {
+                if (m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled()) {
                     // 0755 = user read write
                     int ret = memory.createNoMapping(0755);
                     if (ret) {
@@ -6189,7 +6207,7 @@ class VkDecoderGlobalState::Impl {
                     GFXSTREAM_ERROR("Import from shared memory should not work here");
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 #endif
-                } else if (m_vkEmulation->getFeatures().SystemBlob.enabled) {
+                } else if (m_vkEmulation->getFeatures().SystemBlob.enabled()) {
                     int ret = memory.create(0600);
                     if (ret) {
                         GFXSTREAM_ERROR(
@@ -6216,7 +6234,7 @@ class VkDecoderGlobalState::Impl {
                 }
 
                 sharedMemory = std::make_optional<SharedMemory>(std::move(memory));
-            } else if (m_vkEmulation->getFeatures().ExternalBlob.enabled) {
+            } else if (m_vkEmulation->getFeatures().ExternalBlob.enabled()) {
                 VkExternalMemoryHandleTypeFlags handleTypes =
                     m_vkEmulation->getDefaultExternalMemoryHandleType();
 #ifdef __linux__
@@ -6231,7 +6249,7 @@ class VkDecoderGlobalState::Impl {
                     .handleTypes = handleTypes,
                 };
                 vk_append_struct(&structChainIter, &*exportAllocateInfo);
-            } else if (m_vkEmulation->getFeatures().VulkanAllocateHostMemory.enabled &&
+            } else if (m_vkEmulation->getFeatures().VulkanAllocateHostMemory.enabled() &&
                        localAllocInfo.pNext == nullptr) {
                 if (!m_vkEmulation || !m_vkEmulation->supportsExternalMemoryHostProperties()) {
                     GFXSTREAM_ERROR(
@@ -6341,7 +6359,7 @@ class VkDecoderGlobalState::Impl {
         // When external blobs are on, we want to map memory only if a workaround is using it in
         // the gfxstream process. This happens when ASTC CPU emulation is on.
         bool needToMap =
-            (!m_vkEmulation->getFeatures().ExternalBlob.enabled ||
+            (!m_vkEmulation->getFeatures().ExternalBlob.enabled() ||
              (deviceInfo->useAstcCpuDecompression && deviceInfo->emulateTextureAstc)) &&
             !createBlobInfoPtr;
 
@@ -6463,8 +6481,8 @@ class VkDecoderGlobalState::Impl {
     }
 
     bool usingDirectMapping() const {
-        return m_vkEmulation->getFeatures().GlDirectMem.enabled ||
-               m_vkEmulation->getFeatures().VirtioGpuNext.enabled;
+        return m_vkEmulation->getFeatures().GlDirectMem.enabled() ||
+               m_vkEmulation->getFeatures().VirtioGpuNext.enabled();
     }
 
     HostFeatureSupport getHostFeatureSupport() const {
@@ -6724,7 +6742,7 @@ class VkDecoderGlobalState::Impl {
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
 
-        if (!m_vkEmulation->getFeatures().GlDirectMem.enabled) {
+        if (!m_vkEmulation->getFeatures().GlDirectMem.enabled()) {
             GFXSTREAM_ERROR(
                 "FATAL: Tried to use direct mapping "
                 "while GlDirectMem is not enabled!");
@@ -6770,8 +6788,8 @@ class VkDecoderGlobalState::Impl {
 
         hostBlobId = (info->blobId && !hostBlobId) ? info->blobId : hostBlobId;
 
-        if ((m_vkEmulation->getFeatures().SystemBlob.enabled ||
-             m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled) &&
+        if ((m_vkEmulation->getFeatures().SystemBlob.enabled() ||
+             m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled()) &&
             info->sharedMemory.has_value()) {
             // We transfer ownership of the shared memory handle to the descriptor info.
             // The memory itself is destroyed only when all processes unmap / release their
@@ -6779,9 +6797,9 @@ class VkDecoderGlobalState::Impl {
             ExternalObjectManager::get()->addBlobDescriptorInfo(
                 virtioGpuContextId, hostBlobId, info->sharedMemory->releaseHandle(),
                 STREAM_HANDLE_TYPE_MEM_SHM, info->caching, std::nullopt);
-        } else if (m_vkEmulation->getFeatures().ExternalBlob.enabled) {
+        } else if (m_vkEmulation->getFeatures().ExternalBlob.enabled()) {
 #ifdef __APPLE__
-            if (m_vkEmulation->supportsExternalMemoryMetal()) {
+            if (m_vkEmulation->getExternalMemoryMode() == ExternalMemory::Mode::Metal) {
                 GFXSTREAM_FATAL("ExternalBlob feature is not supported with external memory metal");
             }
 #endif
@@ -7127,7 +7145,7 @@ class VkDecoderGlobalState::Impl {
 
         // Update status for signal semaphores when virtual queue is enabled
         // to be able to handle wait-before-signal conditions
-        if (m_vkEmulation->getFeatures().VulkanVirtualQueue.enabled) {
+        if (m_vkEmulation->getFeatures().VulkanVirtualQueue.enabled()) {
             for (uint32_t submitIndex = 0; submitIndex < submitCount; submitIndex++) {
                 const auto& submit = pSubmits[submitIndex];
                 for (uint32_t semaphoreIndex = 0; semaphoreIndex < getSignalSemaphoreCount(submit);
@@ -7154,7 +7172,7 @@ class VkDecoderGlobalState::Impl {
 
         // Update status for signal semaphores when virtual queue is enabled
         // to be able to handle wait-before-signal conditions
-        if (m_vkEmulation->getFeatures().VulkanVirtualQueue.enabled) {
+        if (m_vkEmulation->getFeatures().VulkanVirtualQueue.enabled()) {
             for (uint32_t i = 0; i < submitCount; i++) {
                 const auto& s = pSubmits[i];
                 for (uint32_t j = 0; j < s.signalSemaphoreInfoCount; j++) {
@@ -7247,7 +7265,7 @@ class VkDecoderGlobalState::Impl {
         {
             std::lock_guard<std::mutex> lock(mMutex);
 
-            if (!m_vkEmulation->getFeatures().GuestVulkanOnly.enabled) {
+            if (!m_vkEmulation->getFeatures().GuestVulkanOnly.enabled()) {
                 for (uint32_t i = 0; i < submitCount; i++) {
                     for (int j = 0; j < getCommandBufferCount(pSubmits[i]); j++) {
                         VkCommandBuffer cmdBuffer = getCommandBuffer(pSubmits[i], j);
@@ -7325,7 +7343,7 @@ class VkDecoderGlobalState::Impl {
             m_vkEmulation->getCallbacks().invalidateColorBuffer(cb);
         }
 
-        if (m_vkEmulation->getFeatures().VulkanDisableCoherentMemoryAndEmulate.enabled) {
+        if (m_vkEmulation->getFeatures().VulkanDisableCoherentMemoryAndEmulate.enabled()) {
             std::lock_guard<std::mutex> lock(mMutex);
             std::vector<VkMappedMemoryRange> memoryRangesToFlush;
             for (auto& it: mMemoryInfo) {
@@ -7660,7 +7678,7 @@ class VkDecoderGlobalState::Impl {
             return;
         }
 
-        if (m_vkEmulation->getFeatures().VulkanExternalSync.enabled) {
+        if (m_vkEmulation->getFeatures().VulkanExternalSync.enabled()) {
             // Cannot forward this call to driver because nVidia linux driver crahses on it.
             switch (pExternalSemaphoreInfo->handleType) {
                 case VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT:
@@ -8884,6 +8902,7 @@ class VkDecoderGlobalState::Impl {
             return res;
         }
 
+        std::lock_guard<std::mutex> lock(mMutex);
         VALIDATE_NEW_HANDLE_INFO_ENTRY(mSamplerYcbcrConversionInfo, *pYcbcrConversion);
         auto& ycbcrConversionInfo = mSamplerYcbcrConversionInfo[*pYcbcrConversion];
         ycbcrConversionInfo.device = device;

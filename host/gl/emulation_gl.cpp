@@ -223,27 +223,31 @@ static std::optional<EGLConfig> getEmulationEglConfig(EGLDisplay display, bool a
 
 }  // namespace
 
-std::unique_ptr<EmulationGl> EmulationGl::create(uint32_t width, uint32_t height,
-                                                 const gfxstream::host::FeatureSet& features,
-                                                 bool allowWindowSurface) {
+bool EmulationGl::initDispatchers(bool eglOnEgl) {
     // Loads the glestranslator function pointers.
     if (!LazyLoadedEGLDispatch::get()) {
         GFXSTREAM_ERROR("Failed to load EGL dispatch.");
-        return nullptr;
+        return false;
     }
     if (!LazyLoadedGLESv1Dispatch::get()) {
         GFXSTREAM_ERROR("Failed to load GLESv1 dispatch.");
-        return nullptr;
+        return false;
     }
     if (!LazyLoadedGLESv2Dispatch::get()) {
         GFXSTREAM_ERROR("Failed to load GLESv2 dispatch.");
-        return nullptr;
+        return false;
     }
 
     if (s_egl.eglUseOsEglApi) {
-        s_egl.eglUseOsEglApi(features.EglOnEgl.enabled, EGL_FALSE);
+        s_egl.eglUseOsEglApi(eglOnEgl, EGL_FALSE);
     }
 
+    return true;
+}
+
+std::unique_ptr<EmulationGl> EmulationGl::create(uint32_t width, uint32_t height,
+                                                 const gfxstream::host::FeatureSet& features,
+                                                 bool allowWindowSurface) {
     std::unique_ptr<EmulationGl> emulationGl(new EmulationGl());
 
     emulationGl->mFeatures = features;
@@ -267,13 +271,13 @@ std::unique_ptr<EmulationGl> EmulationGl::create(uint32_t width, uint32_t height
     if (s_egl.eglSetNativeTextureDecompressionEnabledANDROID) {
         s_egl.eglSetNativeTextureDecompressionEnabledANDROID(
             emulationGl->mEglDisplay,
-            emulationGl->mFeatures.NativeTextureDecompression.enabled);
+            emulationGl->mFeatures.NativeTextureDecompression.enabled());
     }
 
     if (s_egl.eglSetProgramBinaryLinkStatusEnabledANDROID) {
         s_egl.eglSetProgramBinaryLinkStatusEnabledANDROID(
             emulationGl->mEglDisplay,
-            emulationGl->mFeatures.GlProgramBinaryLinkStatus.enabled);
+            emulationGl->mFeatures.GlProgramBinaryLinkStatus.enabled());
     }
 
     s_egl.eglBindAPI(EGL_OPENGL_ES_API);
@@ -643,7 +647,7 @@ std::string EmulationGl::getEglString(EGLenum name) {
 
     std::string eglStr(str);
     if ((mGlesDispatchMaxVersion >= GLES_DISPATCH_MAX_VERSION_3_0) &&
-        mFeatures.GlesDynamicVersion.enabled &&
+        mFeatures.GlesDynamicVersion.enabled() &&
         eglStr.find("EGL_KHR_create_context") == std::string::npos) {
         eglStr += "EGL_KHR_create_context ";
     }
