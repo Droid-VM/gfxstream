@@ -195,9 +195,6 @@ class VkEmulation {
     VkExternalMemoryHandleTypeFlagBits getDefaultExternalMemoryHandleType();
     void appendExternalMemoryModeDeviceExtensions(std::vector<const char*>& outDeviceExtensions);
     ExternalMemory::Mode getExternalMemoryMode() const;
-    bool supportsExternalMemoryMetal() {
-        return (getExternalMemoryMode() == ExternalMemory::Mode::Metal);
-    }
     bool supportsExternalMemory() {
         return (getExternalMemoryMode() != ExternalMemory::Mode::NotSupported);
     }
@@ -234,7 +231,6 @@ class VkEmulation {
         uint32_t typeIndex;
 
         // Output fields
-        uint32_t id = 0;
         VkDeviceMemory memory = VK_NULL_HANDLE;
 
         // host-mapping fields
@@ -256,6 +252,12 @@ class VkEmulation {
         // This is used as an external handle with ExternalMemory::Mode::Metal
         MTLResource_id externalMetalHandle = nullptr;
 #endif
+#if defined(__QNX__)
+        // Note: The stream handle is the parent of the buffer handle
+        screen_stream_t qnxScreenStreamHandle = nullptr;
+        screen_buffer_t qnxScreenBufferHandle = nullptr;
+#endif
+
         // Used with ExternalMemory::Mode::HostAllocation
         // TODO: refactor to be able to change handle type based on external memory mode
         // and move it into ExternalHandleInfo to support external memory exports or use
@@ -264,17 +266,6 @@ class VkEmulation {
 
         bool dedicatedAllocation = false;
     };
-
-    bool allocExternalMemory(
-        VulkanDispatch* vk, ExternalMemoryInfo* info,
-        gfxstream::base::Optional<uint64_t> deviceAlignment = gfxstream::base::kNullopt,
-        gfxstream::base::Optional<VkBuffer> bufferForDedicatedAllocation = gfxstream::base::kNullopt,
-        gfxstream::base::Optional<VkImage> imageForDedicatedAllocation = gfxstream::base::kNullopt);
-
-    bool importExternalMemory(VulkanDispatch* vk, VkDevice targetDevice,
-                              const ExternalMemoryInfo* info,
-                              VkMemoryDedicatedAllocateInfo* dedicatedAllocInfo,
-                              VkDeviceMemory* out);
 
     enum class VulkanMode {
         // Default: ColorBuffers can still be used with the existing GL-based
@@ -332,6 +323,7 @@ class VkEmulation {
         VkImage image = VK_NULL_HANDLE;
         VkImageView imageView = VK_NULL_HANDLE;
         VkImageCreateInfo imageCreateInfoShallow = {};
+        VkMemoryRequirements imageMemReqs = {};
 
         VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         uint32_t currentQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
@@ -341,6 +333,20 @@ class VkEmulation {
 
         VulkanMode vulkanMode = VulkanMode::Default;
     };
+
+    bool allocExternalMemory(
+        VulkanDispatch* vk, ExternalMemoryInfo* info,
+        gfxstream::base::Optional<uint64_t> deviceAlignment = gfxstream::base::kNullopt,
+        gfxstream::base::Optional<VkBuffer> bufferForDedicatedAllocation =
+            gfxstream::base::kNullopt,
+        gfxstream::base::Optional<VkImage> imageForDedicatedAllocation = gfxstream::base::kNullopt,
+        gfxstream::base::Optional<ColorBufferInfo*> colorBufferInfo = gfxstream::base::kNullopt);
+
+    bool importExternalMemory(VulkanDispatch* vk, VkDevice targetDevice,
+                              const ExternalMemoryInfo* info,
+                              VkMemoryDedicatedAllocateInfo* dedicatedAllocInfo,
+                              VkDeviceMemory* out);
+
     std::optional<VkEmulation::ColorBufferInfo> getColorBufferInfo(uint32_t colorBufferHandle);
 
     struct BufferInfo {
@@ -362,6 +368,9 @@ class VkEmulation {
     void* getColorBufferHostPointer(uint32_t colorBuffer);
 #ifdef __APPLE__
     MTLResource_id getColorBufferMetalMemoryHandle(uint32_t colorBufferHandle);
+#endif
+#if defined(__QNX__)
+    screen_buffer_t getColorBufferScreenBufferQnxHandle(uint32_t colorBufferHandle);
 #endif
 
     struct VkColorBufferMemoryExport {
@@ -523,9 +532,6 @@ class VkEmulation {
     bool updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, uint32_t x, uint32_t y,
                                           uint32_t w, uint32_t h, const void* pixels,
                                           size_t inputPixelsSize) REQUIRES(mMutex);
-
-    bool updateMemReqsForExtMem(std::optional<ExternalHandleInfo> extMemHandleInfo,
-                                VkMemoryRequirements* pMemReqs);
 
     std::tuple<VkCommandBuffer, VkFence> allocateQueueTransferCommandBufferLocked() REQUIRES(mMutex);
 
