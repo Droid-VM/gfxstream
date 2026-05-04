@@ -15,6 +15,7 @@
 #include "texture_draw.h"
 
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -81,7 +82,7 @@ GLuint createShader(GLint shaderType, const char* shaderText) {
 //  shader; anyway the new code has hardcoded texture coordinate mapping for
 //  different rotation angles and works in both native OpenGL and SwiftShader.
 const char kVertexShaderSource[] =
-    "attribute vec4 position;\n"
+    "attribute vec2 position;\n"
     "attribute vec2 inCoord;\n"
     "varying vec2 outCoord;\n"
     "uniform vec2 translation;\n"
@@ -91,7 +92,7 @@ const char kVertexShaderSource[] =
 
     "void main(void) {\n"
     "  gl_Position.xy = position.xy * scale.xy - translation.xy;\n"
-    "  gl_Position.zw = position.zw;\n"
+    "  gl_Position.zw = vec2(0.0, 1.0);\n"
     "  outCoord = inCoord * coordScale + coordTranslation;\n"
     "}\n";
 
@@ -126,51 +127,51 @@ static const GLfloat kIdentityMatrix[16] = {
 
 // Hard-coded arrays of vertex information.
 struct Vertex {
-    float pos[3];
+    float pos[2];
     float coord[2];
 };
 
 const Vertex kVertices[] = {
     // 0 degree
-    {{ +1, -1, +0 }, { +1, +0 }},
-    {{ +1, +1, +0 }, { +1, +1 }},
-    {{ -1, +1, +0 }, { +0, +1 }},
-    {{ -1, -1, +0 }, { +0, +0 }},
+    {{ +1, -1 }, { +1, +0 }},
+    {{ +1, +1 }, { +1, +1 }},
+    {{ -1, +1 }, { +0, +1 }},
+    {{ -1, -1 }, { +0, +0 }},
     // 90 degree clock-wise
-    {{ +1, -1, +0 }, { +1, +1 }},
-    {{ +1, +1, +0 }, { +0, +1 }},
-    {{ -1, +1, +0 }, { +0, +0 }},
-    {{ -1, -1, +0 }, { +1, +0 }},
+    {{ +1, -1 }, { +1, +1 }},
+    {{ +1, +1 }, { +0, +1 }},
+    {{ -1, +1 }, { +0, +0 }},
+    {{ -1, -1 }, { +1, +0 }},
     // 180 degree clock-wise
-    {{ +1, -1, +0 }, { +0, +1 }},
-    {{ +1, +1, +0 }, { +0, +0 }},
-    {{ -1, +1, +0 }, { +1, +0 }},
-    {{ -1, -1, +0 }, { +1, +1 }},
+    {{ +1, -1 }, { +0, +1 }},
+    {{ +1, +1 }, { +0, +0 }},
+    {{ -1, +1 }, { +1, +0 }},
+    {{ -1, -1 }, { +1, +1 }},
     // 270 degree clock-wise
-    {{ +1, -1, +0 }, { +0, +0 }},
-    {{ +1, +1, +0 }, { +1, +0 }},
-    {{ -1, +1, +0 }, { +1, +1 }},
-    {{ -1, -1, +0 }, { +0, +1 }},
+    {{ +1, -1 }, { +0, +0 }},
+    {{ +1, +1 }, { +1, +0 }},
+    {{ -1, +1 }, { +1, +1 }},
+    {{ -1, -1 }, { +0, +1 }},
     // flip horizontally
-    {{ +1, -1, +0 }, { +0, +0 }},
-    {{ +1, +1, +0 }, { +0, +1 }},
-    {{ -1, +1, +0 }, { +1, +1 }},
-    {{ -1, -1, +0 }, { +1, +0 }},
+    {{ +1, -1 }, { +0, +0 }},
+    {{ +1, +1 }, { +0, +1 }},
+    {{ -1, +1 }, { +1, +1 }},
+    {{ -1, -1 }, { +1, +0 }},
     // flip vertically
-    {{ +1, -1, +0 }, { +1, +1 }},
-    {{ +1, +1, +0 }, { +1, +0 }},
-    {{ -1, +1, +0 }, { +0, +0 }},
-    {{ -1, -1, +0 }, { +0, +1 }},
+    {{ +1, -1 }, { +1, +1 }},
+    {{ +1, +1 }, { +1, +0 }},
+    {{ -1, +1 }, { +0, +0 }},
+    {{ -1, -1 }, { +0, +1 }},
     // flip source image horizontally, the rotate 90 degrees clock-wise
-    {{ +1, -1, +0 }, { +0, +1 }},
-    {{ +1, +1, +0 }, { +1, +1 }},
-    {{ -1, +1, +0 }, { +1, +0 }},
-    {{ -1, -1, +0 }, { +0, +0 }},
+    {{ +1, -1 }, { +0, +1 }},
+    {{ +1, +1 }, { +1, +1 }},
+    {{ -1, +1 }, { +1, +0 }},
+    {{ -1, -1 }, { +0, +0 }},
     // flip source image vertically, the rotate 90 degrees clock-wise
-    {{ +1, -1, +0 }, { +1, +0 }},
-    {{ +1, +1, +0 }, { +0, +0 }},
-    {{ -1, +1, +0 }, { +0, +1 }},
-    {{ -1, -1, +0 }, { +1, +1 }},
+    {{ +1, -1 }, { +1, +0 }},
+    {{ +1, +1 }, { +0, +0 }},
+    {{ -1, +1 }, { +0, +1 }},
+    {{ -1, -1 }, { +1, +1 }},
 };
 
 // Vertex indices for predefined rotation angles.
@@ -320,7 +321,7 @@ bool TextureDraw::drawImpl(GLuint texture, float rotation, float dx, float dy, f
 
     s_gles2.glEnableVertexAttribArray(mPositionSlot);
     s_gles2.glVertexAttribPointer(mPositionSlot,
-                                  3,
+                                  2,
                                   GL_FLOAT,
                                   GL_FALSE,
                                   sizeof(Vertex),
@@ -343,7 +344,7 @@ bool TextureDraw::drawImpl(GLuint texture, float rotation, float dx, float dy, f
                                   sizeof(Vertex),
                                   reinterpret_cast<GLvoid*>(
                                         static_cast<uintptr_t>(
-                                                sizeof(float) * 3)));
+                                                offsetof(Vertex, coord))));
 
 #ifdef DEBUG_TEXTURE_DRAW
     // Validate program, just to be sure.
@@ -518,7 +519,7 @@ void TextureDraw::preDrawLayer() {
 
     s_gles2.glEnableVertexAttribArray(mPositionSlot);
     s_gles2.glVertexAttribPointer(mPositionSlot,
-                                  3,
+                                  2,
                                   GL_FLOAT,
                                   GL_FALSE,
                                   sizeof(Vertex),
@@ -532,7 +533,7 @@ void TextureDraw::preDrawLayer() {
                                   sizeof(Vertex),
                                   reinterpret_cast<GLvoid*>(
                                         static_cast<uintptr_t>(
-                                                sizeof(float) * 3)));
+                                                offsetof(Vertex, coord))));
 #ifdef DEBUG_TEXTURE_DRAW
     err = s_gles2.glGetError();
     if (err != GL_NO_ERROR) {
