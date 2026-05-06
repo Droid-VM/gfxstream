@@ -3187,17 +3187,17 @@ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, std::vector
         return false;
     }
 
-    VkDeviceSize bytesNeeded = 0;
-    bool result = getFormatTransferInfo(colorBufferInfo->imageCreateInfoShallow.format,
-                                        colorBufferInfo->imageCreateInfoShallow.extent,
-                                        &bytesNeeded, nullptr);
+    TransferInfo transferInfo;
+    bool result =
+        getFormatTransferInfo(colorBufferInfo->imageCreateInfoShallow.format,
+                              colorBufferInfo->imageCreateInfoShallow.extent, &transferInfo);
     if (!result) {
         GFXSTREAM_ERROR("Failed to read from ColorBuffer:%d, failed to get read size.",
                         colorBufferHandle);
         return false;
     }
 
-    bytes->resize(bytesNeeded);
+    bytes->resize(transferInfo.stagingBufferCopySize);
 
     result = readColorBufferToBytesLocked(
         colorBufferHandle, 0, 0, colorBufferInfo->imageCreateInfoShallow.extent.width,
@@ -3243,15 +3243,15 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
         return false;
     }
 
-    VkDeviceSize bufferCopySize = 0;
-    std::vector<VkBufferImageCopy> bufferImageCopies;
+    TransferInfo transferInfo;
     if (!getFormatTransferInfo(colorBufferInfo->imageCreateInfoShallow.format,
-                               colorBufferInfo->imageCreateInfoShallow.extent, &bufferCopySize,
-                               &bufferImageCopies)) {
+                               colorBufferInfo->imageCreateInfoShallow.extent, &transferInfo)) {
         GFXSTREAM_ERROR("Failed to read ColorBuffer:%d, unable to get transfer info.",
                         colorBufferHandle);
         return false;
     }
+    VkDeviceSize bufferCopySize = transferInfo.stagingBufferCopySize;
+    const std::vector<VkBufferImageCopy>& bufferImageCopies = transferInfo.bufferImageCopies;
 
     // Avoid transitioning from VK_IMAGE_LAYOUT_UNDEFINED. Unfortunetly, Android does not
     // yet have a mechanism for sharing the expected VkImageLayout. However, the Vulkan
@@ -3278,6 +3278,8 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
     const VkImageLayout currentLayout = colorBufferInfo->currentLayout;
     const VkImageLayout transferSrcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
+    const VkImageAspectFlags aspectMask =
+        getFormatAspects(colorBufferInfo->imageCreateInfoShallow.format);
     const VkImageMemoryBarrier toTransferSrcImageBarrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -3290,7 +3292,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
         .image = colorBufferInfo->image,
         .subresourceRange =
             {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .aspectMask = aspectMask,
                 .baseMipLevel = 0,
                 .levelCount = 1,
                 .baseArrayLayer = 0,
@@ -3321,7 +3323,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
             .image = colorBufferInfo->image,
             .subresourceRange =
                 {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .aspectMask = aspectMask,
                     .baseMipLevel = 0,
                     .levelCount = 1,
                     .baseArrayLayer = 0,
@@ -3387,14 +3389,19 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
         VK_CHECK(vk->vkInvalidateMappedMemoryRanges(mDevice, 1, &toInvalidate));
     }
 
-    if (bufferCopySize > outPixelsSize) {
-        GFXSTREAM_ERROR(
-            "Invalid buffer size for readColorBufferToBytes operation."
-            "Required: %llu, Actual: %llu",
-            bufferCopySize, outPixelsSize);
-        bufferCopySize = outPixelsSize;
+    if (transferInfo.unpackFunction) {
+        transferInfo.unpackFunction(colorBufferInfo->imageCreateInfoShallow.extent,
+                                    (const uint8_t*)mStaging.mMappedPtr, (uint8_t*)outPixels);
+    } else {
+        if (bufferCopySize > outPixelsSize) {
+            GFXSTREAM_ERROR(
+                "Invalid buffer size for readColorBufferToBytes operation."
+                "Required: %llu, Actual: %llu",
+                bufferCopySize, outPixelsSize);
+            bufferCopySize = outPixelsSize;
+        }
+        std::memcpy(outPixels, mStaging.mMappedPtr, bufferCopySize);
     }
-    std::memcpy(outPixels, mStaging.mMappedPtr, bufferCopySize);
 
     return true;
 }
@@ -3879,14 +3886,15 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
     }
 
     const VkFormat creationFormat = colorBufferInfo->imageCreateInfoShallow.format;
-    VkDeviceSize dstBufferSize = 0;
-    std::vector<VkBufferImageCopy> bufferImageCopies;
+    TransferInfo transferInfo;
     if (!getFormatTransferInfo(creationFormat, colorBufferInfo->imageCreateInfoShallow.extent,
-                               &dstBufferSize, &bufferImageCopies)) {
+                               &transferInfo)) {
         GFXSTREAM_ERROR("Failed to update ColorBuffer:%d, unable to get transfer info.",
                         colorBufferHandle);
         return false;
     }
+    VkDeviceSize dstBufferSize = transferInfo.stagingBufferCopySize;
+    const std::vector<VkBufferImageCopy>& bufferImageCopies = transferInfo.bufferImageCopies;
 
     const VkDeviceSize stagingBufferSize = mStaging.mAllocationSize;
     if (dstBufferSize > stagingBufferSize) {
@@ -3928,6 +3936,9 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
                             formatString.c_str(), internalFormatString.c_str());
             return false;
         }
+    } else if (transferInfo.packFunction) {
+        transferInfo.packFunction(colorBufferInfo->imageCreateInfoShallow.extent,
+                                  (const uint8_t*)pixels, (uint8_t*)stagingBufferPtr);
     } else {
         const size_t expectedInputSize = dstBufferSize;
         if (inputPixelsSize != 0 && inputPixelsSize != expectedInputSize) {
@@ -3975,6 +3986,7 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
     if (isSnapshotLoad) {
         currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     }
+    const VkImageAspectFlags aspectMask = getFormatAspects(creationFormat);
     const VkImageMemoryBarrier toTransferDstImageBarrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -3987,7 +3999,7 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
         .image = colorBufferInfo->image,
         .subresourceRange =
             {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .aspectMask = aspectMask,
                 .baseMipLevel = 0,
                 .levelCount = 1,
                 .baseArrayLayer = 0,
@@ -4017,7 +4029,7 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
             .image = colorBufferInfo->image,
             .subresourceRange =
                 {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .aspectMask = aspectMask,
                     .baseMipLevel = 0,
                     .levelCount = 1,
                     .baseArrayLayer = 0,
