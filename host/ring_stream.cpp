@@ -425,6 +425,8 @@ void RingStream::onSave(gfxstream::Stream* stream) {
 
     stream->putBe32(mUnavailableReadCount);
 
+    mSavedRingConfig = *mContext.ring_config;
+
     SaveRingConfig(stream, mSavedRingConfig);
 
     SaveAsgContext(stream, mContext);

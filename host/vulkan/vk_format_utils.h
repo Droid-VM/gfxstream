@@ -158,25 +158,29 @@ namespace vk {
     f(VK_FORMAT_X8_D24_UNORM_PACK32, 4)                \
     f(VK_FORMAT_D32_SFLOAT, 4)                         \
     f(VK_FORMAT_S8_UINT, 1)                            \
-    f(VK_FORMAT_D16_UNORM_S8_UINT, 3)                  \
-    f(VK_FORMAT_D24_UNORM_S8_UINT, 4)                  \
-    f(VK_FORMAT_D32_SFLOAT_S8_UINT, 5)                 \
     f(VK_FORMAT_R10X6_UNORM_PACK16, 2)                 \
     f(VK_FORMAT_R10X6G10X6_UNORM_2PACK16, 4)           \
     f(VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16, 8) \
     f(VK_FORMAT_R12X4_UNORM_PACK16, 2)                 \
     f(VK_FORMAT_R12X4G12X4_UNORM_2PACK16, 4)           \
+    f(VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR, 2)          \
+    f(VK_FORMAT_A8_UNORM_KHR, 1)                       \
     f(VK_FORMAT_R12X4G12X4B12X4A12X4_UNORM_4PACK16, 8)
-
 
 constexpr uint32_t getBytesPerPixel(VkFormat format) {
 #define VK_FORMAT_BPP(format, bpp) case (format): return (bpp);
     switch(format) {
         LIST_VK_FORMATS_LINEAR(VK_FORMAT_BPP)
-    default:
-        // TODO: add all formats under VkFormat
-        GFXSTREAM_ERROR("%s: Unhandled format: %s [%d]",
-                        __func__, string_VkFormat(format), format);
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+            return 3;
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+            return 4;
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return 5;
+        default:
+            // TODO: add all formats under VkFormat
+            GFXSTREAM_ERROR("%s: Unhandled format: %s [%d]", __func__, string_VkFormat(format),
+                            format);
     }
 #undef VK_FORMAT_BPP
     return 0;  // Return zero for proper error handling from the caller
@@ -337,6 +341,26 @@ constexpr bool formatIsDepthOrStencil(VkFormat format) {
     }
 }
 
+constexpr VkImageAspectFlags getFormatAspects(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_X8_D24_UNORM_PACK32:
+            return VK_IMAGE_ASPECT_DEPTH_BIT;
+
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+
+        case VK_FORMAT_S8_UINT:
+            return VK_IMAGE_ASPECT_STENCIL_BIT;
+
+        default:
+            return VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+}
+
 constexpr bool formatRequiresSamplerYcbcrConversion(VkFormat format) {
     switch (format) {
         case VK_FORMAT_G8B8G8R8_422_UNORM:
@@ -397,9 +421,35 @@ std::optional<GfxstreamFormat> ToGfxstreamFormat(VkFormat format);
 // Returns the size in bytes needed to copy an image with the given format,
 // width, height, and depth to a staging buffer and the VkBufferImageCopy-s needed
 // to copy from a staging buffer to destination VkImage.
-bool getFormatTransferInfo(VkFormat format, VkExtent3D extent,
-                           VkDeviceSize* outStagingBufferCopySize,
-                           std::vector<VkBufferImageCopy>* outBufferImageCopies);
+struct TransferInfo {
+    VkDeviceSize stagingBufferCopySize = 0;
+    std::vector<VkBufferImageCopy> bufferImageCopies;
+
+    // Some formats can not be copied directly transferred in their natural format.
+    // For example, depth stencil formats must be transferred by copying the depth
+    // and stencil aspects separately and to/from separate buffer regions (see
+    // b/507879052). The `packFunction` and `unpackFunction` will return functions
+    // to convert the contents to/from their natural representation to representations
+    // supported by transfers.
+
+    // Function that can be used to convert from the natural representation
+    // (e.g. a 2x2 VK_FORMAT_D24_UNORM_S8_UINT image that is DDDSDDDSDDDSDDDS) to a
+    // representation supported by a buffer copy (e.g. 2x2 depth data followed
+    // stencil data that is DDDDDDDDDDDDSSSS).
+    using PackFunction = void (*)(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst);
+    // If nullptr, the format does not require packing.
+    PackFunction packFunction = nullptr;
+
+    // Function that can be used to convert from representation supported by a buffer
+    // copy (e.g. 2x2 depth data followed by stencil data that is DDDDDDDDDDDDSSSS) to
+    // the natural representation (e.g. a 2x2 VK_FORMAT_D24_UNORM_S8_UINT image that
+    // is DDDSDDDSDDDSDDDS).
+    using UnpackFunction = void (*)(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst);
+    // If nullptr, the format does not require unpacking.
+    UnpackFunction unpackFunction = nullptr;
+};
+
+bool getFormatTransferInfo(VkFormat format, VkExtent3D extent, TransferInfo* outTransferInfo);
 
 }  // namespace vk
 }  // namespace host

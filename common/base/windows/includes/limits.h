@@ -14,9 +14,19 @@
 
 #include_next <limits.h>
 
-#ifndef _AEMU_LIMITS_H_
+#ifndef _AEMU_LIMITS_H_  /* use the same guard as in aemu to prevent conflicts */
 #define _AEMU_LIMITS_H_
 
-#define SSIZE_MAX ((size_t)-1)
+#if !defined(PATH_MAX)
 #define PATH_MAX MAX_PATH
-#endif	/* Not _AEMU_LIMITS_H_ */
+#endif
+
+#if !defined(FILENAME_MAX)
+#define FILENAME_MAX MAX_PATH
+#endif
+
+#if !defined(NAME_MAX)
+#define NAME_MAX FILENAME_MAX
+#endif
+
+#endif	/* _AEMU_LIMITS_H_ */
