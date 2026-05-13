@@ -1184,6 +1184,16 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         deviceInfos[i].hasSamplerYcbcrConversionExtension =
             vk_util::extensionSupported(deviceExts, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
 
+        deviceInfos[i].supportsSwapchain =
+            vk_util::extensionSupported(deviceExts, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+        std::string deviceName = std::string(deviceInfos[i].physdevProps.deviceName);
+        std::transform(deviceName.begin(), deviceName.end(), deviceName.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (deviceName.find("llvmpipe") != std::string::npos) {
+            deviceInfos[i].isLavapipe = true;
+        }
+
         deviceInfos[i].hasNvidiaDeviceDiagnosticCheckpointsExtension =
             vk_util::extensionSupported(deviceExts, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
 
@@ -1415,10 +1425,18 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     }
 #endif
 
-    // We need to always enable swapchain extensions to be able to use this device
+    // We need to enable swapchain extensions to be able to use this device
     // to do VK_IMAGE_LAYOUT_PRESENT_SRC_KHR transition operations done
-    // in releaseColorBufferForGuestUse for the apps using Vulkan swapchain
-    selectedDeviceExtensionNames.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    // in releaseColorBufferForGuestUse for the apps using Vulkan swapchain.
+    // If we are in surfaceless mode and using Lavapipe, we can skip this since
+    // building all of swapchain code can be hard in cloud environments.
+    const bool shouldSkipSwapchain =
+        emulation->mFeatures.Surfaceless.enabled() && emulation->mDeviceInfo.isLavapipe;
+    if (emulation->mDeviceInfo.supportsSwapchain && emulation->mInstanceSupportsSurface &&
+        !shouldSkipSwapchain) {
+        selectedDeviceExtensionNames.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        emulation->mSwapchainEnabled = true;
+    }
 
     if (emulation->mFeatures.VulkanNativeSwapchain.enabled()) {
         for (auto extension : SwapChainStateVk::getRequiredDeviceExtensions()) {
@@ -1825,6 +1843,10 @@ bool VkEmulation::supportsDmaBuf() const { return mDeviceInfo.supportsDmaBuf; }
 bool VkEmulation::supportsExternalMemoryHostProperties() const {
     return mDeviceInfo.supportsExternalMemoryHostProps;
 }
+
+bool VkEmulation::isSwapchainEnabled() const { return mSwapchainEnabled; }
+
+bool VkEmulation::isLavapipe() const { return mDeviceInfo.isLavapipe; }
 
 std::optional<VkPhysicalDeviceRobustness2FeaturesEXT> VkEmulation::getRobustness2Features() const {
     return mDeviceInfo.robustness2Features;
@@ -4707,6 +4729,16 @@ VkImageLayout VkEmulation::getColorBufferCurrentLayout(uint32_t colorBufferHandl
     return infoPtr->currentLayout;
 }
 
+bool VkEmulation::needsImageLayoutAdjustment() const { return !mSwapchainEnabled; }
+
+VkImageLayout VkEmulation::adjustImageLayout(VkImageLayout layout) const {
+    if (needsImageLayoutAdjustment() && layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+        return VK_IMAGE_LAYOUT_GENERAL;
+    } else {
+        return layout;
+    }
+}
+
 // Allocate a ready to use VkCommandBuffer for queue transfer. The caller needs
 // to signal the returned VkFence when the VkCommandBuffer completes.
 std::tuple<VkCommandBuffer, VkFence> VkEmulation::allocateQueueTransferCommandBufferLocked() {
@@ -4766,8 +4798,6 @@ std::tuple<VkCommandBuffer, VkFence> VkEmulation::allocateQueueTransferCommandBu
     return std::make_tuple(commandBuffer, fence);
 }
 
-const VkImageLayout kGuestUseDefaultImageLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
 void VkEmulation::releaseColorBufferForGuestUse(uint32_t colorBufferHandle) {
     std::lock_guard<std::mutex> lock(mMutex);
 
@@ -4778,6 +4808,7 @@ void VkEmulation::releaseColorBufferForGuestUse(uint32_t colorBufferHandle) {
         return;
     }
 
+    const auto kGuestUseDefaultImageLayout = adjustImageLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     std::optional<VkImageMemoryBarrier> layoutTransitionBarrier;
     if (infoPtr->currentLayout != kGuestUseDefaultImageLayout) {
         layoutTransitionBarrier = VkImageMemoryBarrier{
@@ -4913,7 +4944,7 @@ std::unique_ptr<BorrowedImageInfoVk> VkEmulation::borrowColorBufferForCompositio
         compositorInfo->postBorrowLayout = colorBufferInfo->currentLayout;
 
         if (compositorInfo->postBorrowLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
-            compositorInfo->postBorrowLayout = kGuestUseDefaultImageLayout;
+            compositorInfo->postBorrowLayout = adjustImageLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         }
     }
 
@@ -4947,7 +4978,7 @@ std::unique_ptr<BorrowedImageInfoVk> VkEmulation::borrowColorBufferForDisplay(
     // Instruct the display to perform the queue transfer release after use so
     // that the color buffer can be acquired by the guest.
     compositorInfo->postBorrowQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-    compositorInfo->postBorrowLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    compositorInfo->postBorrowLayout = adjustImageLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
     colorBufferInfo->currentLayout = compositorInfo->postBorrowLayout;
     colorBufferInfo->currentQueueFamilyIndex = compositorInfo->postBorrowQueueFamilyIndex;
