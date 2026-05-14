@@ -379,6 +379,17 @@ class VkDecoderGlobalState::Impl {
         cmdBufferInfo->eventsReset.clear();
     }
 
+    bool isMemoryBoundToColorBuffer(VkDeviceMemory memory) REQUIRES(mMutex) {
+        if (memory == VK_NULL_HANDLE) {
+            return false;
+        }
+        auto* memoryInfo = gfxstream::base::find(mMemoryInfo, memory);
+        if (memoryInfo && memoryInfo->boundColorBuffer) {
+            return true;
+        }
+        return false;
+    }
+
     StateBlock createSnapshotStateBlock(VkDevice unboxed_device,
                                         VkQueue unboxed_queue = VK_NULL_HANDLE,
                                         int queueFamilyIndex = -1) REQUIRES(mMutex) {
@@ -511,6 +522,10 @@ class VkDecoderGlobalState::Impl {
             }
             const ImageInfo& imageInfo = mImageInfo[unboxedImage];
             if (imageInfo.memory == VK_NULL_HANDLE) {
+                continue;
+            }
+            if (isMemoryBoundToColorBuffer(imageInfo.memory)) {
+                // color buffer is saved in ColorBufferVk already
                 continue;
             }
             // Vulkan command playback doesn't recover image layout. We need to do it here.
@@ -826,6 +841,10 @@ class VkDecoderGlobalState::Impl {
                 auto unboxedImage = unbox_VkImage(boxedImage);
                 ImageInfo& imageInfo = mImageInfo[unboxedImage];
                 if (imageInfo.memory == VK_NULL_HANDLE) {
+                    continue;
+                }
+                if (isMemoryBoundToColorBuffer(imageInfo.memory)) {
+                    // color buffer is loaded in ColorBufferVk already
                     continue;
                 }
                 // Playback doesn't recover image layout. We need to do it here.
@@ -5597,6 +5616,28 @@ class VkDecoderGlobalState::Impl {
         return imb.dstQueueFamilyIndex;
     }
 
+    template <typename BarrierType>
+    bool needsImageLayoutAdjustment(uint32_t count, const BarrierType* barriers) {
+        if (!m_vkEmulation->needsImageLayoutAdjustment()) {
+            return false;
+        }
+        for (uint32_t i = 0; i < count; ++i) {
+            if (barriers[i].oldLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ||
+                barriers[i].newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    template <typename BarrierType>
+    void adjustImageLayout(uint32_t count, BarrierType* barriers) {
+        for (uint32_t i = 0; i < count; ++i) {
+            barriers[i].oldLayout = m_vkEmulation->adjustImageLayout(barriers[i].oldLayout);
+            barriers[i].newLayout = m_vkEmulation->adjustImageLayout(barriers[i].newLayout);
+        }
+    }
+
     template <typename VkImageMemoryBarrierType>
     void processImageMemoryBarrierLocked(VkCommandBuffer commandBuffer,
                                          uint32_t imageMemoryBarrierCount,
@@ -5644,6 +5685,14 @@ class VkDecoderGlobalState::Impl {
 
         for (uint32_t i = 0; i < imageMemoryBarrierCount; ++i) {
             convertQueueFamilyForeignToExternal_VkImageMemoryBarrier(const_cast<VkImageMemoryBarrier&>(pImageMemoryBarriers[i]));
+        }
+
+        std::vector<VkImageMemoryBarrier> mappedImageMemoryBarriers;
+        if (needsImageLayoutAdjustment(imageMemoryBarrierCount, pImageMemoryBarriers)) {
+            mappedImageMemoryBarriers.assign(pImageMemoryBarriers,
+                                             pImageMemoryBarriers + imageMemoryBarrierCount);
+            adjustImageLayout(imageMemoryBarrierCount, mappedImageMemoryBarriers.data());
+            pImageMemoryBarriers = mappedImageMemoryBarriers.data();
         }
 
         if (imageMemoryBarrierCount == 0) {
@@ -5735,6 +5784,19 @@ class VkDecoderGlobalState::Impl {
             convertQueueFamilyForeignToExternal_VkImageMemoryBarrier2(const_cast<VkImageMemoryBarrier2&>(pDependencyInfo->pImageMemoryBarriers[i]));
         }
 
+        VkDependencyInfo mappedDependencyInfo = *pDependencyInfo;
+        std::vector<VkImageMemoryBarrier2> mappedImageMemoryBarriers;
+        if (needsImageLayoutAdjustment(pDependencyInfo->imageMemoryBarrierCount,
+                                       pDependencyInfo->pImageMemoryBarriers)) {
+            mappedImageMemoryBarriers.assign(
+                pDependencyInfo->pImageMemoryBarriers,
+                pDependencyInfo->pImageMemoryBarriers + pDependencyInfo->imageMemoryBarrierCount);
+            adjustImageLayout(pDependencyInfo->imageMemoryBarrierCount,
+                              mappedImageMemoryBarriers.data());
+            mappedDependencyInfo.pImageMemoryBarriers = mappedImageMemoryBarriers.data();
+            pDependencyInfo = &mappedDependencyInfo;
+        }
+
         std::lock_guard<std::mutex> lock(mMutex);
         CommandBufferInfo* cmdBufferInfo = gfxstream::base::find(mCommandBufferInfo, commandBuffer);
         if (!cmdBufferInfo) return;
@@ -5748,6 +5810,107 @@ class VkDecoderGlobalState::Impl {
         // TODO: If this is a decompressed image, handle decompression before calling
         // VkCmdvkCmdPipelineBarrier2 i.e. match on_vkCmdPipelineBarrier implementation
         vk->vkCmdPipelineBarrier2(commandBuffer, pDependencyInfo);
+    }
+
+    void on_vkCmdWaitEvents(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                            VkCommandBuffer boxed_commandBuffer, uint32_t eventCount,
+                            const VkEvent* pEvents, VkPipelineStageFlags srcStageMask,
+                            VkPipelineStageFlags dstStageMask, uint32_t memoryBarrierCount,
+                            const VkMemoryBarrier* pMemoryBarriers,
+                            uint32_t bufferMemoryBarrierCount,
+                            const VkBufferMemoryBarrier* pBufferMemoryBarriers,
+                            uint32_t imageMemoryBarrierCount,
+                            const VkImageMemoryBarrier* pImageMemoryBarriers) {
+        auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
+        auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
+
+        for (uint32_t i = 0; i < bufferMemoryBarrierCount; ++i) {
+            convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier(
+                const_cast<VkBufferMemoryBarrier&>(pBufferMemoryBarriers[i]));
+        }
+
+        for (uint32_t i = 0; i < imageMemoryBarrierCount; ++i) {
+            convertQueueFamilyForeignToExternal_VkImageMemoryBarrier(
+                const_cast<VkImageMemoryBarrier&>(pImageMemoryBarriers[i]));
+        }
+
+        std::vector<VkImageMemoryBarrier> mappedImageMemoryBarriers;
+        if (needsImageLayoutAdjustment(imageMemoryBarrierCount, pImageMemoryBarriers)) {
+            mappedImageMemoryBarriers.assign(pImageMemoryBarriers,
+                                             pImageMemoryBarriers + imageMemoryBarrierCount);
+            adjustImageLayout(imageMemoryBarrierCount, mappedImageMemoryBarriers.data());
+            pImageMemoryBarriers = mappedImageMemoryBarriers.data();
+        }
+
+        std::lock_guard<std::mutex> lock(mMutex);
+        processImageMemoryBarrierLocked(commandBuffer, imageMemoryBarrierCount,
+                                        pImageMemoryBarriers);
+
+        vk->vkCmdWaitEvents(commandBuffer, eventCount, pEvents, srcStageMask, dstStageMask,
+                            memoryBarrierCount, pMemoryBarriers, bufferMemoryBarrierCount,
+                            pBufferMemoryBarriers, imageMemoryBarrierCount, pImageMemoryBarriers);
+    }
+
+    void on_vkCmdWaitEvents2(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                             VkCommandBuffer boxed_commandBuffer, uint32_t eventCount,
+                             const VkEvent* pEvents, const VkDependencyInfo* pDependencyInfos) {
+        auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
+        auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
+
+        std::vector<VkDependencyInfo> mappedDependencyInfos;
+        std::vector<std::vector<VkImageMemoryBarrier2>> mappedImageMemoryBarriers;
+
+        bool needFiltering = false;
+        for (uint32_t i = 0; i < eventCount; ++i) {
+            for (uint32_t j = 0; j < pDependencyInfos[i].bufferMemoryBarrierCount; ++j) {
+                convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier2(
+                    const_cast<VkBufferMemoryBarrier2&>(
+                        pDependencyInfos[i].pBufferMemoryBarriers[j]));
+            }
+            for (uint32_t j = 0; j < pDependencyInfos[i].imageMemoryBarrierCount; ++j) {
+                convertQueueFamilyForeignToExternal_VkImageMemoryBarrier2(
+                    const_cast<VkImageMemoryBarrier2&>(
+                        pDependencyInfos[i].pImageMemoryBarriers[j]));
+            }
+            if (needsImageLayoutAdjustment(pDependencyInfos[i].imageMemoryBarrierCount,
+                                           pDependencyInfos[i].pImageMemoryBarriers)) {
+                needFiltering = true;
+            }
+        }
+
+        if (needFiltering) {
+            mappedDependencyInfos.assign(pDependencyInfos, pDependencyInfos + eventCount);
+            mappedImageMemoryBarriers.resize(eventCount);
+            for (uint32_t i = 0; i < eventCount; ++i) {
+                if (needsImageLayoutAdjustment(mappedDependencyInfos[i].imageMemoryBarrierCount,
+                                               mappedDependencyInfos[i].pImageMemoryBarriers)) {
+                    mappedImageMemoryBarriers[i].assign(
+                        mappedDependencyInfos[i].pImageMemoryBarriers,
+                        mappedDependencyInfos[i].pImageMemoryBarriers +
+                            mappedDependencyInfos[i].imageMemoryBarrierCount);
+                    adjustImageLayout(mappedDependencyInfos[i].imageMemoryBarrierCount,
+                                      mappedImageMemoryBarriers[i].data());
+                    mappedDependencyInfos[i].pImageMemoryBarriers =
+                        mappedImageMemoryBarriers[i].data();
+                }
+            }
+            pDependencyInfos = mappedDependencyInfos.data();
+        }
+
+        std::lock_guard<std::mutex> lock(mMutex);
+        for (uint32_t i = 0; i < eventCount; ++i) {
+            processImageMemoryBarrierLocked(commandBuffer,
+                                            pDependencyInfos[i].imageMemoryBarrierCount,
+                                            pDependencyInfos[i].pImageMemoryBarriers);
+        }
+
+        vk->vkCmdWaitEvents2(commandBuffer, eventCount, pEvents, pDependencyInfos);
+    }
+
+    void on_vkCmdWaitEvents2KHR(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                                VkCommandBuffer boxed_commandBuffer, uint32_t eventCount,
+                                const VkEvent* pEvents, const VkDependencyInfo* pDependencyInfos) {
+        on_vkCmdWaitEvents2(pool, {}, boxed_commandBuffer, eventCount, pEvents, pDependencyInfos);
     }
 
     bool mapHostVisibleMemoryToGuestPhysicalAddressLocked(VulkanDispatch* vk, VkDevice device,
@@ -6754,11 +6917,12 @@ class VkDecoderGlobalState::Impl {
             // vkQueueSignalReleaseImageANDROID() is only called by the Android framework's
             // implementation of vkQueuePresentKHR(). The guest application is responsible for
             // transitioning the image layout of the image passed to vkQueuePresentKHR() to
-            // VK_IMAGE_LAYOUT_PRESENT_SRC_KHR before the call. If the host is using native
+            // the default guest image layout before the call. If the host is using native
             // Vulkan images where `image` is backed with the same memory as its ColorBuffer,
             // then we need to update the tracked layout for that ColorBuffer.
-            m_vkEmulation->setColorBufferCurrentLayout(anbInfo->getColorBufferHandle(),
-                                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+            m_vkEmulation->setColorBufferCurrentLayout(
+                anbInfo->getColorBufferHandle(),
+                m_vkEmulation->adjustImageLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR));
         }
 
         if (snapshotsEnabled()) {
@@ -8212,15 +8376,68 @@ class VkDecoderGlobalState::Impl {
                 }
             }
         }
+
         std::vector<VkAttachmentDescription> attachments;
-        if (needReformat) {
+        std::vector<VkSubpassDescription> subpasses;
+        // Pointers for subpass attachments to keep them alive until the vkCreateRenderPass call
+        std::vector<std::vector<VkAttachmentReference>> inputAttachments;
+        std::vector<std::vector<VkAttachmentReference>> colorAttachments;
+        std::vector<std::vector<VkAttachmentReference>> resolveAttachments;
+
+        if (needReformat || m_vkEmulation->needsImageLayoutAdjustment()) {
             createInfo = *pCreateInfo;
             attachments.assign(pCreateInfo->pAttachments,
                                pCreateInfo->pAttachments + pCreateInfo->attachmentCount);
-            createInfo.pAttachments = attachments.data();
             for (auto& attachment : attachments) {
-                attachment.format = CompressedImageInfo::getOutputFormat(attachment.format);
+                if (needReformat && deviceInfo->needEmulatedDecompression(attachment.format)) {
+                    attachment.format = CompressedImageInfo::getOutputFormat(attachment.format);
+                }
+                attachment.initialLayout =
+                    m_vkEmulation->adjustImageLayout(attachment.initialLayout);
+                attachment.finalLayout = m_vkEmulation->adjustImageLayout(attachment.finalLayout);
             }
+            createInfo.pAttachments = attachments.data();
+
+            if (m_vkEmulation->needsImageLayoutAdjustment()) {
+                subpasses.assign(pCreateInfo->pSubpasses,
+                                 pCreateInfo->pSubpasses + pCreateInfo->subpassCount);
+                inputAttachments.resize(subpasses.size());
+                colorAttachments.resize(subpasses.size());
+                resolveAttachments.resize(subpasses.size());
+
+                for (uint32_t i = 0; i < createInfo.subpassCount; i++) {
+                    auto& subpass = subpasses[i];
+                    if (subpass.pInputAttachments) {
+                        inputAttachments[i].assign(
+                            subpass.pInputAttachments,
+                            subpass.pInputAttachments + subpass.inputAttachmentCount);
+                        for (auto& ref : inputAttachments[i]) {
+                            ref.layout = m_vkEmulation->adjustImageLayout(ref.layout);
+                        }
+                        subpass.pInputAttachments = inputAttachments[i].data();
+                    }
+                    if (subpass.pColorAttachments) {
+                        colorAttachments[i].assign(
+                            subpass.pColorAttachments,
+                            subpass.pColorAttachments + subpass.colorAttachmentCount);
+                        for (auto& ref : colorAttachments[i]) {
+                            ref.layout = m_vkEmulation->adjustImageLayout(ref.layout);
+                        }
+                        subpass.pColorAttachments = colorAttachments[i].data();
+                    }
+                    if (subpass.pResolveAttachments) {
+                        resolveAttachments[i].assign(
+                            subpass.pResolveAttachments,
+                            subpass.pResolveAttachments + subpass.colorAttachmentCount);
+                        for (auto& ref : resolveAttachments[i]) {
+                            ref.layout = m_vkEmulation->adjustImageLayout(ref.layout);
+                        }
+                        subpass.pResolveAttachments = resolveAttachments[i].data();
+                    }
+                }
+                createInfo.pSubpasses = subpasses.data();
+            }
+
             pCreateInfo = &createInfo;
         }
         VkResult res = vk->vkCreateRenderPass(device, pCreateInfo, pAllocator, pRenderPass);
@@ -8244,7 +8461,65 @@ class VkDecoderGlobalState::Impl {
                                     VkRenderPass* pRenderPass) {
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
+        VkRenderPassCreateInfo2 createInfo;
         std::lock_guard<std::mutex> lock(mMutex);
+
+        std::vector<VkAttachmentDescription2> attachments;
+        std::vector<VkSubpassDescription2> subpasses;
+        std::vector<std::vector<VkAttachmentReference2>> inputAttachments;
+        std::vector<std::vector<VkAttachmentReference2>> colorAttachments;
+        std::vector<std::vector<VkAttachmentReference2>> resolveAttachments;
+
+        if (m_vkEmulation->needsImageLayoutAdjustment()) {
+            createInfo = *pCreateInfo;
+            attachments.assign(pCreateInfo->pAttachments,
+                               pCreateInfo->pAttachments + pCreateInfo->attachmentCount);
+            for (auto& attachment : attachments) {
+                attachment.initialLayout =
+                    m_vkEmulation->adjustImageLayout(attachment.initialLayout);
+                attachment.finalLayout = m_vkEmulation->adjustImageLayout(attachment.finalLayout);
+            }
+            createInfo.pAttachments = attachments.data();
+
+            subpasses.assign(pCreateInfo->pSubpasses,
+                             pCreateInfo->pSubpasses + pCreateInfo->subpassCount);
+            inputAttachments.resize(subpasses.size());
+            colorAttachments.resize(subpasses.size());
+            resolveAttachments.resize(subpasses.size());
+
+            for (uint32_t i = 0; i < createInfo.subpassCount; i++) {
+                auto& subpass = subpasses[i];
+                if (subpass.pInputAttachments) {
+                    inputAttachments[i].assign(
+                        subpass.pInputAttachments,
+                        subpass.pInputAttachments + subpass.inputAttachmentCount);
+                    for (auto& ref : inputAttachments[i]) {
+                        ref.layout = m_vkEmulation->adjustImageLayout(ref.layout);
+                    }
+                    subpass.pInputAttachments = inputAttachments[i].data();
+                }
+                if (subpass.pColorAttachments) {
+                    colorAttachments[i].assign(
+                        subpass.pColorAttachments,
+                        subpass.pColorAttachments + subpass.colorAttachmentCount);
+                    for (auto& ref : colorAttachments[i]) {
+                        ref.layout = m_vkEmulation->adjustImageLayout(ref.layout);
+                    }
+                    subpass.pColorAttachments = colorAttachments[i].data();
+                }
+                if (subpass.pResolveAttachments) {
+                    resolveAttachments[i].assign(
+                        subpass.pResolveAttachments,
+                        subpass.pResolveAttachments + subpass.colorAttachmentCount);
+                    for (auto& ref : resolveAttachments[i]) {
+                        ref.layout = m_vkEmulation->adjustImageLayout(ref.layout);
+                    }
+                    subpass.pResolveAttachments = resolveAttachments[i].data();
+                }
+            }
+            createInfo.pSubpasses = subpasses.data();
+            pCreateInfo = &createInfo;
+        }
 
         VkResult res = vk->vkCreateRenderPass2(device, pCreateInfo, pAllocator, pRenderPass);
         if (res != VK_SUCCESS) {
@@ -9500,25 +9775,36 @@ class VkDecoderGlobalState::Impl {
             VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME,
             VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
             VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
-            VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-            // TODO(b/378686769): Enable private data extension where available to
-            // mitigate the issues with duplicated vulkan handles. This should be
-            // removed once the issue is properly resolved.
-            VK_EXT_PRIVATE_DATA_EXTENSION_NAME,
-            // It is not uncommon for a guest app flow to expect to use
-            // VK_EXT_IMAGE_DRM_FORMAT_MODIFIER without actually enabling it in the
-            // ppEnabledExtensionNames. Mesa WSI (in Linux) does this, because it has certain
-            // assumptions about the Vulkan loader architecture it is using. However, depending on
-            // the host's Vulkan loader architecture, this could in NULL function pointer access
-            // (i.e. on vkGetImageDrmFormatModifierPropertiesEXT()). So just enable it if it's
-            // available.
-            VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
-#ifdef _WIN32
-            VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
-#elif defined(__QNX__) || defined(__unix__)
-            VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
-#endif
         };
+
+        const bool shouldSkipSwapchain =
+            m_vkEmulation->getFeatures().Surfaceless.enabled() && m_vkEmulation->isLavapipe();
+        if (!shouldSkipSwapchain) {
+            hostAlwaysDeviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        }
+
+        hostAlwaysDeviceExtensions.insert(
+            hostAlwaysDeviceExtensions.end(),
+            {
+                // TODO(b/378686769): Enable private data extension where available to
+                // mitigate the issues with duplicated vulkan handles. This should be
+                // removed once the issue is properly resolved.
+                VK_EXT_PRIVATE_DATA_EXTENSION_NAME,
+                // It is not uncommon for a guest app flow to expect to use
+                // VK_EXT_IMAGE_DRM_FORMAT_MODIFIER without actually enabling it in the
+                // ppEnabledExtensionNames. Mesa WSI (in Linux) does this, because it has certain
+                // assumptions about the Vulkan loader architecture it is using. However, depending
+                // on
+                // the host's Vulkan loader architecture, this could in NULL function pointer access
+                // (i.e. on vkGetImageDrmFormatModifierPropertiesEXT()). So just enable it if it's
+                // available.
+                VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
+#ifdef _WIN32
+                VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
+#elif defined(__QNX__) || defined(__unix__)
+                VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+#endif
+            });
 
         m_vkEmulation->appendExternalMemoryModeDeviceExtensions(hostAlwaysDeviceExtensions);
 
@@ -11336,6 +11622,37 @@ void VkDecoderGlobalState::on_vkCmdPipelineBarrier2(gfxstream::base::BumpPool* p
                                                     VkCommandBuffer commandBuffer,
                                                     const VkDependencyInfo* pDependencyInfo) {
     mImpl->on_vkCmdPipelineBarrier2(pool, apiCallHandle, commandBuffer, pDependencyInfo);
+}
+
+void VkDecoderGlobalState::on_vkCmdWaitEvents(
+    gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
+    VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents,
+    VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
+    uint32_t memoryBarrierCount, const VkMemoryBarrier* pMemoryBarriers,
+    uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier* pBufferMemoryBarriers,
+    uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier* pImageMemoryBarriers) {
+    mImpl->on_vkCmdWaitEvents(pool, apiCallHandle, commandBuffer, eventCount, pEvents, srcStageMask,
+                              dstStageMask, memoryBarrierCount, pMemoryBarriers,
+                              bufferMemoryBarrierCount, pBufferMemoryBarriers,
+                              imageMemoryBarrierCount, pImageMemoryBarriers);
+}
+
+void VkDecoderGlobalState::on_vkCmdWaitEvents2(gfxstream::base::BumpPool* pool,
+                                               VkSnapshotApiCallHandle apiCallHandle,
+                                               VkCommandBuffer commandBuffer, uint32_t eventCount,
+                                               const VkEvent* pEvents,
+                                               const VkDependencyInfo* pDependencyInfos) {
+    mImpl->on_vkCmdWaitEvents2(pool, apiCallHandle, commandBuffer, eventCount, pEvents,
+                               pDependencyInfos);
+}
+
+void VkDecoderGlobalState::on_vkCmdWaitEvents2KHR(gfxstream::base::BumpPool* pool,
+                                                  VkSnapshotApiCallHandle apiCallHandle,
+                                                  VkCommandBuffer commandBuffer,
+                                                  uint32_t eventCount, const VkEvent* pEvents,
+                                                  const VkDependencyInfo* pDependencyInfos) {
+    mImpl->on_vkCmdWaitEvents2KHR(pool, apiCallHandle, commandBuffer, eventCount, pEvents,
+                                  pDependencyInfos);
 }
 
 VkResult VkDecoderGlobalState::on_vkAllocateMemory(gfxstream::base::BumpPool* pool,
