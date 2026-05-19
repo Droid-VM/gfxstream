@@ -597,6 +597,7 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
         {STREAM_RENDERER_PARAM_WIN0_WIDTH, "WIN0_WIDTH"},
         {STREAM_RENDERER_PARAM_WIN0_HEIGHT, "WIN0_HEIGHT"},
         {STREAM_RENDERER_PARAM_DEBUG_CALLBACK, "DEBUG_CALLBACK"},
+        {STREAM_RENDERER_PARAM_DEBUG_CALLBACK_EX, "DEBUG_CALLBACK_EX"},
         {STREAM_RENDERER_SKIP_OPENGLES_INIT, "SKIP_OPENGLES_INIT"},
     };
 
@@ -627,6 +628,7 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
     std::string renderer_features_str;
     stream_renderer_fence_callback fence_callback = nullptr;
     stream_renderer_debug_callback log_callback = nullptr;
+    stream_renderer_debug_callback_ex log_callback_ex = nullptr;
     bool rendererInitializedExternally = false;
 
     // Iterate all parameters that we support.
@@ -677,6 +679,12 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
                     static_cast<uintptr_t>(param.value));
                 break;
             }
+            case STREAM_RENDERER_PARAM_DEBUG_CALLBACK_EX: {
+                GFXSTREAM_DEBUG("STREAM_RENDERER_PARAM_DEBUG_CALLBACK_EX passed");
+                log_callback_ex = reinterpret_cast<stream_renderer_debug_callback_ex>(
+                    static_cast<uintptr_t>(param.value));
+                break;
+            }
             case STREAM_RENDERER_SKIP_OPENGLES_INIT: {
                 // AEMU currently does its own initialization in
                 // qemu/android/android-emu/android/opengles.cpp.
@@ -698,7 +706,47 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
         }
     }
 
-    if (log_callback) {
+    if (log_callback_ex) {
+        gfxstream::host::SetGfxstreamLogCallback([log_callback_ex, log_user_data = renderer_cookie](
+                                                     LogLevel level, const char* file, int line,
+                                                     const char* function, const char* message) {
+            stream_renderer_debug_ex log_info = {
+                .file = file,
+                .line = line,
+                .function = function,
+                .message = message,
+            };
+
+            switch (level) {
+                case LogLevel::kFatal: {
+                    log_info.debug_type = STREAM_RENDERER_DEBUG_ERROR;
+                    break;
+                }
+                case LogLevel::kError: {
+                    log_info.debug_type = STREAM_RENDERER_DEBUG_ERROR;
+                    break;
+                }
+                case LogLevel::kWarning: {
+                    log_info.debug_type = STREAM_RENDERER_DEBUG_WARN;
+                    break;
+                }
+                case LogLevel::kInfo: {
+                    log_info.debug_type = STREAM_RENDERER_DEBUG_INFO;
+                    break;
+                }
+                case LogLevel::kDebug: {
+                    log_info.debug_type = STREAM_RENDERER_DEBUG_DEBUG;
+                    break;
+                }
+                case LogLevel::kVerbose: {
+                    log_info.debug_type = STREAM_RENDERER_DEBUG_DEBUG;
+                    break;
+                }
+            }
+
+            log_callback_ex(log_user_data, &log_info);
+        });
+    } else if (log_callback) {
         gfxstream::host::SetGfxstreamLogCallback([log_callback, log_user_data = renderer_cookie](
                                                      LogLevel level, const char* file, int line,
                                                      const char* function, const char* message) {
