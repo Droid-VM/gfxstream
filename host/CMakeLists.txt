@@ -235,7 +235,8 @@ endfunction()
     # Backend unit tests
     add_executable(
         gfxstream_backend_unittests
-        gfxstream_unittest.cpp)
+        gfxstream_unittest.cpp
+        features/features_unittest.cpp)
     target_link_libraries(
         gfxstream_backend_unittests
         PRIVATE

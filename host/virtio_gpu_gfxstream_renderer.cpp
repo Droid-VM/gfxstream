@@ -94,6 +94,8 @@ ParseGfxstreamFeatures(const int rendererFlags,
         &features, RefCountPipe,
         /*Resources are ref counted via guest file objects.*/ false);
     GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
+        &features, Surfaceless, rendererFlags & STREAM_RENDERER_FLAGS_USE_SURFACELESS_BIT);
+    GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
         &features, SystemBlob,
         rendererFlags & STREAM_RENDERER_FLAGS_USE_SYSTEM_BLOB);
     GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
@@ -765,9 +767,11 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
 
     if (!features.MinimalLogging.enabled()) {
         GFXSTREAM_INFO("Gfxstream features:");
+
         for (const auto& [_, featureInfo] : features.map) {
             GFXSTREAM_INFO("    %s: %s (%s)", featureInfo->getName().c_str(),
-                           featureInfo->getValueReadable().c_str(), featureInfo->getReason().c_str());
+                           featureInfo->getValueReadable().c_str(),
+                           featureInfo->getReason().c_str());
         }
     }
 
