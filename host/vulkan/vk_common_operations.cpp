@@ -966,7 +966,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     init_vulkan_dispatch_from_instance(gvk, emulation->mInstance, emulation->mIvk);
 
     auto ivk = emulation->mIvk;
-    if (!vulkan_dispatch_check_instance_VK_VERSION_1_0(ivk)) {
+    if (!vulkan_dispatch_check_instance_VK_BASE_VERSION_1_0(ivk)) {
         GFXSTREAM_ERROR("Warning: Vulkan 1.0 APIs missing from instance");
     }
 
@@ -974,7 +974,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         uint32_t instanceVersion;
         VkResult enumInstanceRes = ivk->vkEnumerateInstanceVersion(&instanceVersion);
         if ((VK_SUCCESS == enumInstanceRes) && instanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
-            if (!vulkan_dispatch_check_instance_VK_VERSION_1_1(ivk)) {
+            if (!vulkan_dispatch_check_instance_VK_BASE_VERSION_1_1(ivk)) {
                 GFXSTREAM_ERROR("Warning: Vulkan 1.1 APIs missing from instance (1st try)");
             }
         }
@@ -999,7 +999,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
             GFXSTREAM_DEBUG("Created Vulkan 1.1 instance on second try.");
 
-            if (!vulkan_dispatch_check_instance_VK_VERSION_1_1(ivk)) {
+            if (!vulkan_dispatch_check_instance_VK_BASE_VERSION_1_1(ivk)) {
                 GFXSTREAM_ERROR("Warning: Vulkan 1.1 APIs missing from instance (2nd try)");
             }
         }
@@ -1183,6 +1183,16 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
         deviceInfos[i].hasSamplerYcbcrConversionExtension =
             vk_util::extensionSupported(deviceExts, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+
+        deviceInfos[i].supportsSwapchain =
+            vk_util::extensionSupported(deviceExts, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+        std::string deviceName = std::string(deviceInfos[i].physdevProps.deviceName);
+        std::transform(deviceName.begin(), deviceName.end(), deviceName.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (deviceName.find("llvmpipe") != std::string::npos) {
+            deviceInfos[i].isLavapipe = true;
+        }
 
         deviceInfos[i].hasNvidiaDeviceDiagnosticCheckpointsExtension =
             vk_util::extensionSupported(deviceExts, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
@@ -1415,10 +1425,18 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     }
 #endif
 
-    // We need to always enable swapchain extensions to be able to use this device
+    // We need to enable swapchain extensions to be able to use this device
     // to do VK_IMAGE_LAYOUT_PRESENT_SRC_KHR transition operations done
-    // in releaseColorBufferForGuestUse for the apps using Vulkan swapchain
-    selectedDeviceExtensionNames.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    // in releaseColorBufferForGuestUse for the apps using Vulkan swapchain.
+    // If we are in surfaceless mode and using Lavapipe, we can skip this since
+    // building all of swapchain code can be hard in cloud environments.
+    const bool shouldSkipSwapchain =
+        emulation->mFeatures.Surfaceless.enabled() && emulation->mDeviceInfo.isLavapipe;
+    if (emulation->mDeviceInfo.supportsSwapchain && emulation->mInstanceSupportsSurface &&
+        !shouldSkipSwapchain) {
+        selectedDeviceExtensionNames.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        emulation->mSwapchainEnabled = true;
+    }
 
     if (emulation->mFeatures.VulkanNativeSwapchain.enabled()) {
         for (auto extension : SwapChainStateVk::getRequiredDeviceExtensions()) {
@@ -1539,11 +1557,11 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     auto dvk = emulation->mDvk;
 
     // Check if the dispatch table has everything 1.1 related
-    if (!vulkan_dispatch_check_device_VK_VERSION_1_0(dvk)) {
+    if (!vulkan_dispatch_check_device_VK_BASE_VERSION_1_0(dvk)) {
         GFXSTREAM_ERROR("Warning: Vulkan 1.0 APIs missing from device.");
     }
     if (deviceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
-        if (!vulkan_dispatch_check_device_VK_VERSION_1_1(dvk)) {
+        if (!vulkan_dispatch_check_device_VK_BASE_VERSION_1_1(dvk)) {
             GFXSTREAM_ERROR("Warning: Vulkan 1.1 APIs missing from device");
         }
     }
@@ -1825,6 +1843,10 @@ bool VkEmulation::supportsDmaBuf() const { return mDeviceInfo.supportsDmaBuf; }
 bool VkEmulation::supportsExternalMemoryHostProperties() const {
     return mDeviceInfo.supportsExternalMemoryHostProps;
 }
+
+bool VkEmulation::isSwapchainEnabled() const { return mSwapchainEnabled; }
+
+bool VkEmulation::isLavapipe() const { return mDeviceInfo.isLavapipe; }
 
 std::optional<VkPhysicalDeviceRobustness2FeaturesEXT> VkEmulation::getRobustness2Features() const {
     return mDeviceInfo.robustness2Features;
@@ -2849,11 +2871,12 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
 
     // Requesting invalid texture sizes can crash some drivers, early out to gracefully handle
     // the errors and avoid total emulator crash.
-    if (width > mDeviceInfo.physdevProps.limits.maxFramebufferWidth ||
+    if (width == 0 || width > mDeviceInfo.physdevProps.limits.maxFramebufferWidth || height == 0 ||
         height > mDeviceInfo.physdevProps.limits.maxFramebufferHeight) {
         GFXSTREAM_ERROR(
-            "%s: Cannot create color buffer(%u) with size '%u x %u', driver limits: '%u x %u'",
-            __func__, colorBufferHandle, width, height,
+            "%s: Cannot create color buffer(%u) with size '%u x %u' and format '%s', driver "
+            "limits: '%u x %u'",
+            __func__, colorBufferHandle, width, height, ToString(format).c_str(),
             mDeviceInfo.physdevProps.limits.maxFramebufferWidth,
             mDeviceInfo.physdevProps.limits.maxFramebufferHeight);
         return false;
@@ -3187,17 +3210,17 @@ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, std::vector
         return false;
     }
 
-    VkDeviceSize bytesNeeded = 0;
-    bool result = getFormatTransferInfo(colorBufferInfo->imageCreateInfoShallow.format,
-                                        colorBufferInfo->imageCreateInfoShallow.extent,
-                                        &bytesNeeded, nullptr);
+    TransferInfo transferInfo;
+    bool result =
+        getFormatTransferInfo(colorBufferInfo->imageCreateInfoShallow.format,
+                              colorBufferInfo->imageCreateInfoShallow.extent, &transferInfo);
     if (!result) {
         GFXSTREAM_ERROR("Failed to read from ColorBuffer:%d, failed to get read size.",
                         colorBufferHandle);
         return false;
     }
 
-    bytes->resize(bytesNeeded);
+    bytes->resize(transferInfo.stagingBufferCopySize);
 
     result = readColorBufferToBytesLocked(
         colorBufferHandle, 0, 0, colorBufferInfo->imageCreateInfoShallow.extent.width,
@@ -3243,15 +3266,15 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
         return false;
     }
 
-    VkDeviceSize bufferCopySize = 0;
-    std::vector<VkBufferImageCopy> bufferImageCopies;
+    TransferInfo transferInfo;
     if (!getFormatTransferInfo(colorBufferInfo->imageCreateInfoShallow.format,
-                               colorBufferInfo->imageCreateInfoShallow.extent, &bufferCopySize,
-                               &bufferImageCopies)) {
+                               colorBufferInfo->imageCreateInfoShallow.extent, &transferInfo)) {
         GFXSTREAM_ERROR("Failed to read ColorBuffer:%d, unable to get transfer info.",
                         colorBufferHandle);
         return false;
     }
+    VkDeviceSize bufferCopySize = transferInfo.stagingBufferCopySize;
+    const std::vector<VkBufferImageCopy>& bufferImageCopies = transferInfo.bufferImageCopies;
 
     // Avoid transitioning from VK_IMAGE_LAYOUT_UNDEFINED. Unfortunetly, Android does not
     // yet have a mechanism for sharing the expected VkImageLayout. However, the Vulkan
@@ -3278,6 +3301,8 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
     const VkImageLayout currentLayout = colorBufferInfo->currentLayout;
     const VkImageLayout transferSrcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
+    const VkImageAspectFlags aspectMask =
+        getFormatAspects(colorBufferInfo->imageCreateInfoShallow.format);
     const VkImageMemoryBarrier toTransferSrcImageBarrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -3290,7 +3315,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
         .image = colorBufferInfo->image,
         .subresourceRange =
             {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .aspectMask = aspectMask,
                 .baseMipLevel = 0,
                 .levelCount = 1,
                 .baseArrayLayer = 0,
@@ -3321,7 +3346,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
             .image = colorBufferInfo->image,
             .subresourceRange =
                 {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .aspectMask = aspectMask,
                     .baseMipLevel = 0,
                     .levelCount = 1,
                     .baseArrayLayer = 0,
@@ -3387,14 +3412,19 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
         VK_CHECK(vk->vkInvalidateMappedMemoryRanges(mDevice, 1, &toInvalidate));
     }
 
-    if (bufferCopySize > outPixelsSize) {
-        GFXSTREAM_ERROR(
-            "Invalid buffer size for readColorBufferToBytes operation."
-            "Required: %llu, Actual: %llu",
-            bufferCopySize, outPixelsSize);
-        bufferCopySize = outPixelsSize;
+    if (transferInfo.unpackFunction) {
+        transferInfo.unpackFunction(colorBufferInfo->imageCreateInfoShallow.extent,
+                                    (const uint8_t*)mStaging.mMappedPtr, (uint8_t*)outPixels);
+    } else {
+        if (bufferCopySize > outPixelsSize) {
+            GFXSTREAM_ERROR(
+                "Invalid buffer size for readColorBufferToBytes operation."
+                "Required: %llu, Actual: %llu",
+                bufferCopySize, outPixelsSize);
+            bufferCopySize = outPixelsSize;
+        }
+        std::memcpy(outPixels, mStaging.mMappedPtr, bufferCopySize);
     }
-    std::memcpy(outPixels, mStaging.mMappedPtr, bufferCopySize);
 
     return true;
 }
@@ -3879,14 +3909,15 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
     }
 
     const VkFormat creationFormat = colorBufferInfo->imageCreateInfoShallow.format;
-    VkDeviceSize dstBufferSize = 0;
-    std::vector<VkBufferImageCopy> bufferImageCopies;
+    TransferInfo transferInfo;
     if (!getFormatTransferInfo(creationFormat, colorBufferInfo->imageCreateInfoShallow.extent,
-                               &dstBufferSize, &bufferImageCopies)) {
+                               &transferInfo)) {
         GFXSTREAM_ERROR("Failed to update ColorBuffer:%d, unable to get transfer info.",
                         colorBufferHandle);
         return false;
     }
+    VkDeviceSize dstBufferSize = transferInfo.stagingBufferCopySize;
+    const std::vector<VkBufferImageCopy>& bufferImageCopies = transferInfo.bufferImageCopies;
 
     const VkDeviceSize stagingBufferSize = mStaging.mAllocationSize;
     if (dstBufferSize > stagingBufferSize) {
@@ -3928,6 +3959,9 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
                             formatString.c_str(), internalFormatString.c_str());
             return false;
         }
+    } else if (transferInfo.packFunction) {
+        transferInfo.packFunction(colorBufferInfo->imageCreateInfoShallow.extent,
+                                  (const uint8_t*)pixels, (uint8_t*)stagingBufferPtr);
     } else {
         const size_t expectedInputSize = dstBufferSize;
         if (inputPixelsSize != 0 && inputPixelsSize != expectedInputSize) {
@@ -3975,6 +4009,7 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
     if (isSnapshotLoad) {
         currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     }
+    const VkImageAspectFlags aspectMask = getFormatAspects(creationFormat);
     const VkImageMemoryBarrier toTransferDstImageBarrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -3987,7 +4022,7 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
         .image = colorBufferInfo->image,
         .subresourceRange =
             {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .aspectMask = aspectMask,
                 .baseMipLevel = 0,
                 .levelCount = 1,
                 .baseArrayLayer = 0,
@@ -4017,7 +4052,7 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
             .image = colorBufferInfo->image,
             .subresourceRange =
                 {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .aspectMask = aspectMask,
                     .baseMipLevel = 0,
                     .levelCount = 1,
                     .baseArrayLayer = 0,
@@ -4695,6 +4730,16 @@ VkImageLayout VkEmulation::getColorBufferCurrentLayout(uint32_t colorBufferHandl
     return infoPtr->currentLayout;
 }
 
+bool VkEmulation::needsImageLayoutAdjustment() const { return !mSwapchainEnabled; }
+
+VkImageLayout VkEmulation::adjustImageLayout(VkImageLayout layout) const {
+    if (needsImageLayoutAdjustment() && layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+        return VK_IMAGE_LAYOUT_GENERAL;
+    } else {
+        return layout;
+    }
+}
+
 // Allocate a ready to use VkCommandBuffer for queue transfer. The caller needs
 // to signal the returned VkFence when the VkCommandBuffer completes.
 std::tuple<VkCommandBuffer, VkFence> VkEmulation::allocateQueueTransferCommandBufferLocked() {
@@ -4754,8 +4799,6 @@ std::tuple<VkCommandBuffer, VkFence> VkEmulation::allocateQueueTransferCommandBu
     return std::make_tuple(commandBuffer, fence);
 }
 
-const VkImageLayout kGuestUseDefaultImageLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
 void VkEmulation::releaseColorBufferForGuestUse(uint32_t colorBufferHandle) {
     std::lock_guard<std::mutex> lock(mMutex);
 
@@ -4766,6 +4809,7 @@ void VkEmulation::releaseColorBufferForGuestUse(uint32_t colorBufferHandle) {
         return;
     }
 
+    const auto kGuestUseDefaultImageLayout = adjustImageLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     std::optional<VkImageMemoryBarrier> layoutTransitionBarrier;
     if (infoPtr->currentLayout != kGuestUseDefaultImageLayout) {
         layoutTransitionBarrier = VkImageMemoryBarrier{
@@ -4901,7 +4945,7 @@ std::unique_ptr<BorrowedImageInfoVk> VkEmulation::borrowColorBufferForCompositio
         compositorInfo->postBorrowLayout = colorBufferInfo->currentLayout;
 
         if (compositorInfo->postBorrowLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
-            compositorInfo->postBorrowLayout = kGuestUseDefaultImageLayout;
+            compositorInfo->postBorrowLayout = adjustImageLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         }
     }
 
@@ -4935,7 +4979,7 @@ std::unique_ptr<BorrowedImageInfoVk> VkEmulation::borrowColorBufferForDisplay(
     // Instruct the display to perform the queue transfer release after use so
     // that the color buffer can be acquired by the guest.
     compositorInfo->postBorrowQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-    compositorInfo->postBorrowLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    compositorInfo->postBorrowLayout = adjustImageLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
     colorBufferInfo->currentLayout = compositorInfo->postBorrowLayout;
     colorBufferInfo->currentQueueFamilyIndex = compositorInfo->postBorrowQueueFamilyIndex;

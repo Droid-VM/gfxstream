@@ -110,6 +110,14 @@ VirtioGpuResourceType GetResourceType(const struct stream_renderer_resource_crea
         return VirtioGpuResourceType::COLOR_BUFFER;
     }
     if (!(args.bind & VIRGL_BIND_LINEAR)) {
+        // Always treat large single dimensional R8 requests as buffers, even
+        // if they didn't request linear binding
+        const uint32_t largeBufferLimit = 16000;
+        bool shouldUseBuffer = args.width > largeBufferLimit && args.height == 1 &&
+                               args.depth == 1 && args.array_size == 1;
+        if (shouldUseBuffer) {
+            return VirtioGpuResourceType::BUFFER;
+        }
         return VirtioGpuResourceType::COLOR_BUFFER;
     }
 
@@ -121,9 +129,9 @@ VirtioGpuResourceType GetResourceType(const struct stream_renderer_resource_crea
 /*static*/
 std::optional<VirtioGpuResource> VirtioGpuResource::Create(
     const struct stream_renderer_resource_create_args* args, struct iovec* iov, uint32_t num_iovs) {
-    GFXSTREAM_DEBUG("resource id: %u", args->handle);
 
     const auto resourceType = GetResourceType(*args);
+    GFXSTREAM_DEBUG("resource id: %u, type: %d", args->handle, (int)resourceType);
     if (resourceType == VirtioGpuResourceType::BLOB) {
         GFXSTREAM_ERROR("Failed to create resource: encountered blob.");
         return std::nullopt;
@@ -132,8 +140,11 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
     if (resourceType == VirtioGpuResourceType::PIPE) {
         // Frontend only resource.
     } else if (resourceType == VirtioGpuResourceType::BUFFER) {
-        FrameBuffer::getFB()->createBufferWithResourceHandle(args->width * args->height,
-                                                             args->handle);
+        if (!FrameBuffer::getFB()->createBufferWithResourceHandle(args->width * args->height,
+                                                                  args->handle)) {
+            GFXSTREAM_ERROR("Failed to create buffer with resource handle %d.", args->handle);
+            return std::nullopt;
+        }
     } else if (resourceType == VirtioGpuResourceType::COLOR_BUFFER) {
         auto formatOpt = ToGfxstreamFormat(args->format);
         if (!formatOpt) {
@@ -142,7 +153,13 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
         }
         auto format = *formatOpt;
 
-        FrameBuffer::getFB()->createColorBufferWithResourceHandle(args->width, args->height, format, args->handle);
+        if (!FrameBuffer::getFB()->createColorBufferWithResourceHandle(args->width, args->height,
+                                                                       format, args->handle)) {
+            const std::string formatString = ToString(format);
+            GFXSTREAM_ERROR("Failed to create color buffer with resource handle %d. (%dx%d, format: %s)",
+                            args->handle, args->width, args->height, formatString.c_str());
+            return std::nullopt;
+        }
         FrameBuffer::getFB()->setGuestManagedColorBufferLifetime(true /* guest manages lifetime */);
         FrameBuffer::getFB()->openColorBuffer(args->handle);
     } else {

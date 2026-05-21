@@ -57,6 +57,11 @@ typedef int VK_EXT_SYNC_HANDLE;
 #define VK_EXT_SYNC_HANDLE_INVALID (-1)
 #endif
 
+#ifdef __APPLE__
+// MTLTexture_id or MTLBuffer_id for external resource handles
+typedef void* MTLResource_id;
+#endif
+
 namespace gfxstream {
 namespace host {
 namespace vk {
@@ -143,6 +148,10 @@ class VkEmulation {
     bool supportsDmaBuf() const;
 
     bool supportsExternalMemoryHostProperties() const;
+
+    bool isSwapchainEnabled() const;
+
+    bool isLavapipe() const;
 
     std::optional<VkPhysicalDeviceRobustness2FeaturesEXT> getRobustness2Features() const;
 
@@ -437,6 +446,9 @@ class VkEmulation {
 
     VkImageLayout getColorBufferCurrentLayout(uint32_t colorBufferHandle);
 
+    bool needsImageLayoutAdjustment() const;
+    VkImageLayout adjustImageLayout(VkImageLayout layout) const;
+
     void releaseColorBufferForGuestUse(uint32_t colorBufferHandle);
 
     std::unique_ptr<BorrowedImageInfoVk> borrowColorBufferForComposition(uint32_t colorBufferHandle,
@@ -475,6 +487,8 @@ class VkEmulation {
         bool supportsDmaBuf = false;
         bool supportsDriverProperties = false;
         bool supportsExternalMemoryHostProps = false;
+        bool supportsSwapchain = false;
+        bool isLavapipe = false;
         bool hasSamplerYcbcrConversionExtension = false;
         bool supportsSamplerYcbcrConversion = false;
         bool glInteropSupported = false;
@@ -590,6 +604,8 @@ class VkEmulation {
     // This represents the maximum vulkan api version that should be reported to the guest and is
     // not related to the host vulkan level available or used.
     uint32_t mGuestVulkanMaxApiVersion = VK_API_VERSION_1_3;
+
+    bool mSwapchainEnabled = false;
 
     bool mEnableProtectedMemoryEmulation = true;
 
