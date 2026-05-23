@@ -1012,7 +1012,10 @@ int VirtioGpuFrontend::snapshotRenderer(const char* directory) {
         GFXSTREAM_ERROR("Failed to snapshot renderer: renderer not available.");
         return -EINVAL;
     }
-    mRenderer->save(&stream, nullptr);
+    if (!mRenderer->save(&stream, nullptr)) {
+        GFXSTREAM_ERROR("Failed to snapshot renderer: mRenderer->save failed.");
+        return -EINVAL;
+    }
 
     return 0;
 }

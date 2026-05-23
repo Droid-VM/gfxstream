@@ -27,18 +27,18 @@ struct StateBlock {
     VkQueue queue;
     VkCommandPool commandPool;
 };
-void saveImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage image,
+bool saveImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage image,
                       const ImageInfo* imageInfo);
-void loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage image,
+bool loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage image,
                       const ImageInfo* imageInfo);
-void saveBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuffer buffer,
+bool saveBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuffer buffer,
                        const BufferInfo* bufferInfo);
 
 void setEventInQueue(StateBlock* stateBlock, VkEvent event, uint64_t eventflags);
 
 void signalSemaphore(StateBlock* stateBlock, VkSemaphore unboxed_semaphore);
 
-void loadBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuffer buffer,
+bool loadBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuffer buffer,
                        const BufferInfo* bufferInfo);
 }  // namespace vk
 }  // namespace host
