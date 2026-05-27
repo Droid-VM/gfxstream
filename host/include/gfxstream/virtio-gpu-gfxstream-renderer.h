@@ -118,6 +118,20 @@ typedef void (*stream_renderer_fence_callback)(void* user_data,
 typedef void (*stream_renderer_debug_callback)(void* user_data,
                                                struct stream_renderer_debug* debug);
 
+/**
+ * Extended debug data with location information.
+ */
+struct stream_renderer_debug_ex {
+    uint32_t debug_type; /**< The type of the debug message. */
+    const char* file;    /**< The source file where the log was generated. */
+    int line;            /**< The line number in the source file. */
+    const char* function; /**< The function name where the log was generated. */
+    const char* message;  /**< The actual log message. */
+};
+
+typedef void (*stream_renderer_debug_callback_ex)(void* user_data,
+                                               struct stream_renderer_debug_ex* debug);
+
 // Parameters - data passed to initialize the renderer, with the goal of avoiding FFI breakages.
 // To change the data a parameter is passing safely, you should create a new parameter and
 // deprecate the old one. The old parameter may be removed after sufficient time.
@@ -139,6 +153,7 @@ typedef void (*stream_renderer_debug_callback)(void* user_data,
 #define STREAM_RENDERER_PARAM_WIN0_WIDTH 4
 #define STREAM_RENDERER_PARAM_WIN0_HEIGHT 5
 #define STREAM_RENDERER_PARAM_DEBUG_CALLBACK 6
+#define STREAM_RENDERER_PARAM_DEBUG_CALLBACK_EX 7
 
 // An entry in the stream renderer parameters list.
 // The key should be one of STREAM_RENDERER_PARAM_*

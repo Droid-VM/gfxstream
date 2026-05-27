@@ -24,6 +24,10 @@
 #include <google/protobuf/text_format.h>
 #endif  // ifdef GFXSTREAM_BUILD_WITH_SNAPSHOT_FRONTEND_SUPPORT
 
+#include <cerrno>
+#include <cstdint>
+#include <cstring>
+
 #include <vulkan/vulkan.h>
 
 #include "frame_buffer.h"
@@ -31,12 +35,14 @@
 #include "gfxstream/host/address_space_operations.h"
 #include "vulkan/vk_common_operations.h"
 // TODO: remove after moving save/load interface to ops.
+#include "gfxstream/common/logging.h"
 #include "gfxstream/host/address_space_graphics.h"
 #include "gfxstream/host/file_stream.h"
 #include "gfxstream/host/tracing.h"
 #include "gfxstream/memory/SharedMemory.h"
 #include "gfxstream/threads/WorkerThread.h"
 #include "virtgpu_gfxstream_protocol.h"
+#include "virtio_gpu_timelines.h"
 
 namespace gfxstream {
 namespace host {
@@ -214,12 +220,23 @@ int VirtioGpuFrontend::destroyContext(VirtioGpuCtxId contextId) {
     return 0;
 }
 
-#define DECODE(variable, type, input) \
-    type variable = {};               \
-    memcpy(&variable, input, sizeof(type));
+template <typename T>
+bool SafeDecode(T& out, const uint8_t* buffer, uint32_t buffer_size) {
+    if (buffer_size < sizeof(T)) {
+        GFXSTREAM_ERROR("failed to decode: need %u bytes but have %u bytes)",
+                        sizeof(T), buffer_size);
+        return false;
+    }
+    std::memcpy(&out, buffer, sizeof(T));
+    return true;
+}
 
-int VirtioGpuFrontend::addressSpaceProcessCmd(VirtioGpuCtxId ctxId, uint32_t* dwords) {
-    DECODE(header, gfxstream::gfxstreamHeader, dwords)
+int VirtioGpuFrontend::processAddressSpaceCommand(VirtioGpuCtxId ctxId, const uint8_t* cmd_buffer, uint32_t cmd_buffer_size) {
+    gfxstream::gfxstreamHeader header = {};
+    if (!SafeDecode(header, cmd_buffer, cmd_buffer_size)) {
+        GFXSTREAM_ERROR("failed to decode header");
+        return -EINVAL;
+    }
 
     auto contextIt = mContexts.find(ctxId);
     if (contextIt == mContexts.end()) {
@@ -230,7 +247,11 @@ int VirtioGpuFrontend::addressSpaceProcessCmd(VirtioGpuCtxId ctxId, uint32_t* dw
 
     switch (header.opCode) {
         case GFXSTREAM_CONTEXT_CREATE: {
-            DECODE(contextCreate, gfxstream::gfxstreamContextCreate, dwords)
+            gfxstream::gfxstreamContextCreate contextCreate = {};
+            if (!SafeDecode(contextCreate, cmd_buffer, cmd_buffer_size)) {
+                GFXSTREAM_ERROR("failed to decode contextCreate");
+                return -EINVAL;
+            }
 
             auto resourceIt = mResources.find(contextCreate.resourceId);
             if (resourceIt == mResources.end()) {
@@ -243,7 +264,11 @@ int VirtioGpuFrontend::addressSpaceProcessCmd(VirtioGpuCtxId ctxId, uint32_t* dw
                                                               resource);
         }
         case GFXSTREAM_CONTEXT_PING: {
-            DECODE(contextPing, gfxstream::gfxstreamContextPing, dwords)
+            gfxstream::gfxstreamContextPing contextPing = {};
+            if (!SafeDecode(contextPing, cmd_buffer, cmd_buffer_size)) {
+                GFXSTREAM_ERROR("failed to decode contextPing");
+                return -EINVAL;
+            }
 
             return context.PingAddressSpaceGraphicsInstance(get_gfxstream_address_space_ops(),
                                                             contextPing.resourceId);
@@ -255,26 +280,34 @@ int VirtioGpuFrontend::addressSpaceProcessCmd(VirtioGpuCtxId ctxId, uint32_t* dw
     return 0;
 }
 
-int VirtioGpuFrontend::submitCmd(struct stream_renderer_command* cmd) {
-    if (!cmd) return -EINVAL;
+int VirtioGpuFrontend::processCommand(const struct stream_renderer_command* cmd) {
+    if (!cmd) {
+        GFXSTREAM_ERROR("missing command");
+        return -EINVAL;
+    }
 
-    void* buffer = reinterpret_cast<void*>(cmd->cmd);
+    const uint8_t* cmd_buffer = cmd->cmd;
+    if (!cmd_buffer) {
+        GFXSTREAM_ERROR("missing command buffer");
+        return -EINVAL;
+    }
+
+    const uint32_t cmd_buffer_size = cmd->cmd_size;
+    if (cmd_buffer_size < 4) {
+        GFXSTREAM_ERROR("not enough bytes (got %d)", cmd_buffer_size);
+        return -EINVAL;
+    }
 
     VirtioGpuRing ring = VirtioGpuRingGlobal{};
-    D("ctx: % u, ring: %s buffer: %p dwords: %d", cmd->ctx_id, to_string(ring).c_str(), buffer,
-      cmd->cmd_size);
+    D("ctx: %u, ring: %s cmd_buffer: %p size: %d", cmd->ctx_id,
+      to_string(ring).c_str(), cmd_buffer, cmd_buffer_size);
 
-    if (!buffer) {
-        GFXSTREAM_ERROR("error: buffer null");
+    gfxstream::gfxstreamHeader header = {};
+    if (!SafeDecode(header, cmd_buffer, cmd_buffer_size)) {
+        GFXSTREAM_ERROR("failed to decode command header");
         return -EINVAL;
     }
 
-    if (cmd->cmd_size < 4) {
-        GFXSTREAM_ERROR("error: not enough bytes (got %d)", cmd->cmd_size);
-        return -EINVAL;
-    }
-
-    DECODE(header, gfxstream::gfxstreamHeader, buffer);
     switch (header.opCode) {
         case GFXSTREAM_CONTEXT_CREATE:
         case GFXSTREAM_CONTEXT_PING:
@@ -282,7 +315,7 @@ int VirtioGpuFrontend::submitCmd(struct stream_renderer_command* cmd) {
             GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY,
                                   "GFXSTREAM_CONTEXT_[CREATE|PING]");
 
-            if (addressSpaceProcessCmd(cmd->ctx_id, (uint32_t*)buffer)) {
+            if (processAddressSpaceCommand(cmd->ctx_id, cmd_buffer, cmd->cmd_size)) {
                 return -EINVAL;
             }
             break;
@@ -297,7 +330,11 @@ int VirtioGpuFrontend::submitCmd(struct stream_renderer_command* cmd) {
                 .mRingIdx = 0,
             };
 
-            DECODE(exportSync, gfxstream::gfxstreamCreateExportSync, buffer)
+            gfxstream::gfxstreamCreateExportSync exportSync = {};
+            if (!SafeDecode(exportSync, cmd_buffer, cmd_buffer_size)) {
+                GFXSTREAM_ERROR("failed to decode exportSync");
+                return -EINVAL;
+            }
 
             uint64_t sync_handle = convert32to64(exportSync.syncHandleLo, exportSync.syncHandleHi);
 
@@ -314,6 +351,12 @@ int VirtioGpuFrontend::submitCmd(struct stream_renderer_command* cmd) {
             GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY,
                                   "GFXSTREAM_CREATE_[IMPORT|EXPORT]_SYNC_VK");
 
+            gfxstream::gfxstreamCreateExportSyncVK exportSyncVK = {};
+            if (!SafeDecode(exportSyncVK, cmd_buffer, cmd_buffer_size)) {
+                GFXSTREAM_ERROR("failed to decode exportSyncVK");
+                return -EINVAL;
+            }
+
             // The guest sync export assumes fence context support and always uses
             // VIRTGPU_EXECBUF_RING_IDX. With this, the task created here must use
             // the same ring as the fence created for the virtio gpu command or the
@@ -322,8 +365,6 @@ int VirtioGpuFrontend::submitCmd(struct stream_renderer_command* cmd) {
                 .mCtxId = cmd->ctx_id,
                 .mRingIdx = 0,
             };
-
-            DECODE(exportSyncVK, gfxstream::gfxstreamCreateExportSyncVK, buffer)
 
             uint64_t device_handle =
                 convert32to64(exportSyncVK.deviceHandleLo, exportSyncVK.deviceHandleHi);
@@ -342,6 +383,12 @@ int VirtioGpuFrontend::submitCmd(struct stream_renderer_command* cmd) {
             GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY,
                                   "GFXSTREAM_CREATE_QSRI_EXPORT_VK");
 
+            gfxstream::gfxstreamCreateQSRIExportVK exportQSRI = {};
+            if (!SafeDecode(exportQSRI, cmd_buffer, cmd_buffer_size)) {
+                GFXSTREAM_ERROR("failed to decode exportQSRI");
+                return -EINVAL;
+            }
+
             // The guest QSRI export assumes fence context support and always uses
             // VIRTGPU_EXECBUF_RING_IDX. With this, the task created here must use
             // the same ring as the fence created for the virtio gpu command or the
@@ -351,12 +398,10 @@ int VirtioGpuFrontend::submitCmd(struct stream_renderer_command* cmd) {
                 .mRingIdx = 0,
             };
 
-            DECODE(exportQSRI, gfxstream::gfxstreamCreateQSRIExportVK, buffer)
-
             uint64_t image_handle =
                 convert32to64(exportQSRI.imageHandleLo, exportQSRI.imageHandleHi);
 
-            D("wait for gpu vk qsri ring %u image 0x%llx", to_string(ring).c_str(),
+            D("wait for gpu vk qsri ring %s image 0x%llx", to_string(ring).c_str(),
               (unsigned long long)image_handle);
             auto taskId = mVirtioGpuTimelines->enqueueTask(ring);
             FrameBuffer::getFB()->asyncWaitForGpuVulkanQsriWithCb(image_handle, [this, taskId] {
@@ -368,9 +413,12 @@ int VirtioGpuFrontend::submitCmd(struct stream_renderer_command* cmd) {
             GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY,
                                   "GFXSTREAM_RESOURCE_CREATE_3D");
 
-            DECODE(create3d, gfxstream::gfxstreamResourceCreate3d, buffer)
-            struct stream_renderer_resource_create_args rc3d = {0};
-
+            gfxstream::gfxstreamResourceCreate3d create3d = {};
+            if (!SafeDecode(create3d, cmd_buffer, cmd_buffer_size)) {
+                GFXSTREAM_ERROR("failed to decode create3d");
+                return -EINVAL;
+            }
+            struct stream_renderer_resource_create_args rc3d = {};
             rc3d.target = create3d.target;
             rc3d.format = create3d.format;
             rc3d.bind = create3d.bind;
@@ -395,7 +443,11 @@ int VirtioGpuFrontend::submitCmd(struct stream_renderer_command* cmd) {
             GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY,
                                   "GFXSTREAM_ACQUIRE_SYNC");
 
-            DECODE(acquireSync, gfxstream::gfxstreamAcquireSync, buffer);
+            gfxstream::gfxstreamAcquireSync acquireSync = {};
+            if (!SafeDecode(acquireSync, cmd_buffer, cmd_buffer_size)) {
+                GFXSTREAM_ERROR("failed to decode acquireSync");
+                return -EINVAL;
+            }
 
             auto contextIt = mContexts.find(cmd->ctx_id);
             if (contextIt == mContexts.end()) {
@@ -888,26 +940,28 @@ int VirtioGpuFrontend::exportBlob(uint32_t resourceId, struct stream_renderer_ha
 }
 
 int VirtioGpuFrontend::exportFence(uint64_t fenceId, struct stream_renderer_handle* handle) {
-    auto it = mSyncMap.find(fenceId);
-    if (it == mSyncMap.end()) {
+    auto syncIt = mSyncMap.find(fenceId);
+    if (syncIt == mSyncMap.end()) {
+        return -EINVAL;
+    }
+    auto& sync = syncIt->second;
+
+    auto rawDescriptorOpt = sync->descriptor.release();
+    if (!rawDescriptorOpt) {
         return -EINVAL;
     }
 
-    auto& entry = it->second;
-    DescriptorType rawDescriptor;
-    auto rawDescriptorOpt = entry->descriptor.release();
-    if (rawDescriptorOpt)
-        rawDescriptor = *rawDescriptorOpt;
-    else
-        return -EINVAL;
+    DescriptorType rawDescriptor = *rawDescriptorOpt;
 
-    handle->handle_type = entry->streamHandleType;
+    handle->handle_type = sync->streamHandleType;
 
 #ifdef _WIN32
     handle->os_handle = static_cast<int64_t>(reinterpret_cast<intptr_t>(rawDescriptor));
 #else
     handle->os_handle = static_cast<int64_t>(rawDescriptor);
 #endif
+
+    mSyncMap.erase(syncIt);
 
     return 0;
 }
