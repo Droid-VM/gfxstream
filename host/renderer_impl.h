@@ -106,7 +106,7 @@ public:
     void pauseAllPreSave() final;
     void resumeAll() final;
 
-    void save(gfxstream::Stream* stream,
+    bool save(gfxstream::Stream* stream,
               const ITextureSaverPtr& textureSaver) final;
     bool load(gfxstream::Stream* stream,
               const ITextureLoaderPtr& textureLoader) final;

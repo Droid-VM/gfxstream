@@ -297,7 +297,7 @@ class Renderer {
     // Resumes all channels after snapshot saving or loading.
     virtual void resumeAll() = 0;
 
-    virtual void save(
+    virtual bool save(
             Stream* stream,
             const ITextureSaverPtr& textureSaver) = 0;
     virtual bool load(

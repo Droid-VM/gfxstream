@@ -490,7 +490,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     AsyncResult composeWithCallback(uint32_t bufferSize, void* buffer,
                                     Post::CompletionCallback callback);
 
-    void onSave(gfxstream::Stream* stream, const ITextureSaverPtr& textureSaver);
+    bool onSave(gfxstream::Stream* stream, const ITextureSaverPtr& textureSaver);
     bool onLoad(gfxstream::Stream* stream, const ITextureLoaderPtr& textureLoader);
 
     // lock and unlock handles (EmulatedEglContext, ColorBuffer, EmulatedEglWindowSurface)
@@ -3240,7 +3240,7 @@ AsyncResult FrameBuffer::Impl::composeWithCallback(uint32_t bufferSize, void* bu
     }
 }
 
-void FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSaver) {
+bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSaver) {
     // Things we do not need to snapshot:
     //     m_eglSurface
     //     m_eglContext
@@ -3352,7 +3352,10 @@ void FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
 
     // Save Vulkan state
     if (m_features.VulkanSnapshots.enabled() && vk::VkDecoderGlobalState::get()) {
-        vk::VkDecoderGlobalState::get()->save(stream);
+        bool res = vk::VkDecoderGlobalState::get()->save(stream);
+        if (!res) {
+            return false;
+        }
     }
 
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -3371,6 +3374,7 @@ void FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
         EmulatedEglFenceSync::onSave(stream);
     }
 #endif
+    return true;
 }
 
 bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureLoader) {
@@ -5285,8 +5289,8 @@ AsyncResult FrameBuffer::composeWithCallback(uint32_t bufferSize, void* buffer,
     return mImpl->composeWithCallback(bufferSize, buffer, callback);
 }
 
-void FrameBuffer::onSave(gfxstream::Stream* stream, const ITextureSaverPtr& textureSaver) {
-    mImpl->onSave(stream, textureSaver);
+bool FrameBuffer::onSave(gfxstream::Stream* stream, const ITextureSaverPtr& textureSaver) {
+    return mImpl->onSave(stream, textureSaver);
 }
 
 bool FrameBuffer::onLoad(gfxstream::Stream* stream, const ITextureLoaderPtr& textureLoader) {
