@@ -3288,6 +3288,21 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
                        s->putBe32(pair.second.dpiY);
                    });
 
+    // Save display ids created through createDisplay
+    std::vector<uint32_t> displayIds;
+    int32_t currentId = -1;
+    uint32_t nextId;
+    while (get_gfxstream_multi_display_operations().get_next_display_info(
+        currentId, &nextId, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+        displayIds.push_back(nextId);
+        currentId = nextId;
+    }
+
+    stream->putBe32(displayIds.size());
+    for (uint32_t id : displayIds) {
+        stream->putBe32(id);
+    }
+
     stream->putBe32(m_useSubWindow);
     stream->putBe32(/*Obsolete m_eglContextInitialized =*/1);
 
@@ -3512,6 +3527,12 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
                        int dpiY = static_cast<int>(s->getBe32());
                        return {idx, {w, h, dpiX, dpiY}};
                    });
+
+    uint32_t numDisplays = stream->getBe32();
+    for (uint32_t i = 0; i < numDisplays; ++i) {
+        uint32_t displayId = stream->getBe32();
+        get_gfxstream_multi_display_operations().create_display(&displayId);
+    }
 
     // TODO: resize the window
     //
