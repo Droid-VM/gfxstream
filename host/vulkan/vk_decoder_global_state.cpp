@@ -445,7 +445,7 @@ class VkDecoderGlobalState::Impl {
         stateBlock->deviceDispatch->vkDestroyCommandPool(stateBlock->device, stateBlock->commandPool, nullptr);
     }
 
-    void save(gfxstream::Stream* stream) {
+    bool save(gfxstream::Stream* stream) {
         GFXSTREAM_DEBUG("VulkanSnapshots save (begin)");
         std::lock_guard<std::mutex> lock(mMutex);
 
@@ -533,7 +533,10 @@ class VkDecoderGlobalState::Impl {
 
             StateBlock stateBlock = createSnapshotStateBlock(imageInfo.device);
             // TODO(b/294277842): make sure the queue is empty before using.
-            saveImageContent(stream, &stateBlock, unboxedImage, &imageInfo);
+            if (!saveImageContent(stream, &stateBlock, unboxedImage, &imageInfo)) {
+                releaseSnapshotStateBlock(&stateBlock);
+                return false;
+            }
             releaseSnapshotStateBlock(&stateBlock);
         }
 
@@ -559,7 +562,10 @@ class VkDecoderGlobalState::Impl {
             StateBlock stateBlock = createSnapshotStateBlock(bufferInfo.device);
 
             // TODO(b/294277842): make sure the queue is empty before using.
-            saveBufferContent(stream, &stateBlock, unboxedBuffer, &bufferInfo);
+            if (!saveBufferContent(stream, &stateBlock, unboxedBuffer, &bufferInfo)) {
+                releaseSnapshotStateBlock(&stateBlock);
+                return false;
+            }
             releaseSnapshotStateBlock(&stateBlock);
         }
 
@@ -706,10 +712,9 @@ class VkDecoderGlobalState::Impl {
                         } break;
                         case DescriptorSetInfo::DescriptorWriteType::InlineUniformBlock:
                         case DescriptorSetInfo::DescriptorWriteType::AccelerationStructure:
-                            // TODO
-                            GFXSTREAM_FATAL("Encountered pending inline uniform block or acceleration "
+                            GFXSTREAM_ERROR("Encountered pending inline uniform block or acceleration "
                                             "structure desc write, abort (NYI)");
-                            break;
+                            return false;
                         default:
                             break;
                     }
@@ -742,9 +747,10 @@ class VkDecoderGlobalState::Impl {
 
         mSnapshotState = SnapshotState::Normal;
         GFXSTREAM_DEBUG("VulkanSnapshots save (end)");
+        return true;
     }
 
-    void load(gfxstream::Stream* stream, GfxApiLogger& gfxLogger) {
+    bool load(gfxstream::Stream* stream, GfxApiLogger& gfxLogger) {
         // assume that we already destroyed all instances
         // from FrameBuffer's onLoad method.
         GFXSTREAM_DEBUG("VulkanSnapshots load (begin)");
@@ -803,8 +809,13 @@ class VkDecoderGlobalState::Impl {
                 .processName = nullptr,
                 .gfxApiLogger = &gfxLogger,
             };
-            decoderForLoading.decode(decoderReplayBuffer.data(), decoderReplayBuffer.size(),
-                                     &trivialStream, resources.get(), context);
+            size_t consumed = decoderForLoading.decode(decoderReplayBuffer.data(), decoderReplayBuffer.size(),
+                                                       &trivialStream, resources.get(), context);
+            if (consumed != decoderReplayBuffer.size()) {
+                GFXSTREAM_ERROR("Failed to completely decode snapshot replay buffer. Consumed %zu of %zu bytes",
+                                consumed, decoderReplayBuffer.size());
+                return false;
+            }
         }
 
         {
@@ -818,11 +829,13 @@ class VkDecoderGlobalState::Impl {
                 VkDeviceMemory unboxedMemory = unbox_VkDeviceMemory(boxedMemory);
                 auto it = mMemoryInfo.find(unboxedMemory);
                 if (it == mMemoryInfo.end()) {
-                    GFXSTREAM_FATAL("Snapshot load failure: cannot find memory handle for VkDeviceMemory:%p", boxedMemory);
+                    GFXSTREAM_ERROR("Snapshot load failure: cannot find memory handle for VkDeviceMemory:%p", boxedMemory);
+                    return false;
                 }
                 VkDeviceSize size = stream->getBe64();
                 if (size != it->second.size || !it->second.ptr) {
-                    GFXSTREAM_FATAL("Snapshot load failure: memory size does not match for VkDeviceMemory:%p", boxedMemory);
+                    GFXSTREAM_ERROR("Snapshot load failure: memory size does not match for VkDeviceMemory:%p", boxedMemory);
+                    return false;
                 }
                 stream->read(it->second.ptr, size);
             }
@@ -861,7 +874,10 @@ class VkDecoderGlobalState::Impl {
                 imageInfo.layout = static_cast<VkImageLayout>(stream->getBe32());
                 StateBlock stateBlock = createSnapshotStateBlock(imageInfo.device);
                 // TODO(b/294277842): make sure the queue is empty before using.
-                loadImageContent(stream, &stateBlock, unboxedImage, &imageInfo);
+                if (!loadImageContent(stream, &stateBlock, unboxedImage, &imageInfo)) {
+                    releaseSnapshotStateBlock(&stateBlock);
+                    return false;
+                }
                 releaseSnapshotStateBlock(&stateBlock);
             }
 
@@ -882,7 +898,10 @@ class VkDecoderGlobalState::Impl {
                 // TODO: add a special case for host mapped memory
                 StateBlock stateBlock = createSnapshotStateBlock(bufferInfo.device);
                 // TODO(b/294277842): make sure the queue is empty before using.
-                loadBufferContent(stream, &stateBlock, unboxedBuffer, &bufferInfo);
+                if (!loadBufferContent(stream, &stateBlock, unboxedBuffer, &bufferInfo)) {
+                    releaseSnapshotStateBlock(&stateBlock);
+                    return false;
+                }
                 releaseSnapshotStateBlock(&stateBlock);
             }
 
@@ -980,9 +999,9 @@ class VkDecoderGlobalState::Impl {
                             case DescriptorSetInfo::DescriptorWriteType::InlineUniformBlock:
                             case DescriptorSetInfo::DescriptorWriteType::AccelerationStructure:
                                 // TODO
-                                GFXSTREAM_FATAL("Encountered pending inline uniform block or acceleration "
+                                GFXSTREAM_ERROR("Encountered pending inline uniform block or acceleration "
                                                 "structure desc write, abort (NYI)");
-                                break;
+                                return false;
                             default:
                                 break;
                         }
@@ -1014,7 +1033,8 @@ class VkDecoderGlobalState::Impl {
                 VkFence unboxedFence = unbox_VkFence(boxedFence);
                 auto it = mFenceInfo.find(unboxedFence);
                 if (it == mFenceInfo.end()) {
-                    GFXSTREAM_FATAL("Snapshot load failure: unrecognized VkFence");
+                    GFXSTREAM_ERROR("Snapshot load failure: unrecognized VkFence");
+                    return false;
                 }
                 const auto& device = it->second.device;
                 const auto& deviceInfo = gfxstream::base::find(mDeviceInfo, device);
@@ -1037,6 +1057,7 @@ class VkDecoderGlobalState::Impl {
             mSnapshotState = SnapshotState::Normal;
         }
         GFXSTREAM_DEBUG("VulkanSnapshots load (end)");
+        return true;
     }
 
     std::optional<uint32_t> getContextIdForDeviceLocked(VkDevice device) REQUIRES(mMutex) {
@@ -10906,10 +10927,12 @@ const gfxstream::host::FeatureSet& VkDecoderGlobalState::getFeatures() const { r
 
 bool VkDecoderGlobalState::vkCleanupEnabled() const { return mImpl->vkCleanupEnabled(); }
 
-void VkDecoderGlobalState::save(gfxstream::Stream* stream) { mImpl->save(stream); }
+bool VkDecoderGlobalState::save(gfxstream::Stream* stream) {
+    return mImpl->save(stream);
+}
 
-void VkDecoderGlobalState::load(gfxstream::Stream* stream, GfxApiLogger& gfxLogger) {
-    mImpl->load(stream, gfxLogger);
+bool VkDecoderGlobalState::load(gfxstream::Stream* stream, GfxApiLogger& gfxLogger) {
+    return mImpl->load(stream, gfxLogger);
 }
 
 VkResult VkDecoderGlobalState::on_vkEnumerateInstanceVersion(gfxstream::base::BumpPool* pool,

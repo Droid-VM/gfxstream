@@ -554,7 +554,7 @@ bool RenderWindow::setupSubWindow(FBNativeWindowType window,
 bool RenderWindow::removeSubWindow() {
     D("Entering mHasSubWindow=%s", mHasSubWindow ? "true" : "false");
     if (!mHasSubWindow) {
-        return false;
+        return true;
     }
     mHasSubWindow = false;
     if (!useThread()) {
