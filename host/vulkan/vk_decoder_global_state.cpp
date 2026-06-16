@@ -3166,6 +3166,11 @@ class VkDecoderGlobalState::Impl {
         auto original_underlying_image = bimi->image;
         auto original_boxed_image = unboxed_to_boxed_non_dispatchable_VkImage(original_underlying_image);
 
+        if (!original_boxed_image) {
+            GFXSTREAM_ERROR("Original boxed image not found for deferred AHB bind.");
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+
         VkImageCreateInfo ici = {};
         {
             std::lock_guard<std::mutex> lock(mMutex);
