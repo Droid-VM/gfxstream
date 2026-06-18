@@ -711,10 +711,15 @@ class VkDecoderGlobalState::Impl {
                                 unboxed_to_boxed_non_dispatchable_VkBufferView(entry.bufferView);
                             stream->write(&bufferView, sizeof(bufferView));
                         } break;
-                        case DescriptorSetInfo::DescriptorWriteType::InlineUniformBlock:
+                        case DescriptorSetInfo::DescriptorWriteType::InlineUniformBlock: {
+                            uint32_t dataSize = entry.inlineUniformBlockBuffer.size();
+                            stream->putBe32(dataSize);
+                            stream->write(entry.inlineUniformBlockBuffer.data(), dataSize);
+                        } break;
                         case DescriptorSetInfo::DescriptorWriteType::AccelerationStructure:
-                            GFXSTREAM_ERROR("Encountered pending inline uniform block or acceleration "
-                                            "structure desc write, abort (NYI)");
+                            GFXSTREAM_ERROR(
+                                "Encountered pending acceleration "
+                                "structure desc write, abort (NYI)");
                             return false;
                         default:
                             break;
@@ -941,6 +946,9 @@ class VkDecoderGlobalState::Impl {
                 std::vector<std::unique_ptr<VkDescriptorImageInfo>> tmpImageInfos;
                 std::vector<std::unique_ptr<VkDescriptorBufferInfo>> tmpBufferInfos;
                 std::vector<std::unique_ptr<VkBufferView>> tmpBufferViews;
+                std::vector<std::unique_ptr<VkWriteDescriptorSetInlineUniformBlockEXT>>
+                    tmpInlineUniformBlocks;
+                std::vector<std::vector<uint8_t>> tmpInlineUniformBlockBuffers;
 
                 for (uint64_t poolId : allpoolIds) {
                     bool allocated = stream->getByte();
@@ -997,11 +1005,37 @@ class VkDecoderGlobalState::Impl {
                                 stream->read(&bufferView, sizeof(bufferView));
                                 bufferView = unbox_VkBufferView(bufferView);
                             } break;
-                            case DescriptorSetInfo::DescriptorWriteType::InlineUniformBlock:
+                            case DescriptorSetInfo::DescriptorWriteType::InlineUniformBlock: {
+                                uint32_t dataSize = stream->getBe32();
+                                tmpInlineUniformBlockBuffers.push_back(
+                                    std::vector<uint8_t>(dataSize));
+                                stream->read(tmpInlineUniformBlockBuffers.back().data(), dataSize);
+                                tmpInlineUniformBlocks.push_back(
+                                    std::make_unique<VkWriteDescriptorSetInlineUniformBlockEXT>());
+                                VkWriteDescriptorSetInlineUniformBlockEXT& inlineUniformBlock =
+                                    *tmpInlineUniformBlocks.back();
+                                inlineUniformBlock.sType =
+                                    VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK_EXT;
+                                inlineUniformBlock.pNext = nullptr;
+                                inlineUniformBlock.dataSize = dataSize;
+                                inlineUniformBlock.pData =
+                                    tmpInlineUniformBlockBuffers.back().data();
+                                writeDescriptorSet.pNext = &inlineUniformBlock;
+                                // Note: following is redundant, as arrayElement is guarantee to be
+                                // 0 due to the way descriptor is handled in snapshot. it just
+                                // serves to clarify that we are updating the whole buffer, to
+                                // account the possibility of accumulative updating
+                                writeDescriptorSet.dstArrayElement = 0;
+                                // Note: following is important to indicate we are updating
+                                // the whole buffer, as it could accumulate multiple update before
+                                // snapshot is taken
+                                writeDescriptorSet.descriptorCount = dataSize;
+                            } break;
                             case DescriptorSetInfo::DescriptorWriteType::AccelerationStructure:
                                 // TODO
-                                GFXSTREAM_ERROR("Encountered pending inline uniform block or acceleration "
-                                                "structure desc write, abort (NYI)");
+                                GFXSTREAM_ERROR(
+                                    "Encountered pending acceleration "
+                                    "structure desc write, abort (NYI)");
                                 return false;
                             default:
                                 break;
@@ -4652,31 +4686,17 @@ class VkDecoderGlobalState::Impl {
     static DescriptorSetInfo::DescriptorWrite* GetDescriptorSetElementEntryWrapping(
         std::vector<std::vector<DescriptorSetInfo::DescriptorWrite>>& descriptorSetTable,
         uint32_t& bindingIndex, uint32_t& arrayElementIndex) {
-        if (bindingIndex >= descriptorSetTable.size()) {
-            return nullptr;
+        while (bindingIndex < descriptorSetTable.size()) {
+            std::vector<DescriptorSetInfo::DescriptorWrite>& bindingTable =
+                descriptorSetTable[bindingIndex];
+            if (arrayElementIndex < bindingTable.size()) {
+                return &bindingTable[arrayElementIndex];
+            }
+            // Descriptor writes wrap to the next binding. See
+            // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkWriteDescriptorSet.html
+            ++bindingIndex;
+            arrayElementIndex = 0;
         }
-
-        std::vector<DescriptorSetInfo::DescriptorWrite>& bindingTable =
-            descriptorSetTable[bindingIndex];
-        if (arrayElementIndex < bindingTable.size()) {
-            return &bindingTable[arrayElementIndex];
-        }
-
-        // Descriptor writes wrap to the next binding. See
-        // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkWriteDescriptorSet.html
-        ++bindingIndex;
-        arrayElementIndex = 0;
-
-        if (bindingIndex >= descriptorSetTable.size()) {
-            return nullptr;
-        }
-
-        std::vector<DescriptorSetInfo::DescriptorWrite>& nextBindingTable =
-            descriptorSetTable[bindingIndex];
-        if (arrayElementIndex < nextBindingTable.size()) {
-            return &nextBindingTable[arrayElementIndex];
-        }
-
         return nullptr;
     }
 
@@ -4781,10 +4801,13 @@ class VkDecoderGlobalState::Impl {
                 if (entry == nullptr) break;
 
                 entry->inlineUniformBlock = *descInlineUniformBlock;
-                entry->inlineUniformBlockBuffer.assign(
-                    static_cast<const uint8_t*>(descInlineUniformBlock->pData),
-                    static_cast<const uint8_t*>(descInlineUniformBlock->pData) +
-                        descInlineUniformBlock->dataSize);
+                if (entry->inlineUniformBlockBuffer.size() <
+                    dstArrayElement + descInlineUniformBlock->dataSize) {
+                    entry->inlineUniformBlockBuffer.resize(dstArrayElement +
+                                                           descInlineUniformBlock->dataSize);
+                }
+                memcpy(entry->inlineUniformBlockBuffer.data() + dstArrayElement,
+                       descInlineUniformBlock->pData, descInlineUniformBlock->dataSize);
                 entry->writeType = DescriptorSetInfo::DescriptorWriteType::InlineUniformBlock;
                 entry->descriptorType = descType;
                 entry->dstArrayElement = dstArrayElement;
@@ -4799,11 +4822,80 @@ class VkDecoderGlobalState::Impl {
                 }
             }
         }
-        // TODO: bookkeep pDescriptorCopies
-        // Our primary use case vkQueueCommitDescriptorSetUpdatesGOOGLE does not use
-        // pDescriptorCopies. Thus skip its implementation for now.
-        if (descriptorCopyCount && snapshotsEnabled()) {
-            GFXSTREAM_ERROR("%s: Snapshot does not support descriptor copy yet\n");
+        for (uint32_t copyIdx = 0; copyIdx < descriptorCopyCount; copyIdx++) {
+            const VkCopyDescriptorSet& descriptorCopy = pDescriptorCopies[copyIdx];
+            auto srcIte = mDescriptorSetInfo.find(descriptorCopy.srcSet);
+            if (srcIte == mDescriptorSetInfo.end()) {
+                continue;
+            }
+            auto dstIte = mDescriptorSetInfo.find(descriptorCopy.dstSet);
+            if (dstIte == mDescriptorSetInfo.end()) {
+                continue;
+            }
+
+            DescriptorSetInfo& srcDescriptorSetInfo = srcIte->second;
+            DescriptorSetInfo& dstDescriptorSetInfo = dstIte->second;
+
+            auto& srcTable = srcDescriptorSetInfo.allWrites;
+            auto& dstTable = dstDescriptorSetInfo.allWrites;
+
+            uint32_t srcBinding = descriptorCopy.srcBinding;
+            uint32_t srcArrayElement = descriptorCopy.srcArrayElement;
+            uint32_t dstBinding = descriptorCopy.dstBinding;
+            uint32_t dstArrayElement = descriptorCopy.dstArrayElement;
+            uint32_t descriptorCount = descriptorCopy.descriptorCount;
+
+            uint32_t srcBindingCheck = srcBinding;
+            uint32_t srcArrayElementCheck = srcArrayElement;
+            auto* srcCheckEntry = GetDescriptorSetElementEntryWrapping(srcTable, srcBindingCheck,
+                                                                       srcArrayElementCheck);
+
+            uint32_t dstBindingCheck = dstBinding;
+            uint32_t dstArrayElementCheck = dstArrayElement;
+            auto* dstCheckEntry = GetDescriptorSetElementEntryWrapping(dstTable, dstBindingCheck,
+                                                                       dstArrayElementCheck);
+
+            if (srcCheckEntry && dstCheckEntry &&
+                isDescriptorTypeInlineUniformBlock(srcCheckEntry->descriptorType)) {
+                uint32_t zero1 = 0;
+                uint32_t zero2 = 0;
+                auto* srcEntry =
+                    GetDescriptorSetElementEntryWrapping(srcTable, srcBindingCheck, zero1);
+                auto* dstEntry =
+                    GetDescriptorSetElementEntryWrapping(dstTable, dstBindingCheck, zero2);
+
+                if (srcEntry && dstEntry) {
+                    if (dstEntry->inlineUniformBlockBuffer.size() <
+                        dstArrayElementCheck + descriptorCount) {
+                        dstEntry->inlineUniformBlockBuffer.resize(dstArrayElementCheck +
+                                                                  descriptorCount);
+                    }
+                    if (srcEntry->inlineUniformBlockBuffer.size() > srcArrayElementCheck) {
+                        uint32_t copySize = std::min(
+                            descriptorCount, (uint32_t)srcEntry->inlineUniformBlockBuffer.size() -
+                                                 srcArrayElementCheck);
+                        memcpy(dstEntry->inlineUniformBlockBuffer.data() + dstArrayElementCheck,
+                               srcEntry->inlineUniformBlockBuffer.data() + srcArrayElementCheck,
+                               copySize);
+                    }
+                    dstEntry->writeType =
+                        DescriptorSetInfo::DescriptorWriteType::InlineUniformBlock;
+                    dstEntry->descriptorType = srcEntry->descriptorType;
+                }
+                continue;
+            }
+
+            for (uint32_t writeElemIdx = 0; writeElemIdx < descriptorCount;
+                 ++writeElemIdx, ++srcArrayElement, ++dstArrayElement) {
+                auto* srcEntry =
+                    GetDescriptorSetElementEntryWrapping(srcTable, srcBinding, srcArrayElement);
+                auto* dstEntry =
+                    GetDescriptorSetElementEntryWrapping(dstTable, dstBinding, dstArrayElement);
+
+                if (srcEntry == nullptr || dstEntry == nullptr) break;
+
+                *dstEntry = *srcEntry;
+            }
         }
         bool needEmulateWriteDescriptor = false;
         // c++ seems to allow for 0-size array allocation
