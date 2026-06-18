@@ -1993,7 +1993,17 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
 
     auto allocInfoChain = vk_make_chain_iterator(&allocInfo);
 
-    if (mDeviceInfo.supportsExternalMemoryExport) {
+    // For ColorBuffer images on drivers where AHB export is known to fail, don't request export.
+    const bool isImageAlloc = imageForDedicatedAllocation.hasValue();
+    // Callers may set info->actuallyExternal=false up front to request a plain (non-exportable)
+    // allocation (e.g. a ColorBuffer whose format the AHB handle type can't represent).
+    bool wantExport = mDeviceInfo.supportsExternalMemoryExport && info->actuallyExternal;
+    if (isImageAlloc && mImageExportBroken) {
+        wantExport = false;
+        info->actuallyExternal = false;
+    }
+
+    if (wantExport) {
         if (mDeviceInfo.supportsDmaBuf) {
             exportAi.handleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
         }
@@ -2022,7 +2032,38 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
         if (allocRes != VK_SUCCESS) {
             GFXSTREAM_DEBUG("allocExternalMemory: failed in vkAllocateMemory: %s",
                             string_VkResult(allocRes));
-            break;
+            // Some Android GPU drivers (Adreno/Mali) do not support exporting a *new* AHB via
+            // vkAllocateMemory + VkExportMemoryAllocateInfo(AHB). When that is the case, fall back
+            // to a plain (non-exportable) dedicated allocation so ColorBuffer creation can proceed.
+            // The buffer then cannot be exported as an AHB; callers must treat it as non-external.
+            bool fellBackToNonExternal = false;
+            if (mDeviceInfo.supportsExternalMemoryExport) {
+                VkMemoryAllocateInfo plainAi = {
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                    .pNext = nullptr,
+                    .allocationSize = info->size,
+                    .memoryTypeIndex = info->typeIndex,
+                };
+                VkMemoryDedicatedAllocateInfo plainDed = dedicatedAllocInfo;
+                plainDed.pNext = nullptr;
+                if (info->dedicatedAllocation) plainAi.pNext = &plainDed;
+                VkResult plainRes = vk->vkAllocateMemory(mDevice, &plainAi, nullptr, &info->memory);
+                fprintf(stderr,
+                        "CBVK-ALLOC: AHB export res=%d, plain(no-export) fallback res=%d\n",
+                        allocRes, plainRes);
+                if (plainRes == VK_SUCCESS) {
+                    info->actuallyExternal = false;
+                    fellBackToNonExternal = true;
+                    if (isImageAlloc) {
+                        // Remember so future ColorBuffer images are created non-external up front
+                        // (an external image cannot be bound to this plain memory).
+                        mImageExportBroken = true;
+                    }
+                }
+            }
+            if (!fellBackToNonExternal) {
+                break;
+            }
         }
 
         if (mDeviceInfo.memProps.memoryTypes[info->typeIndex].propertyFlags &
@@ -2078,7 +2119,9 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
         return false;
     }
 
-    if (!mDeviceInfo.supportsExternalMemoryExport) {
+    if (!mDeviceInfo.supportsExternalMemoryExport || !info->actuallyExternal) {
+        // Either the device has no export support, or we fell back to a plain non-exportable
+        // allocation (e.g. AHB export unsupported by the driver). Skip exporting a handle.
         return true;
     }
 
@@ -2488,6 +2531,7 @@ std::unique_ptr<VkImageCreateInfo> VkEmulation::generateColorBufferVkImageCreate
     }
     if (!maybeImageSupportInfo) {
         GFXSTREAM_ERROR("Format %s [%d] is not supported.", string_VkFormat(format), format);
+        fprintf(stderr, "CBVK-FAIL: format %d not in supported table\n", format);
         return nullptr;
     }
     const VkEmulation::ImageSupportInfo& imageSupportInfo = *maybeImageSupportInfo;
@@ -2604,6 +2648,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     if (!isFormatVulkanCompatible(internalFormat)) {
         GFXSTREAM_ERROR("Failed to create Vk ColorBuffer: format:%d not compatible.",
                         internalFormat);
+        fprintf(stderr, "CBVK-FAIL: internalFormat %d not vk-compatible\n", internalFormat);
         return false;
     }
 
@@ -2626,6 +2671,9 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
             __func__, colorBufferHandle, width, height,
             mDeviceInfo.physdevProps.limits.maxFramebufferWidth,
             mDeviceInfo.physdevProps.limits.maxFramebufferHeight);
+        fprintf(stderr, "CBVK-FAIL: size %ux%u exceeds fb limit %ux%u\n", width, height,
+                mDeviceInfo.physdevProps.limits.maxFramebufferWidth,
+                mDeviceInfo.physdevProps.limits.maxFramebufferHeight);
         return false;
     }
 
@@ -2675,6 +2723,8 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     // pNext will be filled later.
     if (imageCi == nullptr) {
         // it can happen if the format is not supported
+        fprintf(stderr, "CBVK-FAIL: generateImageCreateInfo null (vkFormat=%d gl=%d)\n",
+                vkFormat, internalFormat);
         return false;
     }
     imageCi->sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -2697,9 +2747,24 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
 
     VkExternalMemoryImageCreateInfo* extImageCiPtr = nullptr;
 
-    if (extMemHandleInfo || mDeviceInfo.supportsExternalMemoryExport) {
+    // Only create the image as external if this VkFormat actually supports the host's external
+    // memory handle type. On Android the handle type is AHardwareBuffer, which has no BGRA format,
+    // so BGRA ColorBuffers must be created non-external (and bound to plain memory). Otherwise the
+    // image is external but the AHB export allocation fails and the bind is rejected.
+    bool formatSupportsExternal = false;
+    for (const auto& s : mImageSupportInfo) {
+        if (s.format == vkFormat && s.supported) {
+            formatSupportsExternal = s.supportsExternalMemory;
+            break;
+        }
+    }
+    if ((extMemHandleInfo || mDeviceInfo.supportsExternalMemoryExport) && !mImageExportBroken &&
+        formatSupportsExternal) {
         extImageCiPtr = &extImageCi;
     }
+    fprintf(stderr, "CBVK-EXT: cb=%u vkFormat=%d formatSupportsExternal=%d -> external=%d\n",
+            colorBufferHandle, vkFormat, formatSupportsExternal ? 1 : 0,
+            extImageCiPtr ? 1 : 0);
 
     imageCi->pNext = extImageCiPtr;
 
@@ -2709,6 +2774,8 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     if (createRes != VK_SUCCESS) {
         GFXSTREAM_DEBUG("Failed to create Vulkan image for ColorBuffer %d, error: %s",
                         colorBufferHandle, string_VkResult(createRes));
+        fprintf(stderr, "CBVK-FAIL: vkCreateImage res=%d vkFormat=%d usage=0x%x flags=0x%x %ux%u\n",
+                createRes, vkFormat, imageCi->usage, imageCi->flags, width, height);
         return false;
     }
 
@@ -2718,6 +2785,10 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     infoPtr->currentQueueFamilyIndex = mQueueFamilyIndex;
 
     VkMemoryRequirements memReqs;
+    memReqs.size = 0;
+    memReqs.alignment = 0;
+    memReqs.memoryTypeBits = 0;
+    int memReqBranch = 0;
     if (!useDedicated && vk->vkGetImageMemoryRequirements2KHR) {
         VkMemoryDedicatedRequirements dedicated_reqs{
             VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS, nullptr};
@@ -2728,8 +2799,42 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         vk->vkGetImageMemoryRequirements2KHR(mDevice, &info, &reqs);
         useDedicated = dedicated_reqs.requiresDedicatedAllocation;
         memReqs = reqs.memoryRequirements;
+        memReqBranch = 2;
+        // On some Android Vulkan loaders the *2KHR query fills memoryTypeBits but leaves
+        // size/alignment as 0. Fall back to the plain query to obtain a valid size.
+        if (memReqs.size == 0 && vk->vkGetImageMemoryRequirements) {
+            VkMemoryRequirements plainReqs{};
+            vk->vkGetImageMemoryRequirements(mDevice, infoPtr->image, &plainReqs);
+            if (plainReqs.size != 0) {
+                memReqs = plainReqs;
+                memReqBranch = 3;
+            }
+        }
     } else {
         vk->vkGetImageMemoryRequirements(mDevice, infoPtr->image, &memReqs);
+        memReqBranch = 1;
+    }
+    fprintf(stderr,
+            "CBVK-MEMREQ: cb=%u %ux%u fmt=%d branch=%d 2khr=%p plain=%p size=%llu align=%llu "
+            "typeBits=0x%x dedicated=%d image=%p\n",
+            colorBufferHandle, width, height, internalFormat, memReqBranch,
+            (void*)vk->vkGetImageMemoryRequirements2KHR, (void*)vk->vkGetImageMemoryRequirements,
+            (unsigned long long)memReqs.size, (unsigned long long)memReqs.alignment,
+            memReqs.memoryTypeBits, useDedicated ? 1 : 0, (void*)infoPtr->image);
+
+    // On Android the host uses AHB-backed external images. Querying memory requirements before
+    // the image is bound to an AHB is undefined and returns size=0 here. Synthesize a plausible
+    // size/typeBits so the dedicated AHB export allocation has valid (driver may ignore size).
+    if (memReqs.size == 0) {
+        const uint64_t bppGuess = 4;  // formats used here (BGRA/RGBA8) are 32-bit
+        memReqs.size = (uint64_t)width * (uint64_t)height * bppGuess;
+        if (memReqs.alignment == 0) memReqs.alignment = kPageSize;
+        if (memReqs.memoryTypeBits == 0) {
+            memReqs.memoryTypeBits = (uint32_t)((1ull << mDeviceInfo.memProps.memoryTypeCount) - 1);
+        }
+        fprintf(stderr, "CBVK-MEMREQ: synthesized size=%llu align=%llu typeBits=0x%x\n",
+                (unsigned long long)memReqs.size, (unsigned long long)memReqs.alignment,
+                memReqs.memoryTypeBits);
     }
 
     if (extMemHandleInfo) {
@@ -2798,14 +2903,61 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
 
         infoPtr->externalMemoryCompatible = true;
     } else {
+        // Tell allocExternalMemory whether this image was created as external; if not, it must
+        // allocate plain (non-exportable) memory so the bind to the non-external image succeeds.
+        infoPtr->memory.actuallyExternal = (extImageCiPtr != nullptr);
         bool allocRes = allocExternalMemory(vk, &infoPtr->memory,
                                             deviceAlignment, kNullopt, dedicatedImage);
         if (!allocRes) {
             GFXSTREAM_ERROR("Failed to allocate ColorBuffer with Vulkan backing.");
+            fprintf(stderr,
+                    "CBVK-FAIL: allocExternalMemory failed size=%llu typeIndex=%u dedicated=%d\n",
+                    (unsigned long long)infoPtr->memory.size, infoPtr->memory.typeIndex,
+                    useDedicated ? 1 : 0);
             return false;
         }
 
-        infoPtr->externalMemoryCompatible = mDeviceInfo.supportsExternalMemoryExport;
+        infoPtr->externalMemoryCompatible =
+            mDeviceInfo.supportsExternalMemoryExport && infoPtr->memory.actuallyExternal;
+    }
+
+    // The format-support query can incorrectly report that a format (e.g. BGRA) is AHB-exportable,
+    // so the image may have been created external yet the export allocation fell back to plain
+    // memory. An external image cannot be bound to plain memory, so recreate it as non-external
+    // and reallocate against the now-valid memory requirements.
+    if (!extMemHandleInfo && extImageCiPtr != nullptr && !infoPtr->memory.actuallyExternal) {
+        mImageExportBroken = true;
+        vk->vkFreeMemory(mDevice, infoPtr->memory.memory, nullptr);
+        infoPtr->memory.memory = VK_NULL_HANDLE;
+        vk->vkDestroyImage(mDevice, infoPtr->image, nullptr);
+        infoPtr->image = VK_NULL_HANDLE;
+
+        imageCi->pNext = nullptr;  // recreate as non-external
+        VkResult reCreate = vk->vkCreateImage(mDevice, imageCi.get(), nullptr, &infoPtr->image);
+        if (reCreate != VK_SUCCESS) {
+            fprintf(stderr, "CBVK-FAIL: recreate non-external vkCreateImage res=%d\n", reCreate);
+            return false;
+        }
+        infoPtr->imageCreateInfoShallow = vk_make_orphan_copy(*imageCi);
+
+        VkMemoryRequirements reReqs{};
+        vk->vkGetImageMemoryRequirements(mDevice, infoPtr->image, &reReqs);
+        if (reReqs.size != 0) {
+            infoPtr->memory.size = reReqs.size;
+            infoPtr->memory.typeIndex =
+                getValidMemoryTypeIndex(reReqs.memoryTypeBits, infoPtr->memoryProperty);
+        }
+        infoPtr->memory.actuallyExternal = false;
+        Optional<VkImage> reDedicated =
+            useDedicated ? Optional<VkImage>(infoPtr->image) : kNullopt;
+        if (!allocExternalMemory(vk, &infoPtr->memory, deviceAlignment, kNullopt, reDedicated)) {
+            fprintf(stderr, "CBVK-FAIL: recreate non-external alloc failed\n");
+            return false;
+        }
+        infoPtr->externalMemoryCompatible = false;
+        fprintf(stderr, "CBVK-EXT: cb=%u recreated non-external size=%llu typeIndex=%u\n",
+                colorBufferHandle, (unsigned long long)infoPtr->memory.size,
+                infoPtr->memory.typeIndex);
     }
 
     infoPtr->memory.pageOffset = reinterpret_cast<uint64_t>(infoPtr->memory.mappedPtr) % kPageSize;
@@ -2823,6 +2975,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     if (bindImageMemoryRes != VK_SUCCESS) {
         GFXSTREAM_ERROR("Failed to bind image memory. Error: %s",
                         string_VkResult(bindImageMemoryRes));
+        fprintf(stderr, "CBVK-FAIL: vkBindImageMemory res=%d\n", bindImageMemoryRes);
         return false;
     }
 
@@ -2867,6 +3020,8 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     if (createRes != VK_SUCCESS) {
         GFXSTREAM_DEBUG("Failed to create Vulkan image view for ColorBuffer %d, Error: %s",
                         colorBufferHandle, string_VkResult(createRes));
+        fprintf(stderr, "CBVK-FAIL: vkCreateImageView res=%d vkFormat=%d\n", createRes,
+                imageVkFormat);
         return false;
     }
 

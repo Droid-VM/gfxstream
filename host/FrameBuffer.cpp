@@ -987,6 +987,8 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
 #endif
         };
         impl->m_emulationVk = vk::VkEmulation::create(vkDispatch, callbacks, impl->m_features);
+        fprintf(stderr, "VK emulation: VkEmulation::create -> %s\n",
+                impl->m_emulationVk ? "OK" : "NULL");
         if (impl->m_emulationVk) {
             vk::VkDecoderGlobalState::initialize(impl->m_emulationVk.get());
         } else {
@@ -1763,6 +1765,9 @@ void FrameBuffer::Impl::createColorBufferWithResourceHandle(int p_width, int p_h
 HandleType FrameBuffer::Impl::createColorBufferWithResourceHandleLocked(
     int p_width, int p_height, GLenum p_internalFormat, FrameworkFormat p_frameworkFormat,
     HandleType handle) {
+    fprintf(stderr, "createColorBuffer: emulationGl=%p emulationVk=%p format=%d fwfmt=%d %dx%d\n",
+            (void*)m_emulationGl.get(), (void*)m_emulationVk.get(), p_internalFormat,
+            p_frameworkFormat, p_width, p_height);
     ColorBufferPtr cb =
         ColorBuffer::create(m_emulationGl.get(), m_emulationVk.get(), p_width, p_height,
                             p_internalFormat, p_frameworkFormat, handle, nullptr /*stream*/);

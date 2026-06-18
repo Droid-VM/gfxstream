@@ -16,6 +16,18 @@
 
 #include <drm/drm_fourcc.h>
 
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
+
 #include "FrameBuffer.h"
 #include "VirtioGpuFormatUtils.h"
 
@@ -30,6 +42,102 @@ using gfxstream::host::snapshot::VirtioGpuResourceSnapshot;
 #endif
 
 namespace {
+
+// Gunyah workaround: recycle RingBlob backing memory and never free it.
+//
+// On Gunyah, the VMM SHAREs the host-visible blob pages with the guest, and a
+// SHARE is permanent: once a GPA is SHARE'd to a physical page, it cannot be
+// re-pointed at a different page later. So when the guest re-maps a host-visible
+// blob at a BAR offset it used before, the new blob MUST land on the same
+// physical pages as the old one, or the guest reads stale data.
+//
+// We achieve this with a recycle pool: a RingBlob's backing memory is never
+// freed, and when a same-size RingBlob is later needed we hand back a
+// previously-freed one (its physical pages intact) instead of allocating new
+// memory. gfxstream cannot see the guest BAR offset/GPA (it is only known on the
+// crosvm side at map time), so we key the pool by size and reuse most-recently-
+// freed first (LIFO) — guest address allocators tend to re-hand-out the most-
+// recently-freed offset, and ASG ring blobs are per-context, fixed-size, and
+// created/destroyed serially, so this matches "same GPA reuses same pages" in
+// practice.
+//
+// Only enabled when the host VMM runs on Gunyah (gated by the
+// GFXSTREAM_GUNYAH_PIN_RINGBLOB env var); other hosts (e.g. KVM-based
+// crosvm/qemu) are unaffected and keep the normal allocate/free behavior.
+bool ShouldPinRingBlobsForGunyah() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("GFXSTREAM_GUNYAH_PIN_RINGBLOB");
+        return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+}
+
+struct GunyahRingBlobPool {
+    std::mutex mutex;
+    // size -> stack of freed-but-still-alive RingBlobs available for reuse (LIFO).
+    std::unordered_map<uint64_t, std::vector<std::shared_ptr<RingBlob>>> freeBySize;
+    // Permanent reference to every RingBlob ever created so its pages never free.
+    std::vector<std::shared_ptr<RingBlob>> pinned;
+};
+
+GunyahRingBlobPool& GetGunyahRingBlobPool() {
+    static GunyahRingBlobPool* pool = new GunyahRingBlobPool();  // intentional leak
+    return *pool;
+}
+
+// Reuse a freed same-size RingBlob if available, else create one and pin it.
+std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint64_t alignment,
+                                                bool externalBlob) {
+    auto& pool = GetGunyahRingBlobPool();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+
+    auto it = pool.freeBySize.find(size);
+    if (it != pool.freeBySize.end() && !it->second.empty()) {
+        std::shared_ptr<RingBlob> blob = std::move(it->second.back());
+        it->second.pop_back();
+        return blob;  // same physical pages as before
+    }
+
+    // Gunyah persistent-BAR (fixed_blob_mapping) path: the VMM maps each blob into the shared BAR
+    // via add_fd_mapping(), which requires an exportable fd. AlignedMemory (CreateWithHostMemory) is
+    // NOT exportable, so always back the RingBlob with shmem (memfd) when pinning for Gunyah,
+    // regardless of the ExternalBlob feature flag.
+    (void)externalBlob;
+    std::unique_ptr<RingBlob> created = RingBlob::CreateWithShmem(id, size);
+    if (!created) {
+        return nullptr;
+    }
+    std::shared_ptr<RingBlob> blob = std::move(created);
+
+    // Gunyah SHARE (lend=false) does not fault in or lock the backing pages. A shmem/memfd-backed
+    // RingBlob is demand-paged, so the guest's first access to a not-yet-present page would SIGBUS.
+    // Touch every page to fault it in, then mlock to keep it resident for the VM's lifetime
+    // (mirrors how qemu's pre-allocated hostmem backend is always resident).
+#ifndef _WIN32
+    if (void* addr = blob->map()) {
+        std::memset(addr, 0, size);
+        if (mlock(addr, size) != 0) {
+            fprintf(stderr, "RINGBLOB-PIN: mlock failed id=%u size=%llu errno=%d\n", id,
+                    (unsigned long long)size, errno);
+        } else {
+            fprintf(stderr, "RINGBLOB-PIN: pinned id=%u size=%llu addr=%p\n", id,
+                    (unsigned long long)size, addr);
+        }
+    }
+#endif
+
+    pool.pinned.push_back(blob);  // keep alive forever
+    return blob;
+}
+
+void ReleaseGunyahRingBlob(const std::shared_ptr<RingBlob>& blob) {
+    if (!blob) {
+        return;
+    }
+    auto& pool = GetGunyahRingBlobPool();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+    pool.freeBySize[blob->size()].push_back(blob);
+}
 
 enum pipe_texture_target {
     PIPE_BUFFER,
@@ -274,7 +382,13 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
 
     if (createBlobArgs->blob_id == 0) {
         RingBlobMemory memory;
-        if (features.ExternalBlob.enabled) {
+        if (ShouldPinRingBlobsForGunyah()) {
+            // Gunyah workaround: reuse a pinned same-size RingBlob (same physical
+            // pages) if one is free, else allocate and pin a new one. This keeps the
+            // pages stable across unmap/remap, which Gunyah's permanent SHARE requires.
+            memory = AcquireGunyahRingBlob(resourceId, createBlobArgs->size, pageSize,
+                                           features.ExternalBlob.enabled);
+        } else if (features.ExternalBlob.enabled) {
             memory = RingBlob::CreateWithShmem(resourceId, createBlobArgs->size);
         } else {
             memory = RingBlob::CreateWithHostMemory(resourceId, createBlobArgs->size, pageSize);
@@ -806,11 +920,15 @@ int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
         }
 
         // Handle ownership transferred to VMM, Gfxstream keeps the mapping.
+        // Gunyah workaround: when recycling RingBlobs, the same shmem may be exported
+        // more than once (for successive blob resources), so hand out a dup'd handle
+        // instead of releasing the RingBlob's only handle.
+        gfxstream::base::SharedMemory::handle_type handle =
+            ShouldPinRingBlobsForGunyah() ? memory->dupHandle() : memory->releaseHandle();
 #ifdef _WIN32
-        outHandle->os_handle =
-            static_cast<int64_t>(reinterpret_cast<intptr_t>(memory->releaseHandle()));
+        outHandle->os_handle = static_cast<int64_t>(reinterpret_cast<intptr_t>(handle));
 #else
-        outHandle->os_handle = static_cast<int64_t>(memory->releaseHandle());
+        outHandle->os_handle = static_cast<int64_t>(handle);
 #endif
         outHandle->handle_type = STREAM_HANDLE_TYPE_MEM_SHM;
         return 0;
@@ -847,6 +965,18 @@ std::shared_ptr<RingBlob> VirtioGpuResource::ShareRingBlob() {
         return nullptr;
     }
     return std::get<RingBlobMemory>(*mBlobMemory);
+}
+
+void VirtioGpuResource::ReturnRingBlobToGunyahPool() {
+    if (!ShouldPinRingBlobsForGunyah() || !mBlobMemory) {
+        return;
+    }
+    if (!std::holds_alternative<RingBlobMemory>(*mBlobMemory)) {
+        return;
+    }
+    // Return the RingBlob to the recycle pool (kept alive, reusable by a later
+    // same-size blob) instead of letting it be freed when this resource is dropped.
+    ReleaseGunyahRingBlob(std::get<RingBlobMemory>(*mBlobMemory));
 }
 
 #ifdef GFXSTREAM_BUILD_WITH_SNAPSHOT_FRONTEND_SUPPORT

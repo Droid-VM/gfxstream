@@ -57,6 +57,13 @@ class RingBlob {
     // Only valid if `isExportable()` returns `true`.
     gfxstream::base::SharedMemory::handle_type releaseHandle();
 
+    // Like `releaseHandle()`, but duplicates the handle instead of transferring
+    // ownership, so the RingBlob keeps its own handle and can be exported again.
+    // Needed for the Gunyah RingBlob recycle path, where the same shmem-backed
+    // RingBlob is reused (and re-exported) for multiple blob resources.
+    // Only valid if `isExportable()` returns `true`.
+    gfxstream::base::SharedMemory::handle_type dupHandle();
+
     void* map();
 
     uint64_t size() const { return mSize; }

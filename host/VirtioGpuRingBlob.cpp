@@ -16,6 +16,10 @@
 
 #include <string>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include "gfxstream/common/logging.h"
 #include "gfxstream/virtio-gpu-gfxstream-renderer.h"
 
@@ -39,6 +43,24 @@ gfxstream::base::SharedMemory::handle_type RingBlob::releaseHandle() {
         return SharedMemory::invalidHandle();
     }
     return std::get<std::unique_ptr<SharedMemory>>(mMemory)->releaseHandle();
+}
+
+gfxstream::base::SharedMemory::handle_type RingBlob::dupHandle() {
+    if (!isExportable()) {
+        return SharedMemory::invalidHandle();
+    }
+    auto& shmem = std::get<std::unique_ptr<SharedMemory>>(mMemory);
+    SharedMemory::handle_type fd = shmem->getFd();
+    if (fd == SharedMemory::invalidHandle()) {
+        return SharedMemory::invalidHandle();
+    }
+#ifdef _WIN32
+    // Handle duplication is not implemented here; Gunyah recycle is only used on
+    // Linux/Android, so fall back to transferring ownership on Windows.
+    return shmem->releaseHandle();
+#else
+    return ::dup(fd);
+#endif
 }
 
 void* RingBlob::map() {

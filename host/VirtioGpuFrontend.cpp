@@ -484,6 +484,12 @@ void VirtioGpuFrontend::unrefResource(uint32_t resourceId) {
 
     resource.Destroy();
 
+    // Gunyah workaround: hand this resource's RingBlob (if any) back to the recycle
+    // pool so its backing pages stay alive and can be reused by a later same-size
+    // blob, keeping physical pages stable for Gunyah's permanent SHARE. No-op unless
+    // GFXSTREAM_GUNYAH_PIN_RINGBLOB=1.
+    resource.ReturnRingBlobToGunyahPool();
+
     mResources.erase(resourceIt);
 }
 

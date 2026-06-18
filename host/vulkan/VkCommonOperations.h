@@ -237,6 +237,9 @@ class VkEmulation {
 #endif
 
         bool dedicatedAllocation = false;
+        // False if export was requested but the driver could not allocate exportable (AHB) memory
+        // and we fell back to a plain, non-exportable allocation.
+        bool actuallyExternal = true;
     };
 
     bool allocExternalMemory(
@@ -553,6 +556,11 @@ class VkEmulation {
     bool mGuestVulkanOnly = false;
 
     bool mUseDedicatedAllocations = false;
+
+    // Set true once we detect that the driver cannot allocate exportable (AHB) memory for a
+    // dedicated ColorBuffer image (some Android Adreno/Mali drivers). When set, ColorBuffer images
+    // are created without external-memory create info and bound to plain (non-exportable) memory.
+    bool mImageExportBroken = false;
 
     // Instance and device for creating the system-wide shareable objects.
     VkInstance mInstance = VK_NULL_HANDLE;

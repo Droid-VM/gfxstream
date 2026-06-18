@@ -79,10 +79,39 @@ void init_vulkan_dispatch_from_system_loader(DlOpenFunc dlOpenFunc, DlSymFunc dl
     out->vkGetPhysicalDeviceSparseImageFormatProperties =
         (PFN_vkGetPhysicalDeviceSparseImageFormatProperties)dlSymFunc(
             lib, "vkGetPhysicalDeviceSparseImageFormatProperties");
+
+    // Android workaround: the Android Vulkan loader (system libvulkan.so) does not expose the
+    // global commands (vkCreateInstance / vkEnumerateInstance*) as dlsym-able symbols; per the
+    // Vulkan loader spec they must be queried via vkGetInstanceProcAddr(NULL, name). Desktop
+    // loaders export them directly, so these fallbacks only trigger where dlsym returned null.
+    if (out->vkGetInstanceProcAddr) {
+        if (!out->vkCreateInstance) {
+            out->vkCreateInstance =
+                (PFN_vkCreateInstance)out->vkGetInstanceProcAddr(nullptr, "vkCreateInstance");
+            fprintf(stderr, "VK loader: gipa(NULL,\"vkCreateInstance\")=%p\n",
+                    (void*)out->vkCreateInstance);
+        }
+        if (!out->vkEnumerateInstanceExtensionProperties) {
+            out->vkEnumerateInstanceExtensionProperties =
+                (PFN_vkEnumerateInstanceExtensionProperties)out->vkGetInstanceProcAddr(
+                    nullptr, "vkEnumerateInstanceExtensionProperties");
+        }
+        if (!out->vkEnumerateInstanceLayerProperties) {
+            out->vkEnumerateInstanceLayerProperties =
+                (PFN_vkEnumerateInstanceLayerProperties)out->vkGetInstanceProcAddr(
+                    nullptr, "vkEnumerateInstanceLayerProperties");
+        }
+    }
 #endif
 #ifdef VK_VERSION_1_1
     out->vkEnumerateInstanceVersion =
         (PFN_vkEnumerateInstanceVersion)dlSymFunc(lib, "vkEnumerateInstanceVersion");
+    // Android workaround: global command, see VK_VERSION_1_0 fallback above.
+    if (!out->vkEnumerateInstanceVersion && out->vkGetInstanceProcAddr) {
+        out->vkEnumerateInstanceVersion =
+            (PFN_vkEnumerateInstanceVersion)out->vkGetInstanceProcAddr(
+                nullptr, "vkEnumerateInstanceVersion");
+    }
     out->vkEnumeratePhysicalDeviceGroups =
         (PFN_vkEnumeratePhysicalDeviceGroups)dlSymFunc(lib, "vkEnumeratePhysicalDeviceGroups");
     out->vkGetPhysicalDeviceFeatures2 =
@@ -2984,6 +3013,12 @@ bool vulkan_dispatch_check_instance_VK_VERSION_1_0(const VulkanDispatch* vk)
 
 {
     bool good = true;
+    // Diag (Gunyah/crosvm host Vulkan bring-up): vkGetInstanceProcAddr is the loader's core entry.
+    // If it is NULL the dlopen'd library has no Vulkan symbols at all (wrong/stub library or nothing
+    // loaded); if it is non-NULL but vkCreateInstance below is NULL, a partial/incompatible loader
+    // was loaded.
+    fprintf(stderr, "VK dispatch check: vkGetInstanceProcAddr=%p vkCreateInstance=%p\n",
+            (void*)vk->vkGetInstanceProcAddr, (void*)vk->vkCreateInstance);
     if (!vk->vkCreateInstance) {
         fprintf(stderr, "VK_VERSION_1_0 check failed: vkCreateInstance not found\n");
         good = false;
