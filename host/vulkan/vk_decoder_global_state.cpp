@@ -6125,15 +6125,14 @@ class VkDecoderGlobalState::Impl {
 
         info->guestPhysAddr = physAddr;
 
-        constexpr size_t kPageBits = 12;
-        constexpr size_t kPageSize = 1u << kPageBits;
-        constexpr size_t kPageOffsetMask = kPageSize - 1;
+        const size_t pageSize = gfxstream::host::get_gfxstream_guest_page_size();
+        const size_t pageOffsetMask = pageSize - 1;
 
         uintptr_t addr = reinterpret_cast<uintptr_t>(info->ptr);
-        uintptr_t pageOffset = addr & kPageOffsetMask;
+        uintptr_t pageOffset = addr & pageOffsetMask;
 
         info->pageAlignedHva = reinterpret_cast<void*>(addr - pageOffset);
-        info->sizeToPage = ((info->size + pageOffset + kPageSize - 1) >> kPageBits) << kPageBits;
+        info->sizeToPage = (info->size + pageOffset + pageSize - 1) & ~pageOffsetMask;
 
         if (mLogging) {
             GFXSTREAM_VERBOSE("%s: map: %p, %p -> [0x%llx 0x%llx]", __func__, info->ptr,
@@ -6708,9 +6707,10 @@ class VkDecoderGlobalState::Impl {
                 // Determine size and alignment requirements and allocate a PrivateMemory
                 VkDeviceSize alignmentSize =
                     m_vkEmulation->externalMemoryHostProperties().minImportedHostPointerAlignment;
-                if (createBlobInfoPtr && alignmentSize < kPageSizeforBlob) {
+                const size_t guestPageSize = gfxstream::host::get_gfxstream_guest_page_size();
+                if (createBlobInfoPtr && alignmentSize < guestPageSize) {
                     // Align blob allocations to the page size
-                    alignmentSize = kPageSizeforBlob;
+                    alignmentSize = guestPageSize;
                 }
 
                 VkDeviceSize alignedSize = ALIGN(localAllocInfo.allocationSize, alignmentSize);
