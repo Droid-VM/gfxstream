@@ -111,6 +111,12 @@ VG_EXPORT int stream_renderer_import_resource(
     uint32_t res_handle, const struct stream_renderer_handle* import_handle,
     const struct stream_renderer_import_data* import_data);
 
+struct GfxstreamMetrics {
+    uint32_t render_thread_count;
+};
+
+VG_EXPORT int stream_renderer_get_metrics(struct GfxstreamMetrics* metrics);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

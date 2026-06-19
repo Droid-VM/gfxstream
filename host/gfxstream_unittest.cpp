@@ -203,3 +203,14 @@ TEST_F(GfxStreamBackendTest, MissingRequiredParameter) {
     int initResult = stream_renderer_init(streamRendererParams.data(), streamRendererParams.size());
     EXPECT_EQ(initResult, 0);
 }
+
+TEST_F(GfxStreamBackendTest, RenderThreadTracking) {
+    int initResult = stream_renderer_init(streamRendererParams.data(), streamRendererParams.size());
+    EXPECT_EQ(initResult, 0);
+    struct GfxstreamMetrics metrics = {};
+    EXPECT_EQ(stream_renderer_get_metrics(&metrics), 0);
+    EXPECT_GT(metrics.render_thread_count, 0);
+
+    // TODO: improve testing by creating render threads and checking if the metrics
+    //       increment as expected.
+}

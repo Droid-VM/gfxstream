@@ -70,6 +70,26 @@ static constexpr int kMinThreadsToRunUnlimited = 5;
 // A thread run limiter that limits render threads to run one slice at a time.
 static gfxstream::base::Lock sThreadRunLimiter;
 
+static std::atomic<uint32_t> sActiveRenderThreads{0};
+static const uint32_t kWarnMaxRenderThreads = 1000;
+
+static void incrementAndCheckRenderThreadCount() {
+    uint32_t count = ++sActiveRenderThreads;
+    GFXSTREAM_VERBOSE("Created RenderThread. Active RenderThreads: %u", count);
+    if (count > kWarnMaxRenderThreads) {
+        GFXSTREAM_WARNING("High number of active render threads detected: %u", count);
+    }
+}
+
+static void decrementRenderThreadCount() {
+    uint32_t count = --sActiveRenderThreads;
+    GFXSTREAM_VERBOSE("Destroyed RenderThread. Active RenderThreads: %u", count);
+}
+
+uint32_t RenderThread::getActiveRenderThreadsCount() {
+    return sActiveRenderThreads.load();
+}
+
 RenderThread::RenderThread(RenderChannelImpl* channel,
                            gfxstream::Stream* load,
                            uint32_t virtioGpuContextId)
@@ -79,6 +99,7 @@ RenderThread::RenderThread(RenderChannelImpl* channel,
       mRunInLimitedMode(gfxstream::base::getCpuCoreCount() < kMinThreadsToRunUnlimited),
       mContextId(virtioGpuContextId)
 {
+    incrementAndCheckRenderThreadCount();
     if (load) {
         const bool success = load->getByte();
         if (success) {
@@ -97,6 +118,7 @@ RenderThread::RenderThread(const AsgConsumerCreateInfo& info, Stream* load)
       mRingStream(new RingStream(info, kStreamBufferSize)),
       mContextId(info.virtioGpuContextId ? *info.virtioGpuContextId : 0),
       mCapsetId(info.virtioGpuCapsetId ? *info.virtioGpuCapsetId : 0) {
+    incrementAndCheckRenderThreadCount();
     if (load) {
         const bool success = load->getByte();
         if (success) {
@@ -112,7 +134,9 @@ RenderThread::RenderThread(const AsgConsumerCreateInfo& info, Stream* load)
 // Note: the RenderThread destructor might be called from a different thread
 // than from RenderThread::main() so thread specific cleanup likely belongs at
 // the end of RenderThread::main().
-RenderThread::~RenderThread() = default;
+RenderThread::~RenderThread() {
+    decrementRenderThreadCount();
+}
 
 void RenderThread::pausePreSnapshot() {
     AutoLock lock(mLock);

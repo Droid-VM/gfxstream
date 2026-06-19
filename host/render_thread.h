@@ -48,6 +48,8 @@ class RenderThread : public gfxstream::base::Thread {
     RenderThread(const AsgConsumerCreateInfo& info, Stream* loadStream);
     virtual ~RenderThread();
 
+    static uint32_t getActiveRenderThreadsCount();
+
     // Returns true iff the thread has finished.
     bool isFinished() const { return mFinished.load(std::memory_order_relaxed); }
     void waitForFinished();
