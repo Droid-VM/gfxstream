@@ -270,6 +270,12 @@ class VkDecoderGlobalState {
     void on_vkDestroyImage(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
                            VkDevice device, VkImage image, const VkAllocationCallbacks* pAllocator);
 
+    // gfxstream-zerocopy: compute a linear row pitch (width * bytes-per-texel) for an emulated
+    // DRM_FORMAT_MODIFIER->LINEAR image, used when the host driver refuses to report the layout of an
+    // external linear image via vkGetImageSubresourceLayout (returns rowPitch=0). `image` is unboxed.
+    uint32_t getEmulatedLinearImageRowPitch(VkImage image);
+    bool isDrmFormatModifierImage(VkImage image);
+
     VkResult on_vkBindImageMemory(gfxstream::base::BumpPool* pool,
                                   VkSnapshotApiCallHandle apiCallHandle, VkDevice device,
                                   VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset);

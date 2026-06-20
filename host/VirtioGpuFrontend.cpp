@@ -539,6 +539,11 @@ int VirtioGpuFrontend::transferReadIov(int resId, uint64_t offset, stream_render
     auto it = mResources.find(resId);
     if (it == mResources.end()) {
         GFXSTREAM_ERROR("Failed to transfer: failed to find resource %d.", resId);
+        fprintf(stderr, "BLOBDIAG: transferRead res=%d NOT in mResources; present ids:", resId);
+        for (const auto& kv : mResources) {
+            fprintf(stderr, " %u", kv.first);
+        }
+        fprintf(stderr, "\n");
         return EINVAL;
     }
     auto& resource = it->second;
@@ -765,6 +770,8 @@ int VirtioGpuFrontend::createBlob(uint32_t contextId, uint32_t resourceId,
                                   const struct stream_renderer_handle* handle) {
     auto contextIt = mContexts.find(contextId);
     if (contextIt == mContexts.end()) {
+        fprintf(stderr, "BLOBDIAG2: createBlob res=%u FAIL context-%u-missing\n", resourceId,
+                contextId);
         GFXSTREAM_ERROR("failed to create blob resource %u: context %u missing.", resourceId,
                         contextId);
         return -EINVAL;
@@ -780,6 +787,7 @@ int VirtioGpuFrontend::createBlob(uint32_t contextId, uint32_t resourceId,
         VirtioGpuResource::Create(mFeatures, mPageSize, contextId, resourceId,
                                   createArgs ? &*createArgs : nullptr, createBlobArgs, handle);
     if (!resourceOpt) {
+        fprintf(stderr, "BLOBDIAG2: createBlob res=%u FAIL Create-returned-nullopt\n", resourceId);
         GFXSTREAM_ERROR("failed to create blob resource %u.", resourceId);
         return -EINVAL;
     }

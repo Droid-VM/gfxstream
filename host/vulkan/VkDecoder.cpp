@@ -230,6 +230,12 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 .setAnnotations(std::move(executionData))
                 .build();
 
+        // gfxstream-zerocopy debug: trace each Vulkan opcode to stderr so a render-thread crash
+        // can be pinned to the exact call. Unconditional (the launch wrapper does not forward
+        // arbitrary env vars); remove once the dmabuf import path is stable.
+        fprintf(stderr, "ZC-OP: %s (0x%x) len=%u\n", api_opcode_to_string(opcode), opcode,
+                packetLen);
+
         switch (opcode) {
 #ifdef VK_VERSION_1_0
             case OP_vkCreateInstance: {
@@ -3903,9 +3909,37 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         ioStream, (unsigned long long)device, (unsigned long long)image,
                         (unsigned long long)pSubresource, (unsigned long long)pLayout);
                 }
+                // gfxstream-zerocopy fix: the guest emulates VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
+                // images as plain VK_IMAGE_TILING_LINEAR on the host. The guest still queries the WSI
+                // image stride with VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT, which a non-modifier host
+                // image rejects (rowPitch=0 -> guest "Failed to query stride..."). Remap to COLOR.
+                uint32_t zc_origAspect =
+                    pSubresource ? (uint32_t)((VkImageSubresource*)pSubresource)->aspectMask : 0;
+                // gfxstream-zerocopy: for a real VK_EXT_image_drm_format_modifier image the
+                // MEMORY_PLANE_0 aspect is correct and the driver reports a valid layout natively;
+                // only the plain-LINEAR emulation needs the MEMORY_PLANE_0->COLOR remap + fallback.
+                const bool zc_isModifierImage = m_state->isDrmFormatModifierImage(image);
+                if (!zc_isModifierImage && pSubresource &&
+                    ((VkImageSubresource*)pSubresource)->aspectMask ==
+                        VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT) {
+                    ((VkImageSubresource*)pSubresource)->aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                }
                 if (CC_LIKELY(vk)) {
                     vk->vkGetImageSubresourceLayout(unboxed_device, image, pSubresource, pLayout);
                 }
+                // gfxstream-zerocopy fix: the host Qualcomm driver refuses to report the layout of
+                // an external LINEAR image (returns rowPitch=0). For the emulated DRM-modifier WSI
+                // image (the guest asked with MEMORY_PLANE_0), the image IS linear, so compute the
+                // row pitch from width*bpp so the guest can build the export resource.
+                if (!zc_isModifierImage && pLayout && pLayout->rowPitch == 0 &&
+                    zc_origAspect == VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT) {
+                    pLayout->rowPitch = m_state->getEmulatedLinearImageRowPitch(image);
+                }
+                fprintf(stderr,
+                        "ZEROCOPY-STRIDE: img=%p origAspect=0x%x usedAspect=0x%x rowPitch=%llu\n",
+                        (void*)image, zc_origAspect,
+                        pSubresource ? (uint32_t)((VkImageSubresource*)pSubresource)->aspectMask : 0u,
+                        pLayout ? (unsigned long long)pLayout->rowPitch : 0ull);
                 vkStream->unsetHandleMapping();
                 if (pLayout) {
                     transform_fromhost_VkSubresourceLayout(m_state,
@@ -13404,6 +13438,14 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         ioStream, (unsigned long long)device, (unsigned long long)image,
                         (unsigned long long)pSubresource, (unsigned long long)pLayout);
                 }
+                // gfxstream-zerocopy fix (see OP_vkGetImageSubresourceLayout): remap emulated
+                // DRM-modifier MEMORY_PLANE_0 stride queries to COLOR for the plain-LINEAR host image.
+                if (pSubresource &&
+                    ((VkImageSubresource2*)pSubresource)->imageSubresource.aspectMask ==
+                        VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT) {
+                    ((VkImageSubresource2*)pSubresource)->imageSubresource.aspectMask =
+                        VK_IMAGE_ASPECT_COLOR_BIT;
+                }
                 if (CC_LIKELY(vk)) {
                     vk->vkGetImageSubresourceLayout2(unboxed_device, image, pSubresource, pLayout);
                 }
@@ -18202,6 +18244,14 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         ioStream, (unsigned long long)device, (unsigned long long)image,
                         (unsigned long long)pSubresource, (unsigned long long)pLayout);
                 }
+                // gfxstream-zerocopy fix (see OP_vkGetImageSubresourceLayout): remap emulated
+                // DRM-modifier MEMORY_PLANE_0 stride queries to COLOR for the plain-LINEAR host image.
+                if (pSubresource &&
+                    ((VkImageSubresource2*)pSubresource)->imageSubresource.aspectMask ==
+                        VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT) {
+                    ((VkImageSubresource2*)pSubresource)->imageSubresource.aspectMask =
+                        VK_IMAGE_ASPECT_COLOR_BIT;
+                }
                 if (CC_LIKELY(vk)) {
                     vk->vkGetImageSubresourceLayout2KHR(unboxed_device, image, pSubresource,
                                                         pLayout);
@@ -20740,6 +20790,14 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         "0x%llx ",
                         ioStream, (unsigned long long)device, (unsigned long long)image,
                         (unsigned long long)pSubresource, (unsigned long long)pLayout);
+                }
+                // gfxstream-zerocopy fix (see OP_vkGetImageSubresourceLayout): remap emulated
+                // DRM-modifier MEMORY_PLANE_0 stride queries to COLOR for the plain-LINEAR host image.
+                if (pSubresource &&
+                    ((VkImageSubresource2*)pSubresource)->imageSubresource.aspectMask ==
+                        VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT) {
+                    ((VkImageSubresource2*)pSubresource)->imageSubresource.aspectMask =
+                        VK_IMAGE_ASPECT_COLOR_BIT;
                 }
                 if (CC_LIKELY(vk)) {
                     vk->vkGetImageSubresourceLayout2EXT(unboxed_device, image, pSubresource,

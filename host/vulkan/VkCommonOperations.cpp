@@ -113,6 +113,16 @@ static std::optional<ExternalHandleInfo> dupExternalMemory(std::optional<Externa
     // TODO(aruby@blackberry.com): Support dup-ing for OPAQUE_FD or DMABUF types on QNX
     return std::nullopt;
 #elif defined(__ANDROID__)
+    // gfxstream-zerocopy: dma-buf / opaque-fd backed memory (Turnip path) must be dup'd because
+    // the importing vkAllocateMemory takes ownership of the fd and closes it. AHB handles are
+    // refcounted pointers that don't need dup.
+    if (handleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_DMABUF ||
+        handleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_OPAQUE_FD) {
+        return ExternalHandleInfo{
+            .handle = handleInfo->dupFd(),
+            .streamHandleType = handleInfo->streamHandleType,
+        };
+    }
     // Android uses AHardwareBuffer* which is not required to dup
     return ExternalHandleInfo{
         .handle = handleInfo->handle,
@@ -1391,14 +1401,42 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
 #if defined(__linux__)
     if (emulation->mDeviceInfo.supportsDmaBuf) {
+        // VK_EXT_external_memory_dma_buf requires VK_KHR_external_memory_fd (for vkGetMemoryFdKHR).
+        // On Android the base externalMemoryDeviceExtNames list uses the AHB extension instead of
+        // _fd, so when we take the dma-buf path (e.g. Turnip) we must enable _fd explicitly or
+        // vkGetMemoryFdKHR resolves to NULL and device setup fails.
+        selectedDeviceExtensionNames.emplace(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
         selectedDeviceExtensionNames.emplace(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+        // Needed to describe the exact linear dma-buf layout (rowPitch) so the guest can import a
+        // colorBuffer dma-buf and bind its own image to it. Without it the driver (Turnip) cannot
+        // size/bind a plain LINEAR external dma-buf image (memReq size 0 -> bind crash).
+        if (extensionsSupported(emulation->mDeviceInfo.extensions,
+                                {VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME})) {
+            selectedDeviceExtensionNames.emplace(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+            emulation->mDeviceInfo.supportsDrmFormatModifier = true;
+        }
     }
 #endif
 
-    // We need to always enable swapchain extensions to be able to use this device
+    // We want to enable swapchain extensions to be able to use this device
     // to do VK_IMAGE_LAYOUT_PRESENT_SRC_KHR transition operations done
-    // in releaseColorBufferForGuestUse for the apps using Vulkan swapchain
-    selectedDeviceExtensionNames.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    // in releaseColorBufferForGuestUse for the apps using Vulkan swapchain.
+    // BUT: when gfxstream loads the host Vulkan driver directly (e.g. an
+    // Android Vulkan HAL such as Turnip via the HMI bridge, bypassing the
+    // platform libvulkan loader), the raw driver does NOT advertise
+    // VK_KHR_swapchain at the device level (the Android loader normally
+    // injects it). Force-enabling an unsupported extension makes
+    // vkCreateDevice fail with VK_ERROR_EXTENSION_NOT_PRESENT and leaves
+    // mDevice == VK_NULL_HANDLE, which then crashes in the dispatch init.
+    // So only enable it when the physical device really supports it.
+    if (extensionsSupported(emulation->mDeviceInfo.extensions,
+                            {VK_KHR_SWAPCHAIN_EXTENSION_NAME})) {
+        selectedDeviceExtensionNames.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    } else {
+        fprintf(stderr,
+                "CBVK-CREATEDEV: host driver does not advertise VK_KHR_swapchain; "
+                "skipping it (raw HAL/ICD path).\n");
+    }
 
     if (emulation->mFeatures.VulkanNativeSwapchain.enabled) {
         for (auto extension : SwapChainStateVk::getRequiredDeviceExtensions()) {
@@ -1510,9 +1548,11 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         }
     }
 
-    ivk->vkCreateDevice(emulation->mPhysicalDevice, &dCi, nullptr, &emulation->mDevice);
+    res = ivk->vkCreateDevice(emulation->mPhysicalDevice, &dCi, nullptr, &emulation->mDevice);
 
-    if (res != VK_SUCCESS) {
+    fprintf(stderr, "CBVK-CREATEDEV: vkCreateDevice res=%d (%s) device=%p\n", (int)res,
+            string_VkResult(res), (void*)emulation->mDevice);
+    if (res != VK_SUCCESS || emulation->mDevice == VK_NULL_HANDLE) {
         GFXSTREAM_ERROR("Failed to create Vulkan device. Error %s.", string_VkResult(res));
         return nullptr;
     }
@@ -1560,13 +1600,29 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             return nullptr;
         }
 #elif defined(__ANDROID__)
-        // Use vkGetMemoryAndroidHardwareBufferANDROID
-        emulation->mDeviceInfo.getMemoryHandleFunc =
-            reinterpret_cast<PFN_vkGetMemoryAndroidHardwareBufferANDROID>(
-                dvk->vkGetDeviceProcAddr(emulation->mDevice, "vkGetMemoryAndroidHardwareBufferANDROID"));
-        if (!emulation->mDeviceInfo.getMemoryHandleFunc) {
-            GFXSTREAM_ERROR("Cannot find vkGetMemoryAndroidHardwareBufferANDROID");
-            return nullptr;
+        if (emulation->mDeviceInfo.supportsDmaBuf) {
+            // gfxstream-zerocopy: host driver (e.g. Turnip) exports real dma-buf FDs, so use
+            // vkGetMemoryFdKHR with VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF instead of the
+            // AHB exporter. This is the path the closed Adreno blob never took (supportsDmaBuf=0).
+            // The field is typed as the AHB getter on Android; we store the fd getter here via a
+            // reinterpret_cast and cast it back to PFN_vkGetMemoryFdKHR at the (dmabuf) call site.
+            emulation->mDeviceInfo.getMemoryHandleFunc =
+                reinterpret_cast<PFN_vkGetMemoryAndroidHardwareBufferANDROID>(
+                    dvk->vkGetDeviceProcAddr(emulation->mDevice, "vkGetMemoryFdKHR"));
+            if (!emulation->mDeviceInfo.getMemoryHandleFunc) {
+                GFXSTREAM_ERROR("Cannot find vkGetMemoryFdKHR (supportsDmaBuf path)");
+                return nullptr;
+            }
+        } else {
+            // Use vkGetMemoryAndroidHardwareBufferANDROID
+            emulation->mDeviceInfo.getMemoryHandleFunc =
+                reinterpret_cast<PFN_vkGetMemoryAndroidHardwareBufferANDROID>(
+                    dvk->vkGetDeviceProcAddr(emulation->mDevice,
+                                             "vkGetMemoryAndroidHardwareBufferANDROID"));
+            if (!emulation->mDeviceInfo.getMemoryHandleFunc) {
+                GFXSTREAM_ERROR("Cannot find vkGetMemoryAndroidHardwareBufferANDROID");
+                return nullptr;
+            }
         }
 #else
         if (emulation->mInstanceSupportsExternalMemoryMetal) {
@@ -1816,6 +1872,10 @@ bool VkEmulation::supportsExternalMemoryImport() const {
 
 bool VkEmulation::supportsDmaBuf() const { return mDeviceInfo.supportsDmaBuf; }
 
+bool VkEmulation::supportsDrmFormatModifier() const {
+    return mDeviceInfo.supportsDrmFormatModifier;
+}
+
 bool VkEmulation::supportsExternalMemoryHostProperties() const {
     return mDeviceInfo.supportsExternalMemoryHostProps;
 }
@@ -2005,7 +2065,10 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
 
     if (wantExport) {
         if (mDeviceInfo.supportsDmaBuf) {
-            exportAi.handleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+            // gfxstream-zerocopy: request DMA_BUF ONLY (not AHB|DMA_BUF). Requesting both forces the
+            // allocation to satisfy AHB too, which BGRA cannot — that failure is what triggers the
+            // plain-memory fallback + mImageExportBroken latch below. dmabuf alone exports fine.
+            exportAi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
         }
 
         vk_append_struct(&allocInfoChain, &exportAi);
@@ -2144,19 +2207,38 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
         .streamHandleType = STREAM_HANDLE_TYPE_MEM_OPAQUE_WIN32,
     };
 #elif defined(__ANDROID__)
-    VkMemoryGetAndroidHardwareBufferInfoANDROID getAhbInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_GET_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
-        .pNext = nullptr,
-        .memory = info->memory,
-    };
-    AHardwareBuffer* exportHandle = static_cast<AHardwareBuffer*>(reinterpret_cast<void*>(info->handleInfo->handle));
-    exportRes = mDeviceInfo.getMemoryHandleFunc(
-        mDevice, &getAhbInfo, &exportHandle);
-    validHandle = (VK_SUCCESS == exportRes) && (NULL != exportHandle);
-    info->handleInfo = ExternalHandleInfo{
-        .handle = reinterpret_cast<ExternalHandleType>(exportHandle),
-        .streamHandleType = STREAM_HANDLE_TYPE_MEM_AHB,
-    };
+    if (mDeviceInfo.supportsDmaBuf) {
+        // gfxstream-zerocopy: host driver exports a real dma-buf FD (Turnip path).
+        VkMemoryGetFdInfoKHR getFdInfo = {
+            VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+            nullptr,
+            info->memory,
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+        };
+        int exportFd = -1;
+        exportRes = reinterpret_cast<PFN_vkGetMemoryFdKHR>(mDeviceInfo.getMemoryHandleFunc)(
+            mDevice, &getFdInfo, &exportFd);
+        validHandle = (VK_SUCCESS == exportRes) && (-1 != exportFd);
+        fprintf(stderr, "CBVK-EXPORT: dmabuf fd export res=%d fd=%d\n", (int)exportRes, exportFd);
+        info->handleInfo = ExternalHandleInfo{
+            .handle = exportFd,
+            .streamHandleType = STREAM_HANDLE_TYPE_MEM_DMABUF,
+        };
+    } else {
+        VkMemoryGetAndroidHardwareBufferInfoANDROID getAhbInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_GET_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+            .pNext = nullptr,
+            .memory = info->memory,
+        };
+        AHardwareBuffer* exportHandle = static_cast<AHardwareBuffer*>(reinterpret_cast<void*>(info->handleInfo->handle));
+        exportRes = reinterpret_cast<PFN_vkGetMemoryAndroidHardwareBufferANDROID>(
+            mDeviceInfo.getMemoryHandleFunc)(mDevice, &getAhbInfo, &exportHandle);
+        validHandle = (VK_SUCCESS == exportRes) && (NULL != exportHandle);
+        info->handleInfo = ExternalHandleInfo{
+            .handle = reinterpret_cast<ExternalHandleType>(exportHandle),
+            .streamHandleType = STREAM_HANDLE_TYPE_MEM_AHB,
+        };
+    }
 #else
 
     bool opaqueFd = true;
@@ -2235,7 +2317,21 @@ void VkEmulation::freeExternalMemoryLocked(VulkanDispatch* vk,
 #ifdef _WIN32
         CloseHandle(static_cast<HANDLE>(reinterpret_cast<void*>(info->handleInfo->handle)));
 #elif defined(__ANDROID__)
-        AHardwareBuffer_release(static_cast<AHardwareBuffer*>(reinterpret_cast<void*>(info->handleInfo->handle)));
+        // gfxstream-zerocopy: the handle may be a dma-buf FD (Turnip path) rather than an AHB
+        // pointer. Releasing an fd as an AHardwareBuffer* calls RefBase::decStrong on a tiny
+        // bogus pointer (== the fd value) and crashes. Close fds; AHB-release only real AHBs.
+        switch (info->handleInfo->streamHandleType) {
+            case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
+            case STREAM_HANDLE_TYPE_MEM_DMABUF:
+                close(info->handleInfo->handle);
+                break;
+            case STREAM_HANDLE_TYPE_MEM_AHB:
+                AHardwareBuffer_release(static_cast<AHardwareBuffer*>(
+                    reinterpret_cast<void*>(info->handleInfo->handle)));
+                break;
+            default:
+                break;
+        }
 #else
         switch (info->handleInfo->streamHandleType) {
             case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
@@ -2718,6 +2814,16 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     VkImageTiling tiling = (infoPtr->memoryProperty & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
                                ? VK_IMAGE_TILING_LINEAR
                                : VK_IMAGE_TILING_OPTIMAL;
+    // gfxstream-zerocopy: when colorBuffers are shared with the guest as dma-bufs (Turnip path),
+    // the guest binds its own VK_IMAGE_TILING_LINEAR WSI image (gfxstream emulates the guest's
+    // DRM-format-modifier image as LINEAR) to the same dma-buf. An OPTIMAL host image has a
+    // vendor-tiled layout that does NOT match the guest's LINEAR view, so vkBindImageMemory of the
+    // guest image to the imported dma-buf crashes inside the driver. Force the host colorBuffer
+    // image to LINEAR too so both sides agree on the dma-buf layout. Turnip supports
+    // LINEAR + COLOR_ATTACHMENT (the guest image above is created exactly that way).
+    if (mDeviceInfo.supportsDmaBuf) {
+        tiling = VK_IMAGE_TILING_LINEAR;
+    }
     std::unique_ptr<VkImageCreateInfo> imageCi = generateColorBufferVkImageCreateInfoLocked(
         vkFormat, infoPtr->width, infoPtr->height, tiling, mipLevels);
     // pNext will be filled later.
@@ -2745,6 +2851,14 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     }
 #endif
 
+    // gfxstream-zerocopy: prefer a dmabuf external image over the Android-default AHB. AHB has no
+    // BGRA format, so AHB-external BGRA colorBuffers fail to allocate and latch mImageExportBroken
+    // (disabling export for ALL colorBuffers). dmabuf has no such restriction and is what the guest
+    // WSI dmabuf swapchain needs.
+    if (mDeviceInfo.supportsDmaBuf) {
+        extImageCi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    }
+
     VkExternalMemoryImageCreateInfo* extImageCiPtr = nullptr;
 
     // Only create the image as external if this VkFormat actually supports the host's external
@@ -2758,15 +2872,69 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
             break;
         }
     }
+    // gfxstream-zerocopy: the format-support probe wrongly reports BGRA as AHB-exportable. When the
+    // host can only export via AHB (supportsDmaBuf=0), restrict external creation to formats that
+    // AHardwareBuffer can actually represent (all RGB-order — there is NO BGRA AHB format). This
+    // keeps BGRA colorBuffers non-external from the start, so they never trigger the AHB-export
+    // failure that latches mImageExportBroken and poisons exportability for RGBA8 too.
+    bool formatAhbCompatible = false;
+    switch (vkFormat) {
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_R8G8B8_UNORM:
+        case VK_FORMAT_R5G6B5_UNORM_PACK16:
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+            formatAhbCompatible = true;
+            break;
+        default:
+            break;
+    }
+    const bool formatExternalizable =
+        formatSupportsExternal && (mDeviceInfo.supportsDmaBuf || formatAhbCompatible);
     if ((extMemHandleInfo || mDeviceInfo.supportsExternalMemoryExport) && !mImageExportBroken &&
-        formatSupportsExternal) {
+        formatExternalizable) {
         extImageCiPtr = &extImageCi;
     }
-    fprintf(stderr, "CBVK-EXT: cb=%u vkFormat=%d formatSupportsExternal=%d -> external=%d\n",
-            colorBufferHandle, vkFormat, formatSupportsExternal ? 1 : 0,
+    fprintf(stderr,
+            "CBVK-EXT: cb=%u vkFormat=%d formatSupportsExternal=%d ahbCompatible=%d extMemHandleInfo=%d "
+            "supportsExternalMemoryExport=%d supportsDmaBuf=%d imageExportBroken=%d handleTypes=0x%x "
+            "-> external=%d\n",
+            colorBufferHandle, vkFormat, formatSupportsExternal ? 1 : 0, formatAhbCompatible ? 1 : 0,
+            extMemHandleInfo ? 1 : 0, mDeviceInfo.supportsExternalMemoryExport ? 1 : 0,
+            mDeviceInfo.supportsDmaBuf ? 1 : 0, mImageExportBroken ? 1 : 0, extImageCi.handleTypes,
             extImageCiPtr ? 1 : 0);
 
-    imageCi->pNext = extImageCiPtr;
+    // gfxstream-zerocopy: when the colorBuffer is shared as a dma-buf (Turnip path), describe its
+    // exact linear layout via VK_EXT_image_drm_format_modifier. A plain LINEAR external dma-buf
+    // image makes the driver report memReq size 0 and crash when the guest binds its own image to
+    // the imported dma-buf. The guest WSI image (on_vkCreateImage) uses the SAME deterministic
+    // rowPitch = align(width*bpp, 256) so both layouts match the shared dma-buf.
+    VkImageDrmFormatModifierExplicitCreateInfoEXT drmExplicit = {};
+    VkSubresourceLayout planeLayout = {};
+    if (extImageCiPtr && mDeviceInfo.supportsDrmFormatModifier &&
+        imageCi->tiling == VK_IMAGE_TILING_LINEAR) {
+        uint32_t bpp = (vkFormat == VK_FORMAT_R16G16B16A16_SFLOAT ||
+                        vkFormat == VK_FORMAT_R16G16B16A16_UNORM)
+                           ? 8u
+                           : 4u;
+        planeLayout.offset = 0;
+        planeLayout.size = 0;
+        planeLayout.rowPitch = (static_cast<uint64_t>(width) * bpp + 255u) & ~static_cast<uint64_t>(255u);
+        planeLayout.arrayPitch = 0;
+        planeLayout.depthPitch = 0;
+        drmExplicit.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
+        drmExplicit.pNext = extImageCiPtr;  // keep the external-memory info in the chain
+        drmExplicit.drmFormatModifier = 0;  // DRM_FORMAT_MOD_LINEAR
+        drmExplicit.drmFormatModifierPlaneCount = 1;
+        drmExplicit.pPlaneLayouts = &planeLayout;
+        imageCi->tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+        imageCi->pNext = &drmExplicit;
+        fprintf(stderr, "CBVK-EXT: cb=%u DRM_MODIFIER LINEAR rowPitch=%llu\n", colorBufferHandle,
+                (unsigned long long)planeLayout.rowPitch);
+    } else {
+        imageCi->pNext = extImageCiPtr;
+    }
 
     auto vk = mDvk;
 

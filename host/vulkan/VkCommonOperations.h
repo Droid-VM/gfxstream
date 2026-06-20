@@ -130,6 +130,7 @@ class VkEmulation {
     bool supportsExternalMemoryImport() const;
 
     bool supportsDmaBuf() const;
+    bool supportsDrmFormatModifier() const;
 
     bool supportsExternalMemoryHostProperties() const;
 
@@ -446,6 +447,7 @@ class VkEmulation {
         bool supportsExternalMemoryImport = false;
         bool supportsExternalMemoryExport = false;
         bool supportsDmaBuf = false;
+        bool supportsDrmFormatModifier = false;
         bool supportsDriverProperties = false;
         bool supportsExternalMemoryHostProps = false;
         bool hasSamplerYcbcrConversionExtension = false;

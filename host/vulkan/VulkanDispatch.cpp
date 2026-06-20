@@ -22,6 +22,55 @@
 #include "gfxstream/system/System.h"
 #include "gfxstream/common/logging.h"
 
+#if defined(__ANDROID__)
+// gfxstream-zerocopy: to use Turnip (Mesa Adreno Vulkan, has VK_EXT_external_memory_dma_buf and no
+// closed-driver external-linear-image quirks) as the HOST Vulkan driver. The Turnip build is an
+// Android Vulkan HAL (exports only the "HMI" hw_module symbol, not vkGetInstanceProcAddr), so it
+// must be loaded via the hwvulkan device interface.
+//
+// We can't depend on hwvulkan_headers/libhardware_headers here (not apex_available for com.android
+// .virt), so mirror the frozen libhardware / hwvulkan ABI inline with private struct names.
+namespace {
+struct GfxstreamHwModuleMethods {
+    int (*open)(const void* module, const char* id, void** device);
+};
+struct GfxstreamHwModule {
+    uint32_t tag;
+    uint16_t module_api_version;
+    uint16_t hal_api_version;
+    const char* id;
+    const char* name;
+    const char* author;
+    GfxstreamHwModuleMethods* methods;
+    void* dso;
+#ifdef __LP64__
+    uint64_t reserved[32 - 7];
+#else
+    uint32_t reserved[32 - 7];
+#endif
+};
+struct GfxstreamHwDevice {
+    uint32_t tag;
+    uint32_t version;
+    void* module;
+#ifdef __LP64__
+    uint64_t reserved[12];
+#else
+    uint32_t reserved[12];
+#endif
+    int (*close)(void* device);
+};
+struct GfxstreamHwvulkanDevice {
+    GfxstreamHwDevice common;
+    PFN_vkEnumerateInstanceExtensionProperties EnumerateInstanceExtensionProperties;
+    PFN_vkCreateInstance CreateInstance;
+    PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+};
+constexpr const char* kGfxstreamHalModuleInfoSym = "HMI";
+constexpr const char* kGfxstreamHwvulkanDevice0 = "vk0";
+}  // namespace
+#endif
+
 using gfxstream::base::AutoLock;
 using gfxstream::base::Lock;
 using gfxstream::base::pj;
@@ -312,6 +361,43 @@ void VulkanDispatchImpl::initialize(bool forTesting) {
 
     init_vulkan_dispatch_from_system_loader(sVulkanDispatchDlOpen, sVulkanDispatchDlSym,
                                             &mDispatch);
+
+#if defined(__ANDROID__)
+    // gfxstream-zerocopy: if the loaded library is an Android Vulkan HAL (e.g. a Turnip
+    // vulkan.turnip.so pointed at via ANDROID_EMU_VK_LOADER_PATH), it exports only the HMI
+    // hw_module symbol, so the plain dlsym above left vkGetInstanceProcAddr null. Bridge it through
+    // the hwvulkan device interface to obtain a usable GetInstanceProcAddr.
+    if (!mDispatch.vkGetInstanceProcAddr) {
+        void* lib = sVulkanDispatchDlOpen();
+        void* hmiSym = sVulkanDispatchDlSym(lib, kGfxstreamHalModuleInfoSym);
+        if (hmiSym) {
+            auto* halModule = reinterpret_cast<GfxstreamHwModule*>(hmiSym);
+            if (halModule->methods && halModule->methods->open) {
+                GfxstreamHwvulkanDevice* halDevice = nullptr;
+                int openRes = halModule->methods->open(halModule, kGfxstreamHwvulkanDevice0,
+                                                       reinterpret_cast<void**>(&halDevice));
+                if (openRes == 0 && halDevice) {
+                    mDispatch.vkGetInstanceProcAddr = halDevice->GetInstanceProcAddr;
+                    if (!mDispatch.vkCreateInstance) {
+                        mDispatch.vkCreateInstance = halDevice->CreateInstance;
+                    }
+                    if (!mDispatch.vkEnumerateInstanceExtensionProperties) {
+                        mDispatch.vkEnumerateInstanceExtensionProperties =
+                            halDevice->EnumerateInstanceExtensionProperties;
+                    }
+                    fprintf(stderr,
+                            "VK loader(HAL): bridged Android Vulkan HAL (Turnip?) via HMI, "
+                            "vkGetInstanceProcAddr=%p\n",
+                            (void*)mDispatch.vkGetInstanceProcAddr);
+                } else {
+                    fprintf(stderr, "VK loader(HAL): hwvulkan open() failed res=%d\n", openRes);
+                }
+            } else {
+                fprintf(stderr, "VK loader(HAL): HMI present but no open() method\n");
+            }
+        }
+    }
+#endif  // __ANDROID__
 
     // Android workaround: the Android Vulkan loader (system libvulkan.so) does not expose the
     // global commands (vkCreateInstance / vkEnumerateInstance*) as dlsym-able symbols; per the

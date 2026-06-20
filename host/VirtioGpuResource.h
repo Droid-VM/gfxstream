@@ -127,6 +127,12 @@ class VirtioGpuResource {
     int ReadFromColorBufferToLinear(uint64_t offset, stream_renderer_box* box);
     int WriteToColorBufferFromLinear(uint64_t offset, stream_renderer_box* box);
 
+    // Copy a host-mappable blob's bytes directly into `iovs` (VMM display readback).
+    // Used for GBM/dmabuf scanout buffers that the guest compositor renders into via
+    // the GPU and that have no GL/Vk color-buffer readback path.
+    int ReadFromBlobToIov(uint64_t offset, stream_renderer_box* box,
+                          std::optional<std::vector<struct iovec>> iovs);
+
     // If `iovs` provided, copy from this resource's linear buffer to the given `iovs`.
     // Otherwise, copy from this resource's linear buffer into its previously attached
     // iovs.

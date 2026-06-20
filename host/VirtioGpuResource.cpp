@@ -350,16 +350,22 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
 
     std::optional<BlobDescriptorInfo> descriptorInfoOpt;
 
+    fprintf(stderr, "BLOBDIAG2: Create res=%u blob_id=%llu blob_mem=%u flags=0x%x hasCreateArgs=%d\n",
+            resourceId, (unsigned long long)createBlobArgs->blob_id, createBlobArgs->blob_mem,
+            createBlobArgs->blob_flags, createArgs != nullptr);
     if (createArgs != nullptr) {
         auto resourceType = GetResourceType(*createArgs);
         if (resourceType != VirtioGpuResourceType::BUFFER &&
             resourceType != VirtioGpuResourceType::COLOR_BUFFER) {
+            fprintf(stderr, "BLOBDIAG2: res=%u FAIL unhandled-type-A type=%d\n", resourceId,
+                    (int)resourceType);
             GFXSTREAM_ERROR("failed to create blob resource: unhandled type.");
             return std::nullopt;
         }
 
         auto resourceOpt = Create(createArgs, nullptr, 0);
         if (!resourceOpt) {
+            fprintf(stderr, "BLOBDIAG2: res=%u FAIL inner-Create-nullopt\n", resourceId);
             return std::nullopt;
         }
 
@@ -371,6 +377,8 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
             GFXSTREAM_ERROR("failed to create blob resource: unhandled type.");
             return std::nullopt;
         }
+        fprintf(stderr, "BLOBDIAG2: res=%u type=%d exportDescriptor=%d\n", resourceId,
+                (int)resourceType, descriptorInfoOpt.has_value());
 
         resource = std::move(*resourceOpt);
     } else {
@@ -394,10 +402,22 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
             memory = RingBlob::CreateWithHostMemory(resourceId, createBlobArgs->size, pageSize);
         }
         if (!memory) {
+            fprintf(stderr, "BLOBDIAG2: res=%u FAIL ring-blob-null\n", resourceId);
             GFXSTREAM_ERROR("Failed to create blob: failed to create ring blob.");
             return std::nullopt;
         }
         resource.mBlobMemory.emplace(std::move(memory));
+    } else if (descriptorInfoOpt) {
+        // We already have a colorBuffer/Buffer-derived descriptor (exportColorBuffer/exportBuffer
+        // succeeded above). Use it whether or not the ExternalBlob feature flag is on — that flag
+        // really gates ring-blob memory, not whether host-side resource handles can back a blob.
+        // Without this, cross-device scanout blobs (blob_flags=SHAREABLE|CROSS_DEVICE) created with
+        // ExternalBlob off were falling into the removeMapping branch and failing, leaving the
+        // VMM with a phantom resource.
+        fprintf(stderr, "BLOBDIAG2: res=%u using exported descriptor (ExternalBlob.enabled=%d)\n",
+                resourceId, features.ExternalBlob.enabled);
+        resource.mBlobMemory.emplace(
+            std::make_shared<BlobDescriptorInfo>(std::move(*descriptorInfoOpt)));
     } else if (features.ExternalBlob.enabled) {
         if (createBlobArgs->blob_mem == STREAM_BLOB_MEM_GUEST &&
             (createBlobArgs->blob_flags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
@@ -420,6 +440,7 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
                     contextId, createBlobArgs->blob_id);
             }
             if (!descriptorInfoOpt) {
+                fprintf(stderr, "BLOBDIAG2: res=%u FAIL no-external-blob-descriptor\n", resourceId);
                 GFXSTREAM_ERROR("Failed to create blob: no external blob descriptor.");
                 return std::nullopt;
             }
@@ -427,15 +448,20 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
                 std::make_shared<BlobDescriptorInfo>(std::move(*descriptorInfoOpt)));
         }
     } else {
+        fprintf(stderr, "BLOBDIAG2: res=%u ExternalBlob DISABLED -> removeMapping path\n",
+                resourceId);
         auto memoryMappingOpt =
             ExternalObjectManager::get()->removeMapping(contextId, createBlobArgs->blob_id);
         if (!memoryMappingOpt) {
+            fprintf(stderr, "BLOBDIAG2: res=%u FAIL no-external-blob-mapping\n", resourceId);
             GFXSTREAM_ERROR("Failed to create blob: no external blob mapping.");
             return std::nullopt;
         }
         resource.mBlobMemory.emplace(std::move(*memoryMappingOpt));
     }
 
+    fprintf(stderr, "BLOBDIAG2: res=%u Create OK type=%d hasBlobMemory=%d\n", resourceId,
+            (int)resource.mResourceType, resource.mBlobMemory.has_value());
     return resource;
 }
 
@@ -631,8 +657,12 @@ int VirtioGpuResource::TransferRead(uint64_t offset, stream_renderer_box* box,
     // First, copy from the underlying backend resource to this resource's linear buffer:
     int ret = 0;
     if (mResourceType == VirtioGpuResourceType::BLOB) {
-        GFXSTREAM_ERROR("Failed to transfer: unexpected blob.");
-        return -EINVAL;
+        // A mappable blob (e.g. a GBM/dmabuf scanout buffer that the guest compositor
+        // renders into via the GPU) has no linear staging and no color-buffer handle, so
+        // it can't be read back through the GL/Vk path. If it is host-mappable, copy its
+        // bytes straight into the destination iov. This is what lets a VMM display the
+        // composited frame on backends that copy (e.g. Android ANativeWindow).
+        return ReadFromBlobToIov(offset, box, std::move(iovs));
     } else if (mResourceType == VirtioGpuResourceType::PIPE) {
         ret = ReadFromPipeToLinear(offset, box);
     } else if (mResourceType == VirtioGpuResourceType::BUFFER) {
@@ -771,6 +801,18 @@ int VirtioGpuResource::ReadFromColorBufferToLinear(uint64_t offset, stream_rende
     auto glformat = virgl_format_to_gl(mCreateArgs->format);
     auto gltype = gl_format_to_natural_type(glformat);
 
+    // Blob-backed color buffers (e.g. weston/zink cross-device scanout) never went through
+    // AttachIov, so mLinear was empty and the old unsafe-overload readback (size=UINT64_MAX,
+    // data=nullptr) memcpy'd into garbage and crashed. Size mLinear to the full surface here
+    // — the loop below has always xferred the whole thing.
+    auto formatInfo = VirglFormatInfo(mCreateArgs->format);
+    size_t requiredSize = formatInfo ? static_cast<size_t>(mCreateArgs->width) *
+                                           mCreateArgs->height * formatInfo->bpp
+                                     : 0;
+    if (requiredSize > mLinear.size()) {
+        mLinear.resize(requiredSize, 0);
+    }
+
     // We always xfer the whole thing again from GL
     // since it's fiddly to calc / copy-out subregions
     if (virgl_format_is_yuv(mCreateArgs->format)) {
@@ -780,7 +822,44 @@ int VirtioGpuResource::ReadFromColorBufferToLinear(uint64_t offset, stream_rende
     } else {
         FrameBuffer::getFB()->readColorBuffer(mCreateArgs->handle, 0, 0, mCreateArgs->width,
                                               mCreateArgs->height, glformat, gltype,
-                                              mLinear.data());
+                                              mLinear.data(), mLinear.size());
+    }
+
+    return 0;
+}
+
+int VirtioGpuResource::ReadFromBlobToIov(uint64_t offset, stream_renderer_box* box,
+                                         std::optional<std::vector<struct iovec>> iovs) {
+    void* hva = nullptr;
+    uint64_t hvaSize = 0;
+    if (Map(&hva, &hvaSize) != 0 || hva == nullptr) {
+        GFXSTREAM_ERROR("Failed to transfer: blob resource %d is not host-mappable.", mId);
+        return -EINVAL;
+    }
+
+    const std::vector<struct iovec>& dst = iovs ? *iovs : mIovs;
+    if (dst.empty()) {
+        GFXSTREAM_ERROR("Failed to transfer: blob resource %d has no destination iov.", mId);
+        return -EINVAL;
+    }
+
+    // The blob is laid out linearly (the guest scanout buffer is allocated LINEAR) and the
+    // destination iov is the display framebuffer, also tightly packed. Copy the mapped
+    // bytes sequentially, clamped to whatever the mapping can supply. `offset`/`box` cover
+    // the full surface for display flushes, so a flat copy matches the color-buffer path
+    // which likewise reads the whole surface.
+    const char* src = static_cast<const char*>(hva);
+    uint64_t available = (offset < hvaSize) ? (hvaSize - offset) : 0;
+    src += offset;
+
+    for (const auto& iov : dst) {
+        if (available == 0) {
+            break;
+        }
+        size_t n = std::min<uint64_t>(iov.iov_len, available);
+        memcpy(iov.iov_base, src, n);
+        src += n;
+        available -= n;
     }
 
     return 0;

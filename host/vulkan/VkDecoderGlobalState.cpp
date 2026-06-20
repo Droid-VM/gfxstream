@@ -1627,6 +1627,31 @@ class VkDecoderGlobalState::Impl {
                 vk->vkGetPhysicalDeviceFormatProperties(physicalDevice, format, pFormatProperties);
             },
             vk, physicalDevice, format, pFormatProperties);
+
+        // gfxstream-zerocopy: force the WSI swapchain onto VK_FORMAT_R8G8B8A8 — the ONLY 32bpp
+        // format in the intersection of {guest getVirglFormat() exportable} and {AHardwareBuffer
+        // formats, which are all RGB-order — there is NO BGRA AHB format}. The host can only export
+        // external memory via AHB (supportsDmaBuf=0), so a BGRA colorBuffer can't be made external
+        // (AHB alloc fails -> mImageExportBroken latch -> external=0). The Wayland WSI builds its
+        // surface-format list filtering on optimalTilingFeatures & COLOR_ATTACHMENT
+        // (wsi_common_wayland.c:349-355); clearing that bit for every non-RGBA8 candidate drops them
+        // from the list so vkcube (which picks surfaceFormats[0]) lands on R8G8B8A8.
+        // Only drop formats the GUEST gfxstream getVirglFormat() cannot export (RGBA16F, the
+        // A2*10*10*10 packings). BGRA8/RGBA8 are both guest-exportable, so leave them — vkcube can
+        // pick either. (Do NOT strip BGRA8: that removes its COLOR_ATTACHMENT system-wide and breaks
+        // any BGRA8 Vulkan renderer, including desktop components.)
+        switch (format) {
+            case VK_FORMAT_R16G16B16A16_SFLOAT:
+            case VK_FORMAT_R16G16B16A16_UNORM:
+            case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+            case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+                pFormatProperties->optimalTilingFeatures &=
+                    ~(VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT);
+                break;
+            default:
+                break;
+        }
     }
 
     void on_vkGetPhysicalDeviceFormatProperties2(gfxstream::base::BumpPool* pool,
@@ -1895,23 +1920,57 @@ class VkDecoderGlobalState::Impl {
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
 
-        bool shouldPassthrough = !m_vkEmulation->isYcbcrEmulationEnabled();
-#if defined(__APPLE__)
-        shouldPassthrough = shouldPassthrough && !m_vkEmulation->supportsExternalMemoryMetal();
-#endif
-        if (shouldPassthrough) {
-            return vk->vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName,
-                                                            pPropertyCount, pProperties);
-        }
-
-        // If MoltenVK is supported on host, we need to ensure that we include
-        // VK_MVK_moltenvk extenstion in returned properties.
+        // NOTE: previously this passed the host driver's extension list straight
+        // through to the guest when YCbCr emulation was off. We now always build the
+        // vector so we can filter it (see the drm-format-modifier removal below).
         std::vector<VkExtensionProperties> properties;
         VkResult result =
             enumerateDeviceExtensionProperties(vk, physicalDevice, pLayerName, properties);
         if (result != VK_SUCCESS) {
             return result;
         }
+
+        // Hide VK_EXT_image_drm_format_modifier from the guest. The host Qualcomm
+        // Vulkan driver exposes only a QCOM-tiled modifier for BGRA8 (and rejects it
+        // for COLOR_ATTACHMENT usage), which is disjoint from what the gfxstream
+        // GLES/EGL side advertises to Wayland compositors (LINEAR/INVALID). That
+        // makes the guest Mesa WSI explicit-modifier negotiation unsatisfiable, so
+        // swapchain creation fails and apps must fall back to MESA_VK_WSI_DEBUG=sw.
+        // Removing the extension forces the guest ICD into its LINEAR
+        // modifier-emulation path, which both sides agree on, restoring a zero-copy
+        // dmabuf swapchain. Note: filteredDeviceExtensionNames() still force-enables
+        // the extension on the *host* VkDevice, which is independent of this.
+        // Extensions hidden from the guest, for two reasons:
+        //  (a) VK_EXT_image_drm_format_modifier: explicit DRM-modifier WSI negotiation is
+        //      unsatisfiable on this stack (host Qualcomm driver only exposes a QCOM-tiled
+        //      modifier for BGRA8, rejected for COLOR_ATTACHMENT; compositor only imports
+        //      LINEAR/INVALID). Hiding it makes a guest mesa >=25.1 fall into its LINEAR
+        //      modifier-emulation path (mapped to plain VK_IMAGE_TILING_LINEAR, which the
+        //      host driver DOES support) -> swapchain creates LINEAR -> Mutter imports it.
+        //  (b) Extensions whose property/feature structs this host gfxstream codegen cannot
+        //      (un)marshal. A newer guest mesa (>=26) queries those structs during device
+        //      init; the host's reservedunmarshal_extension_struct then abort()s. Hiding the
+        //      extension stops the guest from advertising/querying it. Add names here as new
+        //      guest-vs-host version skews surface.
+        static const char* const kHiddenDeviceExtensions[] = {
+            VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
+            VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME,
+        };
+        for (auto it = properties.begin(); it != properties.end();) {
+            bool drop = false;
+            for (const char* hidden : kHiddenDeviceExtensions) {
+                if (strcmp(it->extensionName, hidden) == 0) {
+                    drop = true;
+                    break;
+                }
+            }
+            it = drop ? properties.erase(it) : std::next(it);
+        }
+        fprintf(stderr, "GFXSTREAM-EXTFILTER: device-ext-enum returning count=%zu\n",
+                properties.size());
+
+        // If MoltenVK is supported on host, we need to ensure that we include
+        // VK_MVK_moltenvk extenstion in returned properties.
 
 #if defined(__APPLE__) && defined(VK_MVK_moltenvk)
         // Guest will check for VK_MVK_moltenvk extension for enabling AHB support
@@ -2231,8 +2290,9 @@ class VkDecoderGlobalState::Impl {
         deviceInfo.useAstcCpuDecompression =
             m_vkEmulation->getAstcLdrEmulationMode() == AstcEmulationMode::Cpu &&
             AstcCpuDecompressor::get().available();
-        deviceInfo.decompPipelines =
-            std::make_unique<GpuDecompressionPipelineManager>(m_vk, *pDevice);
+        // NOTE: decompPipelines is constructed below, after the device-level dispatch is
+        // available; it must NOT use the global m_vk (whose device-level entrypoints are NULL when
+        // the host driver is loaded directly, e.g. Turnip via HMI) or its teardown crashes.
         getSupportedFenceHandleTypes(vk, physicalDevice, &supportedFenceHandleTypes);
         getSupportedSemaphoreHandleTypes(vk, physicalDevice, &supportedBinarySemaphoreHandleTypes);
 
@@ -2288,6 +2348,9 @@ class VkDecoderGlobalState::Impl {
         if (m_vkEmulation->debugUtilsEnabled()) {
             deviceInfo.debugUtilsHelper = DebugUtilsHelper::withUtilsEnabled(*pDevice, dispatch);
         }
+
+        deviceInfo.decompPipelines =
+            std::make_unique<GpuDecompressionPipelineManager>(dispatch, *pDevice);
 
         deviceInfo.externalFencePool =
             std::make_unique<ExternalFencePool<VulkanDispatch>>(dispatch, *pDevice);
@@ -2637,7 +2700,10 @@ class VkDecoderGlobalState::Impl {
         // Run the underlying API call.
         {
             AutoLock lock(*graphicsDriverLock());
-            m_vk->vkDestroyDevice(device, pAllocator);
+            // Use the per-device dispatch, not the global m_vk: when the host driver is loaded
+            // directly (Turnip via HMI bridge, no system libvulkan), m_vk is populated only with
+            // global commands and m_vk->vkDestroyDevice is NULL -> calling it crashes.
+            deviceDispatch->vkDestroyDevice(device, pAllocator);
         }
 
         GFXSTREAM_INFO("Destroyed VkDevice:%p", device);
@@ -2877,6 +2943,24 @@ class VkDecoderGlobalState::Impl {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
+        {
+            bool hasExtMem = vk_find_struct<VkExternalMemoryImageCreateInfo>(pCreateInfo) != nullptr;
+            bool hasModList = false, hasModExplicit = false;
+            for (const VkBaseInStructure* s = (const VkBaseInStructure*)pCreateInfo->pNext; s;
+                 s = s->pNext) {
+                if (s->sType == VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT)
+                    hasModList = true;
+                if (s->sType == VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT)
+                    hasModExplicit = true;
+            }
+            fprintf(stderr,
+                    "ZC-CREATEIMG: fmt=%u tiling=%u usage=0x%x %ux%u extMem=%d modList=%d "
+                    "modExplicit=%d\n",
+                    (unsigned)pCreateInfo->format, (unsigned)pCreateInfo->tiling,
+                    (unsigned)pCreateInfo->usage, pCreateInfo->extent.width,
+                    pCreateInfo->extent.height, hasExtMem, hasModList, hasModExplicit);
+        }
+
         std::lock_guard<std::mutex> lock(mMutex);
 
         auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
@@ -2938,6 +3022,102 @@ class VkDecoderGlobalState::Impl {
         std::unique_ptr<AndroidNativeBufferInfo> anbInfo = nullptr;
         const VkNativeBufferANDROID* nativeBufferANDROID =
             vk_find_struct<VkNativeBufferANDROID>(pCreateInfo);
+
+        // gfxstream-zerocopy: the guest emulates its DRM-format-modifier WSI image as a plain
+        // LINEAR external (dma-buf) image. Turnip cannot size/bind a dma-buf to a plain LINEAR
+        // image (memReq size 0 -> vkBindImageMemory crash). Re-describe it with
+        // VK_EXT_image_drm_format_modifier + an explicit DRM_FORMAT_MOD_LINEAR layout whose
+        // rowPitch = align(width*bpp,256) -- identical to the host colorBuffer's layout -- so the
+        // import + bind succeeds with a matching, well-defined dma-buf layout.
+        VkImageCreateInfo zcModCreateInfo;
+        VkImageDrmFormatModifierExplicitCreateInfoEXT zcDrmExplicit = {};
+        VkSubresourceLayout zcPlaneLayout = {};
+        VkExternalMemoryImageCreateInfo zcExtMem = {};
+        // Originally gated on LINEAR only (the gfxstream WSI emulates its dma-buf swapchain images
+        // as plain LINEAR). But zink's GBM scanout buffers (weston's output image when the
+        // compositor runs on zink->Turnip) arrive as OPTIMAL external dma-buf images with the
+        // ANDROID_HARDWARE_BUFFER bit still set in handleTypes. Host Mesa then classifies them
+        // android_buffer_type = HARDWARE, so Turnip returns memReq size 0 and vkBindImageMemory
+        // derefs a NULL gralloc handle (fallback_gralloc_get_buffer_info, SIGSEGV @ 0x4). Treat
+        // OPTIMAL external dma-buf images the same as LINEAR: re-describe them as an explicit
+        // DRM_FORMAT_MOD_LINEAR dma-buf image (AHB bit stripped below), which Turnip can size,
+        // bind, and export. (The inner isDmaBufExternal/!hasModifier check still gates this to only
+        // external dma-buf images that don't already carry a modifier.)
+        if (m_vkEmulation->supportsDrmFormatModifier() &&
+            (pCreateInfo->tiling == VK_IMAGE_TILING_LINEAR ||
+             pCreateInfo->tiling == VK_IMAGE_TILING_OPTIMAL) &&
+            !nativeBufferANDROID) {
+            const auto* extMem = vk_find_struct<VkExternalMemoryImageCreateInfo>(pCreateInfo);
+            if (extMem) {
+                fprintf(stderr, "ZC-CREATEIMG: extMem handleTypes=0x%x tiling=%d\n",
+                        (unsigned)extMem->handleTypes, (int)pCreateInfo->tiling);
+            }
+            // Trigger for dma-buf-CLASS external images: DMA_BUF *or* ANDROID_HARDWARE_BUFFER.
+            // zink's GBM scanout image arrives as an AHB-only external image (no DMA_BUF bit);
+            // host Mesa still classifies it android_buffer_type=HARDWARE -> Turnip memReq size 0 ->
+            // bind reads a NULL gralloc handle (hang/crash). The conversion body forces
+            // handleTypes=DMA_BUF, so an AHB-only image becomes a plain dma-buf LINEAR image.
+            const bool isDmaBufExternal =
+                extMem &&
+                (extMem->handleTypes &
+                 (VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT |
+                  VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID));
+            bool hasModifier = false;
+            for (const VkBaseInStructure* s = (const VkBaseInStructure*)pCreateInfo->pNext; s;
+                 s = s->pNext) {
+                if (s->sType == VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT ||
+                    s->sType ==
+                        VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT) {
+                    hasModifier = true;
+                    break;
+                }
+            }
+            if (isDmaBufExternal && !hasModifier) {
+                uint32_t bpp = (pCreateInfo->format == VK_FORMAT_R16G16B16A16_SFLOAT ||
+                                pCreateInfo->format == VK_FORMAT_R16G16B16A16_UNORM)
+                                   ? 8u
+                                   : 4u;
+                zcPlaneLayout.offset = 0;
+                zcPlaneLayout.size = 0;
+                zcPlaneLayout.rowPitch =
+                    (static_cast<uint64_t>(pCreateInfo->extent.width) * bpp + 255u) &
+                    ~static_cast<uint64_t>(255u);
+                zcPlaneLayout.arrayPitch = 0;
+                zcPlaneLayout.depthPitch = 0;
+                zcDrmExplicit.sType =
+                    VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
+                zcDrmExplicit.drmFormatModifier = 0;  // DRM_FORMAT_MOD_LINEAR
+                zcDrmExplicit.drmFormatModifierPlaneCount = 1;
+                zcDrmExplicit.pPlaneLayouts = &zcPlaneLayout;
+
+                // CRITICAL: the guest image's VkExternalMemoryImageCreateInfo.handleTypes also has
+                // the ANDROID_HARDWARE_BUFFER bit. Mesa then marks the image android_buffer_type =
+                // HARDWARE, so vkBindImageMemory2 tries to read an AHB layout from our (dma-buf,
+                // no-AHB) memory and crashes on a NULL AHardwareBuffer. Replace the external info
+                // with a DMA_BUF-only copy so Mesa treats it as a plain dma-buf image.
+                zcExtMem = *extMem;
+                zcExtMem.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                zcExtMem.pNext = &zcDrmExplicit;
+
+                // Splice the original extMem out of the chain when it is the head (the common case
+                // for gfxstream WSI images); otherwise leave the rest of the chain after ours
+                // (vk_find_struct returns the first match, so our DMA_BUF-only copy still wins).
+                const void* tail = pCreateInfo->pNext;
+                if ((const void*)pCreateInfo->pNext == (const void*)extMem) {
+                    tail = extMem->pNext;
+                }
+                zcDrmExplicit.pNext = tail;
+
+                zcModCreateInfo = *pCreateInfo;
+                zcModCreateInfo.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+                zcModCreateInfo.pNext = &zcExtMem;
+                pCreateInfo = &zcModCreateInfo;
+                fprintf(stderr,
+                        "ZC-CREATEIMG: converted guest image to DRM_MODIFIER LINEAR (dmabuf-only) "
+                        "rowPitch=%llu\n",
+                        (unsigned long long)zcPlaneLayout.rowPitch);
+            }
+        }
 
         VkResult createRes = VK_SUCCESS;
 
@@ -3026,6 +3206,57 @@ class VkDecoderGlobalState::Impl {
         destroyImageLocked(device, deviceDispatch, image, pAllocator);
     }
 
+    // gfxstream-zerocopy: bytes-per-pixel for the scanout/swapchain formats that reach the
+    // emulated-LINEAR external-image path. Assumes mMutex held.
+    static uint32_t emulatedLinearBppLocked(VkFormat format) {
+        switch (format) {
+            case VK_FORMAT_R16G16B16A16_SFLOAT:
+            case VK_FORMAT_R16G16B16A16_UNORM:
+                return 8;
+            default:
+                // BGRA8 / RGBA8 / RGB10A2 / ... are all 32bpp.
+                return 4;
+        }
+    }
+
+    // gfxstream-zerocopy: see header. `image` is the unboxed host VkImage (mImageInfo key).
+    uint32_t getEmulatedLinearImageRowPitch(VkImage image) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto* info = gfxstream::base::find(mImageInfo, image);
+        if (!info) return 0;
+        const VkImageCreateInfo& ci = info->imageCreateInfoShallow;
+        uint32_t bpp = emulatedLinearBppLocked(ci.format);
+        fprintf(stderr, "ZC-ROWPITCH: img=%p fmt=%u %ux%u tiling=%u -> rowPitch=%u\n",
+                (void*)image, (unsigned)ci.format, ci.extent.width, ci.extent.height,
+                (unsigned)ci.tiling, ci.extent.width * bpp);
+        return ci.extent.width * bpp;
+    }
+
+    // gfxstream-zerocopy: true if the host image was created as a VK_EXT_image_drm_format_modifier
+    // image (the dma-buf/Turnip path). For such images the MEMORY_PLANE aspect is correct and the
+    // size-0/rowPitch-0 workarounds for plain LINEAR external images must be skipped.
+    bool isDrmFormatModifierImage(VkImage image) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto* info = gfxstream::base::find(mImageInfo, image);
+        if (!info) return false;
+        return info->imageCreateInfoShallow.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    }
+
+    // gfxstream-zerocopy: the Qualcomm driver returns size=0 (like rowPitch=0) for external
+    // emulated-LINEAR images, which makes the guest allocate a 0-byte export blob and the guest
+    // kernel reject it (drm_gem_create_mmap_offset -> -ENOSPC). Compute a correct linear size as
+    // a fallback. Assumes mMutex held.
+    uint64_t emulatedLinearImageSizeLocked(VkImage image) REQUIRES(mMutex) {
+        auto* info = gfxstream::base::find(mImageInfo, image);
+        if (!info) return 0;
+        const VkImageCreateInfo& ci = info->imageCreateInfoShallow;
+        uint64_t bpp = emulatedLinearBppLocked(ci.format);
+        uint64_t size = (uint64_t)ci.extent.width * ci.extent.height * bpp;
+        // Page-align (the guest PAGE_ALIGNs anyway; keep host/guest consistent).
+        size = (size + 4095) & ~((uint64_t)4095);
+        return size;
+    }
+
     VkResult performBindImageMemoryDeferredAhb(gfxstream::base::BumpPool* pool,
                                                VkSnapshotApiCallHandle apiCallHandle,
                                                VkDevice boxed_device,
@@ -3088,7 +3319,10 @@ class VkDecoderGlobalState::Impl {
         auto vk = dispatch_VkDevice(boxed_device);
 
         VALIDATE_REQUIRED_HANDLE(memory);
+        fprintf(stderr, "ZC-BIND: before vkBindImageMemory image=%p memory=%p offset=%llu\n",
+                (void*)image, (void*)memory, (unsigned long long)memoryOffset);
         VkResult result = vk->vkBindImageMemory(device, image, memory, memoryOffset);
+        fprintf(stderr, "ZC-BIND: after vkBindImageMemory res=%d\n", (int)result);
         if (result != VK_SUCCESS) {
             return result;
         }
@@ -5155,6 +5389,17 @@ class VkDecoderGlobalState::Impl {
         std::lock_guard<std::mutex> lock(mMutex);
         updateImageMemorySizeLocked(device, image, pMemoryRequirements);
 
+        if (pMemoryRequirements->size == 0) {
+            uint64_t fallback = emulatedLinearImageSizeLocked(image);
+            fprintf(stderr,
+                    "ZC-MEMREQ: img=%p driver size=0 align=%llu typeBits=0x%x -> fallback=%llu\n",
+                    (void*)image, (unsigned long long)pMemoryRequirements->alignment,
+                    pMemoryRequirements->memoryTypeBits, (unsigned long long)fallback);
+            pMemoryRequirements->size = fallback;
+            if (pMemoryRequirements->alignment == 0) pMemoryRequirements->alignment = 4096;
+            if (pMemoryRequirements->memoryTypeBits == 0) pMemoryRequirements->memoryTypeBits = 1;
+        }
+
         auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
         if (!deviceInfo) {
             GFXSTREAM_ERROR("Failed to find device info for device: %p", device);
@@ -5211,6 +5456,21 @@ class VkDecoderGlobalState::Impl {
         }
 
         updateImageMemorySizeLocked(device, pInfo->image, &pMemoryRequirements->memoryRequirements);
+
+        if (pMemoryRequirements->memoryRequirements.size == 0) {
+            uint64_t fallback = emulatedLinearImageSizeLocked(pInfo->image);
+            fprintf(stderr,
+                    "ZC-MEMREQ2: img=%p driver size=0 align=%llu typeBits=0x%x -> fallback=%llu\n",
+                    (void*)pInfo->image,
+                    (unsigned long long)pMemoryRequirements->memoryRequirements.alignment,
+                    pMemoryRequirements->memoryRequirements.memoryTypeBits,
+                    (unsigned long long)fallback);
+            pMemoryRequirements->memoryRequirements.size = fallback;
+            if (pMemoryRequirements->memoryRequirements.alignment == 0)
+                pMemoryRequirements->memoryRequirements.alignment = 4096;
+            if (pMemoryRequirements->memoryRequirements.memoryTypeBits == 0)
+                pMemoryRequirements->memoryRequirements.memoryTypeBits = 1;
+        }
 
         auto& physicalDeviceMemHelper = physicalDeviceInfo->memoryPropertiesHelper;
         physicalDeviceMemHelper->transformToGuestMemoryRequirements(
@@ -5746,6 +6006,21 @@ class VkDecoderGlobalState::Impl {
         if (dedicatedAllocInfoPtr) {
             localDedicatedAllocInfo = vk_make_orphan_copy(*dedicatedAllocInfoPtr);
         }
+        {
+            const VkImportColorBufferGOOGLE* importCb =
+                vk_find_struct<VkImportColorBufferGOOGLE>(pAllocateInfo);
+            const VkImportBufferGOOGLE* importBufLog =
+                vk_find_struct<VkImportBufferGOOGLE>(pAllocateInfo);
+            fprintf(stderr,
+                    "ZC-ALLOCMEM: size=%llu typeIdx=%u dedicatedImg=%d dedicatedBuf=%d "
+                    "importCb=%d(cb=%u) importBuf=%d(buf=%u)\n",
+                    (unsigned long long)pAllocateInfo->allocationSize,
+                    pAllocateInfo->memoryTypeIndex,
+                    (dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE),
+                    (dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->buffer != VK_NULL_HANDLE),
+                    importCb != nullptr, importCb ? importCb->colorBuffer : 0u,
+                    importBufLog != nullptr, importBufLog ? importBufLog->buffer : 0u);
+        }
         if (!usingDirectMapping()) {
             // We copy bytes 1 page at a time from the guest to the host
             // if we are not using direct mapping. This means we can end up
@@ -5928,9 +6203,24 @@ class VkDecoderGlobalState::Impl {
                         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                     }
 #elif defined(__ANDROID__)
-                    importInfo.buffer = static_cast<AHardwareBuffer*>(
-                        reinterpret_cast<void*>(dupHandleInfo->handle));
-                    vk_append_struct(&structChainIter, &importInfo);
+                    // gfxstream-zerocopy: ColorBuffer memory may be backed by a dma-buf FD (Turnip
+                    // path) instead of an AHB. Import it via VkImportMemoryFdInfoKHR(DMA_BUF) rather
+                    // than treating the FD as an AHardwareBuffer*, which would crash.
+                    if (dupHandleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_DMABUF ||
+                        dupHandleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_OPAQUE_FD) {
+                        importFdInfo.fd = dupHandleInfo->getFd();
+                        importFdInfo.handleType =
+                            (dupHandleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_DMABUF)
+                                ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
+                                : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+                        fprintf(stderr, "ZC-ALLOCMEM: import cb via fd handleType=0x%x fd=%d\n",
+                                importFdInfo.handleType, importFdInfo.fd);
+                        vk_append_struct(&structChainIter, &importFdInfo);
+                    } else {
+                        importInfo.buffer = static_cast<AHardwareBuffer*>(
+                            reinterpret_cast<void*>(dupHandleInfo->handle));
+                        vk_append_struct(&structChainIter, &importInfo);
+                    }
 #else
                     importFdInfo.fd = dupHandleInfo->getFd();
                     vk_append_struct(&structChainIter, &importFdInfo);
@@ -5939,12 +6229,40 @@ class VkDecoderGlobalState::Impl {
             }
         } else if (importBufferInfoPtr) {
             bool bufferMemoryUsesDedicatedAlloc = false;
+            bool resolvedAsColorBuffer = false;
             if (!m_vkEmulation->getBufferAllocationInfo(
                     importBufferInfoPtr->buffer, &localAllocInfo.allocationSize,
                     &localAllocInfo.memoryTypeIndex, &bufferMemoryUsesDedicatedAlloc)) {
-                GFXSTREAM_ERROR("Failed to get Buffer:%d allocation info.",
-                                importBufferInfoPtr->buffer);
-                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                // gfxstream-zerocopy fallback: when one wayland client (vkcube) exports
+                // a colorBuffer dmabuf and another (weston-zink) imports the wl_buffer,
+                // the guest ResourceTracker wraps it as VkImportBufferGOOGLE because the
+                // importer didn't pass VkMemoryDedicatedAllocateInfo(image). Buffer
+                // handles are per-context, but ColorBuffer handles are global — so the
+                // numeric handle still resolves as a ColorBuffer here. Retry the lookup
+                // as a ColorBuffer and import via its dmabuf fd; the rest of the alloc
+                // flow then works the same as a normal VkImportColorBufferGOOGLE.
+                if (m_vkEmulation->getColorBufferAllocationInfo(
+                        importBufferInfoPtr->buffer, &localAllocInfo.allocationSize,
+                        &localAllocInfo.memoryTypeIndex, &bufferMemoryUsesDedicatedAlloc,
+                        &mappedPtr)) {
+                    resolvedAsColorBuffer = true;
+                    fprintf(stderr,
+                            "ZC-ALLOCMEM3: importBuffer=%u resolved as ColorBuffer (cross-ctx "
+                            "dmabuf wl_buffer) size=%llu typeIdx=%u\n",
+                            importBufferInfoPtr->buffer,
+                            (unsigned long long)localAllocInfo.allocationSize,
+                            localAllocInfo.memoryTypeIndex);
+                } else {
+                    fprintf(stderr,
+                            "ZC-ALLOCMEM3: importBuffer=%u missing on host (and not a "
+                            "ColorBuffer) size=%llu typeIdx=%u\n",
+                            importBufferInfoPtr->buffer,
+                            (unsigned long long)localAllocInfo.allocationSize,
+                            localAllocInfo.memoryTypeIndex);
+                    GFXSTREAM_ERROR("Failed to get Buffer:%d allocation info.",
+                                    importBufferInfoPtr->buffer);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
             }
 
             shouldUseDedicatedAllocInfo &= bufferMemoryUsesDedicatedAlloc;
@@ -5975,7 +6293,9 @@ class VkDecoderGlobalState::Impl {
 
             if (opaqueFd && m_vkEmulation->supportsExternalMemoryImport()) {
                 auto dupHandleInfo =
-                    m_vkEmulation->dupBufferExtMemoryHandle(importBufferInfoPtr->buffer);
+                    resolvedAsColorBuffer
+                        ? m_vkEmulation->dupColorBufferExtMemoryHandle(importBufferInfoPtr->buffer)
+                        : m_vkEmulation->dupBufferExtMemoryHandle(importBufferInfoPtr->buffer);
                 if (!dupHandleInfo) {
                     GFXSTREAM_ERROR(
                         "Failed to duplicate external memory handle/descriptor for Buffer object, "
@@ -6011,7 +6331,30 @@ class VkDecoderGlobalState::Impl {
                         dupHandleInfo->streamHandleType);
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
-#elif !defined(__ANDROID__)
+#elif defined(__ANDROID__)
+                // gfxstream-zerocopy: ColorBuffer or Buffer memory may be backed by a dma-buf
+                // FD (Turnip path). Import it via VkImportMemoryFdInfoKHR(DMA_BUF) rather than
+                // dropping it on the floor like the original Android #else branch did, which
+                // left the alloc with no import struct attached and broke cross-context
+                // wl_buffer import (zink-on-Turnip in weston importing vkcube's wl_buffer).
+                if (dupHandleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_DMABUF ||
+                    dupHandleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_OPAQUE_FD) {
+                    importFdInfo.fd = dupHandleInfo->getFd();
+                    importFdInfo.handleType =
+                        (dupHandleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_DMABUF)
+                            ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
+                            : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+                    fprintf(stderr,
+                            "ZC-ALLOCMEM3: importBuffer via fd handleType=0x%x fd=%d "
+                            "(resolvedAsColorBuffer=%d)\n",
+                            importFdInfo.handleType, importFdInfo.fd, resolvedAsColorBuffer);
+                    vk_append_struct(&structChainIter, &importFdInfo);
+                } else {
+                    importInfo.buffer = static_cast<AHardwareBuffer*>(
+                        reinterpret_cast<void*>(dupHandleInfo->handle));
+                    vk_append_struct(&structChainIter, &importInfo);
+                }
+#else
                 importFdInfo.fd = dupHandleInfo->getFd();
                 vk_append_struct(&structChainIter, &importFdInfo);
 #endif
@@ -6031,6 +6374,7 @@ class VkDecoderGlobalState::Impl {
             if (!deviceInfo) {
                 // User app gave an invalid VkDevice, but we don't really want to crash here.
                 // We should allow invalid apps.
+                fprintf(stderr, "ZC-ALLOCMEM3: dev-not-found %p\n", (void*)device);
                 GFXSTREAM_ERROR("Failed to find device info for device: %p", device);
                 return VK_ERROR_DEVICE_LOST;
             }
@@ -6047,6 +6391,11 @@ class VkDecoderGlobalState::Impl {
                 physicalDeviceInfo->memoryPropertiesHelper
                     ->getHostMemoryInfoFromGuestMemoryTypeIndex(localAllocInfo.memoryTypeIndex);
             if (!hostMemoryInfoOpt) {
+                fprintf(stderr,
+                        "ZC-ALLOCMEM2: FAIL getHostMemoryInfoFromGuestMemoryTypeIndex"
+                        "(guestTypeIdx=%u) device=%p size=%llu -> INCOMPATIBLE_DRIVER\n",
+                        localAllocInfo.memoryTypeIndex, (void*)device,
+                        (unsigned long long)localAllocInfo.allocationSize);
                 return VK_ERROR_INCOMPATIBLE_DRIVER;
             }
             const auto& hostMemoryInfo = *hostMemoryInfoOpt;
@@ -6056,6 +6405,9 @@ class VkDecoderGlobalState::Impl {
 
             auto virtioGpuContextIdOpt = getContextIdForDeviceLocked(device);
             if (!virtioGpuContextIdOpt) {
+                fprintf(stderr, "ZC-ALLOCMEM3: no-ctx-id dev=%p size=%llu typeIdx=%u\n",
+                        (void*)device, (unsigned long long)localAllocInfo.allocationSize,
+                        localAllocInfo.memoryTypeIndex);
                 GFXSTREAM_ERROR("VkDevice:%p missing context id for vkAllocateMemory().");
                 return VK_ERROR_DEVICE_LOST;
             }
@@ -6064,6 +6416,16 @@ class VkDecoderGlobalState::Impl {
 
         if (shouldUseDedicatedAllocInfo) {
             vk_append_struct(&structChainIter, &localDedicatedAllocInfo);
+        }
+
+        if (importCbInfoPtr) {
+            fprintf(stderr,
+                    "ZC-ALLOCMEM: about to vkAllocateMemory(importCb=%u) dedicated=%d "
+                    "dedImg=%p size=%llu typeIdx=%u\n",
+                    importCbInfoPtr->colorBuffer, shouldUseDedicatedAllocInfo ? 1 : 0,
+                    (void*)localDedicatedAllocInfo.image,
+                    (unsigned long long)localAllocInfo.allocationSize,
+                    localAllocInfo.memoryTypeIndex);
         }
 
         // Host visible memory often needs special handling by gfxstream and the virtual machine
@@ -6088,6 +6450,10 @@ class VkDecoderGlobalState::Impl {
         const bool hostVisible = memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
         bool importEmulatedExternalMemory = importCbInfoPtr || importBufferInfoPtr;
         const bool emulateHostVisible = hostVisible && !importEmulatedExternalMemory;
+        fprintf(stderr,
+                "ZC-ALLOCMEM2: hostVisible=%d importEmu=%d emulateHostVisible=%d createBlob=%p\n",
+                hostVisible, importEmulatedExternalMemory, emulateHostVisible,
+                (const void*)createBlobInfoPtr);
 
         std::optional<SharedMemory> sharedMemory = std::nullopt;
         std::optional<VkImportMemoryHostPointerInfoEXT> importHostInfo;
@@ -6296,7 +6662,24 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
+        fprintf(stderr, "ZC-ALLOCMEM: about to call host vkAllocateMemory size=%llu typeIdx=%u\n",
+                (unsigned long long)localAllocInfo.allocationSize, localAllocInfo.memoryTypeIndex);
         VkResult result = vk->vkAllocateMemory(device, &localAllocInfo, pAllocator, pMemory);
+        if (importCbInfoPtr) {
+            fprintf(stderr, "ZC-ALLOCMEM: vkAllocateMemory(importCb=%u) returned res=%d mem=%p\n",
+                    importCbInfoPtr->colorBuffer, (int)result, (void*)*pMemory);
+        } else {
+            // Always trace non-importCb allocs too, so we can see when zink hits OOD-without-error
+            // (host succeeds but mem=NULL, or guest ResourceTracker rejects post-host).
+            fprintf(stderr,
+                    "ZC-ALLOCMEM: vkAllocateMemory done res=%d mem=%p size=%llu typeIdx=%u "
+                    "dedImg=%p dedBuf=%p exportHandleTypes=0x%x\n",
+                    (int)result, (void*)*pMemory,
+                    (unsigned long long)localAllocInfo.allocationSize, localAllocInfo.memoryTypeIndex,
+                    (void*)(dedicatedAllocInfoPtr ? dedicatedAllocInfoPtr->image : VK_NULL_HANDLE),
+                    (void*)(dedicatedAllocInfoPtr ? dedicatedAllocInfoPtr->buffer : VK_NULL_HANDLE),
+                    exportAllocateInfo ? exportAllocateInfo->handleTypes : 0u);
+        }
         if (result != VK_SUCCESS) {
             return result;
         }
@@ -9933,7 +10316,9 @@ class VkDecoderGlobalState::Impl {
             destroyDeviceObjects(deviceObjects);
         }
 
-        m_vk->vkDestroyInstance(instance, nullptr);
+        // Use the per-instance dispatch, not the global m_vk: with a directly-loaded host driver
+        // (Turnip via HMI bridge, no system libvulkan) m_vk->vkDestroyInstance is NULL.
+        dispatch_VkInstance(instanceInfo.boxed)->vkDestroyInstance(instance, nullptr);
         GFXSTREAM_INFO("Destroyed VkInstance:%p for application:'%s' engine:'%s'.", instance,
                        instanceInfo.applicationName.c_str(), instanceInfo.engineName.c_str());
 
@@ -10684,6 +11069,14 @@ void VkDecoderGlobalState::on_vkDestroyImage(gfxstream::base::BumpPool* pool,
                                              VkImage image,
                                              const VkAllocationCallbacks* pAllocator) {
     mImpl->on_vkDestroyImage(pool, apiCallHandle, device, image, pAllocator);
+}
+
+uint32_t VkDecoderGlobalState::getEmulatedLinearImageRowPitch(VkImage image) {
+    return mImpl->getEmulatedLinearImageRowPitch(image);
+}
+
+bool VkDecoderGlobalState::isDrmFormatModifierImage(VkImage image) {
+    return mImpl->isDrmFormatModifierImage(image);
 }
 
 VkResult VkDecoderGlobalState::on_vkBindImageMemory(gfxstream::base::BumpPool* pool,
