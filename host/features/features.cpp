@@ -114,7 +114,8 @@ bool VulkanVersionFeatureInfo::parseValue(std::string_view strValue) {
             pos = (ptr - strValue.data()) + 1;  // Skip the dot
         }
 
-        value = VK_MAKE_API_VERSION(0, parts[0], parts[1], parts[2]);
+        uint32_t val = VK_MAKE_API_VERSION(0, parts[0], parts[1], parts[2]);
+        value = U32FeatureValue(val);
         return true;
     }
 
