@@ -1977,10 +1977,6 @@ class VkDecoderGlobalState::Impl {
         shouldPassthrough = shouldPassthrough && !(m_vkEmulation->getExternalMemoryMode() ==
                                                    ExternalMemory::Mode::Metal);
 #endif
-        if (shouldPassthrough) {
-            return vk->vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName,
-                                                            pPropertyCount, pProperties);
-        }
 
 #if defined(_WIN32)
         // Temporary fix to get old system images working with lavapipe
@@ -1991,6 +1987,11 @@ class VkDecoderGlobalState::Impl {
             shouldPassthrough = false;
         }
 #endif
+
+        if (shouldPassthrough) {
+            return vk->vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName,
+                                                            pPropertyCount, pProperties);
+        }
 
         // If MoltenVK is supported on host, we need to ensure that we include
         // VK_MVK_moltenvk extenstion in returned properties.
