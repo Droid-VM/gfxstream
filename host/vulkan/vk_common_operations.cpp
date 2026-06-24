@@ -132,7 +132,7 @@ static bool ResizeRGBAImage(const uint8_t* rgbaPixels, int w_old, int h_old, int
         return static_cast<uint8_t>(std::clamp(std::round(result), 0.0f, 255.0f));
     };
 
-    resizedPixels.resize(w_new * h_new * 4);
+    resizedPixels.resize((uint64_t)w_new * (uint64_t)h_new * 4);
 
     float scale_x = static_cast<float>(w_old) / w_new;
     float scale_y = static_cast<float>(h_old) / h_new;
@@ -3495,7 +3495,7 @@ bool VkEmulation::readColorBufferPixelsScaledCpu(uint32_t colorBufferHandle, int
     const uint64_t readbackPixelsSize = readbackWidth * readbackHeight * readbackBpp;
 
     const uint32_t outBpp = (pixelsFormat == GfxstreamFormat::R8G8B8_UNORM) ? 3 : 4;
-    const uint64_t outPixelsSize = pixelsWidth * pixelsHeight * outBpp;
+    const uint64_t outPixelsSize = (uint64_t)pixelsWidth * (uint64_t)pixelsHeight * outBpp;
     if (readbackBpp == outBpp && pixelsRotation == 0 && readbackPixelsSize == outPixelsSize) {
         // Simple 1-1 readback case
         return readColorBufferToBytesLocked(colorBufferHandle, 0, 0, pixelsWidth, pixelsHeight, outPixels, outPixelsSize);
@@ -3528,7 +3528,7 @@ bool VkEmulation::readColorBufferPixelsScaledCpu(uint32_t colorBufferHandle, int
 
         if (readbackWidth != readbackTargetWidth || readbackHeight != readbackTargetHeight) {
             std::vector<uint8_t> resized_readback_r8g8b8a8;
-            resized_readback_r8g8b8a8.resize(pixelsWidth * pixelsHeight * 4);
+            resized_readback_r8g8b8a8.resize((uint64_t)pixelsWidth * (uint64_t)pixelsHeight * 4);
 
             // Resizing only supports RGBA sources for now
             if (!ResizeRGBAImage(readback_r8g8b8a8.data(), readbackWidth, readbackHeight,
@@ -3617,7 +3617,7 @@ bool VkEmulation::readColorBufferPixelsScaledGpu(uint32_t colorBufferHandle, int
 
     // Check if we need to stage to GPU
     const int outBpp = (pixelsFormat == GfxstreamFormat::R8G8B8_UNORM) ? 3 : 4;
-    const uint64_t outPixelsSize = outBpp * pixelsWidth * pixelsHeight;
+    const uint64_t outPixelsSize = (uint64_t)outBpp * (uint64_t)pixelsWidth * (uint64_t)pixelsHeight;
     const int readbackBpp = 4;
     int readbackWidth = sourceCbInfo->width;
     int readbackHeight = sourceCbInfo->height;
