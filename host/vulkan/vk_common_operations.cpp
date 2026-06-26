@@ -58,6 +58,10 @@
 #include "platform_helper_qnx.h"
 #endif
 
+#ifdef __ANDROID__
+#include <android/hardware_buffer.h>
+#endif
+
 namespace gfxstream {
 namespace host {
 namespace vk {
@@ -119,7 +123,9 @@ static bool ResizeRGBAImage(const uint8_t* rgbaPixels, int w_old, int h_old, int
         return false;
     }
 
-    auto getPixelIndex = [](int x, int y, int width) { return (y * width + x) * 4; };
+    auto getPixelIndex = [](int x, int y, int width) -> int64_t {
+        return (static_cast<int64_t>(y) * width + x) * 4;
+    };
 
     auto interpolateChannel = [](float x_frac, float y_frac, uint8_t q11, uint8_t q21, uint8_t q12,
                                 uint8_t q22) {
@@ -132,7 +138,7 @@ static bool ResizeRGBAImage(const uint8_t* rgbaPixels, int w_old, int h_old, int
         return static_cast<uint8_t>(std::clamp(std::round(result), 0.0f, 255.0f));
     };
 
-    resizedPixels.resize((uint64_t)w_new * (uint64_t)h_new * 4);
+    resizedPixels.resize(static_cast<size_t>(w_new) * h_new * 4);
 
     float scale_x = static_cast<float>(w_old) / w_new;
     float scale_y = static_cast<float>(h_old) / h_new;
@@ -153,13 +159,13 @@ static bool ResizeRGBAImage(const uint8_t* rgbaPixels, int w_old, int h_old, int
             if (y1 == y2) y_frac = 0.0f;
 
             // Base indices
-            int idx11 = getPixelIndex(x1, y1, w_old);
-            int idx21 = getPixelIndex(x2, y1, w_old);
-            int idx12 = getPixelIndex(x1, y2, w_old);
-            int idx22 = getPixelIndex(x2, y2, w_old);
+            int64_t idx11 = getPixelIndex(x1, y1, w_old);
+            int64_t idx21 = getPixelIndex(x2, y1, w_old);
+            int64_t idx12 = getPixelIndex(x1, y2, w_old);
+            int64_t idx22 = getPixelIndex(x2, y2, w_old);
 
             // New pixel index
-            int pixelIndex = getPixelIndex(x_new, y_new, w_new);
+            int64_t pixelIndex = getPixelIndex(x_new, y_new, w_new);
 
             // 6. Interpolate each of the 4 channels (R, G, B, A)
             for (int c = 0; c < 4; ++c) {
@@ -1106,6 +1112,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             if (deviceInfos[i].externalMemoryMode == ExternalMemory::Mode::QnxScreenBuffer) {
                 deviceInfos[i].supportsExternalMemoryExport = false;
             }
+
         }
 
         if (emulation->mInstanceSupportsGetPhysicalDeviceProperties2) {
@@ -2055,6 +2062,63 @@ MTLResource_id VkEmulation::getMtlResourceFromVkDeviceMemory(VulkanDispatch* vk,
 }
 #endif
 
+#ifdef __ANDROID__
+// Allocate an AHardwareBuffer matching the given image's format, extent and usage.
+// Returns nullptr on failure (caller falls back to the non-AHB allocation path).
+static AHardwareBuffer* allocAhb(const VkImageCreateInfo* imageCreateInfo) {
+    // Map VkFormat to the corresponding AHB format — must match to avoid tiling mismatch.
+    uint32_t ahbFormat;
+    switch (imageCreateInfo->format) {
+        case VK_FORMAT_B8G8R8A8_UNORM:
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            ahbFormat = 5;  // AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
+            break;
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        default:
+            ahbFormat = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+            break;
+    }
+
+    // Translate the common VkImageUsageFlagBits into their corresponding AHB usage bits.
+    uint64_t ahbUsage = 0;
+    const VkImageUsageFlags vkUsage = imageCreateInfo->usage;
+    if (vkUsage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+        ahbUsage |= AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+    }
+    if (vkUsage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                   VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) {
+        ahbUsage |= AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER;
+    }
+    if (vkUsage & VK_IMAGE_USAGE_STORAGE_BIT) {
+        ahbUsage |= AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER;
+    }
+    // ColorBuffers are always at least framebuffer/sampled-capable; default to a usable
+    // combination if the image declared no GPU-relevant usage.
+    if (ahbUsage == 0) {
+        ahbUsage = AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+    }
+
+    AHardwareBuffer_Desc desc = {
+        .width = imageCreateInfo->extent.width,
+        .height = imageCreateInfo->extent.height,
+        .layers = 1,
+        .format = ahbFormat,
+        .usage = ahbUsage,
+    };
+
+    AHardwareBuffer* ahb = nullptr;
+    int ahbRes = AHardwareBuffer_allocate(&desc, &ahb);
+    if (ahbRes != 0 || !ahb) {
+        GFXSTREAM_WARNING("AHardwareBuffer_allocate failed (err=%d) for %ux%u.", ahbRes,
+                          imageCreateInfo->extent.width, imageCreateInfo->extent.height);
+        return nullptr;
+    }
+    return ahb;
+}
+#endif
+
 // Precondition: sVkEmulation has valid device support info
 bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalMemoryInfo* info,
                                       Optional<uint64_t> deviceAlignment,
@@ -2091,12 +2155,24 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
         .buffer = nullptr,
     };
 #endif
+#ifdef __ANDROID__
+    // Declared here (not inside the AndroidAHB switch case) so it outlives the
+    // vkAllocateMemory call below: vk_append_struct() stores a pointer to it in
+    // allocInfoChain, which is only consumed at allocation time.
+    VkImportAndroidHardwareBufferInfoANDROID importAhbInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+        .pNext = nullptr,
+        .buffer = nullptr,
+    };
+#endif
 
     auto allocInfoChain = vk_make_chain_iterator(&allocInfo);
 
-    // HostAllocation mode uses host side allocation and should not add VkExportMemoryAllocateInfo
+    // HostAllocation mode uses host side allocation and should not add VkExportMemoryAllocateInfo.
+    // AndroidAHB mode uses AHardwareBuffer_allocate + import instead of export (see switch below).
     if (mDeviceInfo.supportsExternalMemoryExport &&
-        getExternalMemoryMode() != ExternalMemory::Mode::HostAllocation) {
+        getExternalMemoryMode() != ExternalMemory::Mode::HostAllocation &&
+        getExternalMemoryMode() != ExternalMemory::Mode::AndroidAHB) {
         exportAi.handleTypes =
             static_cast<VkExternalMemoryHandleTypeFlags>(getDefaultExternalMemoryHandleType());
 
@@ -2181,7 +2257,7 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
                 // So, do server-side allocation first, then import to Vulkan.
                 // Note: External memory is only supported for ColorBuffers, in this case.
                 auto cbInfoPtr = *colorBufferInfo;
-                std::string bufferName = "VkColorBuffer-" + cbInfoPtr->handle;
+                std::string bufferName = std::string("VkColorBuffer-") + std::to_string(cbInfoPtr->handle);
                 auto screenStreamBuffer = gfxstream::qnx::createScreenStreamBuffer(
                     cbInfoPtr->width, cbInfoPtr->height, cbInfoPtr->format, bufferName);
                 if (!screenStreamBuffer) {
@@ -2256,6 +2332,80 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
             break;
         }
 #endif
+        case ExternalMemory::Mode::AndroidAHB: {
+#ifdef __ANDROID__
+            // Prefer allocating the AHardwareBuffer via Gralloc and import to work around
+            // Vulkan drivers which are unable to export until after `vkBindImageMemory()`
+            // (e.g. b/516865218). AHB allocate+import is the standard path on Android and
+            // works on both mobile GPUs and the affected drivers. If any step below fails,
+            // we break and fall back to the default (non-AHB) allocation path.
+            if (colorBufferInfo) {
+                auto cbInfoPtr = *colorBufferInfo;
+
+                AHardwareBuffer* ahb = allocAhb(&cbInfoPtr->imageCreateInfoShallow);
+                if (!ahb) {
+                    GFXSTREAM_WARNING(
+                        "Falling back to non-exportable allocation for ColorBuffer %u (%ux%u).",
+                        cbInfoPtr->handle, cbInfoPtr->width, cbInfoPtr->height);
+                    break;
+                }
+
+                // Query Vulkan properties of the AHB
+                VkAndroidHardwareBufferPropertiesANDROID ahbProps = {
+                    .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+                };
+                VkResult propsRes = vk->vkGetAndroidHardwareBufferPropertiesANDROID(
+                    mDevice, ahb, &ahbProps);
+                if (propsRes != VK_SUCCESS) {
+                    GFXSTREAM_WARNING(
+                        "vkGetAndroidHardwareBufferPropertiesANDROID failed: %s. "
+                        "Falling back to non-exportable allocation.",
+                        string_VkResult(propsRes));
+                    AHardwareBuffer_release(ahb);
+                    break;
+                }
+
+                // Find a memory type that satisfies both the image and AHB requirements
+                uint32_t combinedBits = ahbProps.memoryTypeBits &
+                                        cbInfoPtr->imageMemReqs.memoryTypeBits;
+                if (!combinedBits) {
+                    GFXSTREAM_WARNING(
+                        "No common memory type for AHB (0x%x) and image (0x%x). "
+                        "Falling back to non-exportable allocation.",
+                        ahbProps.memoryTypeBits, cbInfoPtr->imageMemReqs.memoryTypeBits);
+                    AHardwareBuffer_release(ahb);
+                    break;
+                }
+
+                // Pick a device-local memory type from the combined bits
+                info->typeIndex = getValidMemoryTypeIndex(combinedBits, cbInfoPtr->memoryProperty);
+                allocInfo.memoryTypeIndex = info->typeIndex;
+                info->size = ahbProps.allocationSize;
+                allocInfo.allocationSize = ahbProps.allocationSize;
+
+                // Chain the import info (declared at function scope above so it outlives
+                // the vkAllocateMemory call that consumes allocInfoChain).
+                importAhbInfo.buffer = ahb;
+                vk_append_struct(&allocInfoChain, &importAhbInfo);
+
+                // Store the AHB handle for lifetime management (released in freeExternalMemoryLocked)
+                info->handleInfo = ExternalHandleInfo{
+                    .handle = reinterpret_cast<ExternalHandleType>(ahb),
+                    .streamHandleType = STREAM_HANDLE_TYPE_PLATFORM_AHB,
+                };
+                cbInfoPtr->externalMemoryCompatible = true;
+
+                GFXSTREAM_DEBUG(
+                    "ColorBuffer %u: imported AHB (%ux%u, format=%s) into Vulkan "
+                    "(memoryTypeIndex=%u, size=%" PRIu64 ")",
+                    cbInfoPtr->handle, cbInfoPtr->width, cbInfoPtr->height,
+                    string_VkFormat(cbInfoPtr->imageCreateInfoShallow.format), info->typeIndex,
+                    (uint64_t)ahbProps.allocationSize);
+            }
+#endif
+            break;
+        }
+
         default:
             // The default behavior is exporting the memory using some getMemory() function
             // interface after allocation.
@@ -2382,20 +2532,28 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
 
         case ExternalMemory::Mode::AndroidAHB: {
 #ifdef __ANDROID__
-            VkMemoryGetAndroidHardwareBufferInfoANDROID getAhbInfo = {
-                .sType = VK_STRUCTURE_TYPE_MEMORY_GET_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
-                .pNext = nullptr,
-                .memory = info->memory,
-            };
-            AHardwareBuffer* exportHandle =
-                static_cast<AHardwareBuffer*>(reinterpret_cast<void*>(info->handleInfo->handle));
-            exportRes =
-                vk->vkGetMemoryAndroidHardwareBufferANDROID(mDevice, &getAhbInfo, &exportHandle);
-            validHandle = (VK_SUCCESS == exportRes) && (NULL != exportHandle);
-            info->handleInfo = ExternalHandleInfo{
-                .handle = reinterpret_cast<ExternalHandleType>(exportHandle),
-                .streamHandleType = STREAM_HANDLE_TYPE_PLATFORM_AHB,
-            };
+            // If the AHB was already allocated and imported (via AHardwareBuffer_allocate
+            // in the pre-allocation switch above), handleInfo is already set. Skip export.
+            if (info->handleInfo &&
+                info->handleInfo->streamHandleType == STREAM_HANDLE_TYPE_PLATFORM_AHB) {
+                validHandle = true;
+                exportRes = VK_SUCCESS;
+            } else {
+                // Fallback: use the old export path if AHB import wasn't used
+                VkMemoryGetAndroidHardwareBufferInfoANDROID getAhbInfo = {
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_GET_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+                    .pNext = nullptr,
+                    .memory = info->memory,
+                };
+                AHardwareBuffer* exportHandle = nullptr;
+                exportRes =
+                    vk->vkGetMemoryAndroidHardwareBufferANDROID(mDevice, &getAhbInfo, &exportHandle);
+                validHandle = (VK_SUCCESS == exportRes) && (NULL != exportHandle);
+                info->handleInfo = ExternalHandleInfo{
+                    .handle = reinterpret_cast<ExternalHandleType>(exportHandle),
+                    .streamHandleType = STREAM_HANDLE_TYPE_PLATFORM_AHB,
+                };
+            }
 #endif
             break;
         }
@@ -3495,7 +3653,7 @@ bool VkEmulation::readColorBufferPixelsScaledCpu(uint32_t colorBufferHandle, int
     const uint64_t readbackPixelsSize = readbackWidth * readbackHeight * readbackBpp;
 
     const uint32_t outBpp = (pixelsFormat == GfxstreamFormat::R8G8B8_UNORM) ? 3 : 4;
-    const uint64_t outPixelsSize = (uint64_t)pixelsWidth * (uint64_t)pixelsHeight * outBpp;
+    const uint64_t outPixelsSize = static_cast<uint64_t>(pixelsWidth) * pixelsHeight * outBpp;
     if (readbackBpp == outBpp && pixelsRotation == 0 && readbackPixelsSize == outPixelsSize) {
         // Simple 1-1 readback case
         return readColorBufferToBytesLocked(colorBufferHandle, 0, 0, pixelsWidth, pixelsHeight, outPixels, outPixelsSize);
@@ -3509,7 +3667,7 @@ bool VkEmulation::readColorBufferPixelsScaledCpu(uint32_t colorBufferHandle, int
                                       readback_r8g8b8a8.data(), readback_r8g8b8a8.size())) {
         // Could not readback, cannot continue for resizing
         GFXSTREAM_ERROR("%s: Failed to readback color buffer %d (%" PRIu64 "x%" PRIu64 ", %s)",
-                        colorBufferHandle, readbackWidth, readbackHeight,
+                        __func__, colorBufferHandle, readbackWidth, readbackHeight,
                         ToString(colorBufferInfo->format).c_str());
         return false;
     }
@@ -3528,7 +3686,7 @@ bool VkEmulation::readColorBufferPixelsScaledCpu(uint32_t colorBufferHandle, int
 
         if (readbackWidth != readbackTargetWidth || readbackHeight != readbackTargetHeight) {
             std::vector<uint8_t> resized_readback_r8g8b8a8;
-            resized_readback_r8g8b8a8.resize((uint64_t)pixelsWidth * (uint64_t)pixelsHeight * 4);
+            resized_readback_r8g8b8a8.resize(static_cast<uint64_t>(pixelsWidth) * pixelsHeight * 4);
 
             // Resizing only supports RGBA sources for now
             if (!ResizeRGBAImage(readback_r8g8b8a8.data(), readbackWidth, readbackHeight,
@@ -3541,7 +3699,7 @@ bool VkEmulation::readColorBufferPixelsScaledCpu(uint32_t colorBufferHandle, int
                 return false;
             }
 
-            readback_r8g8b8a8 = resized_readback_r8g8b8a8;
+            readback_r8g8b8a8 = std::move(resized_readback_r8g8b8a8);
             readbackWidth = readbackTargetWidth;
             readbackHeight = readbackTargetHeight;
         }
@@ -4479,6 +4637,13 @@ bool VkEmulation::readBufferToBytes(uint32_t bufferHandle, uint64_t offset, uint
         return false;
     }
 
+    if (offset > bufferInfo->size || size > bufferInfo->size - offset) {
+        GFXSTREAM_ERROR("Failed to read from Buffer:%d, [offset %" PRIu64 ", size %" PRIu64
+                        "] out of range of buffer size %" PRIu64 ".",
+                        bufferHandle, offset, size, bufferInfo->size);
+        return false;
+    }
+
     const auto& stagingBufferInfo = mStaging;
     if (size > stagingBufferInfo.mAllocationSize) {
         GFXSTREAM_ERROR("Failed to read from Buffer:%d, staging buffer too small.", bufferHandle);
@@ -4562,6 +4727,13 @@ bool VkEmulation::updateBufferFromBytes(uint32_t bufferHandle, uint64_t offset, 
     auto bufferInfo = gfxstream::base::find(mBuffers, bufferHandle);
     if (!bufferInfo) {
         GFXSTREAM_ERROR("Failed to update Buffer:%d, not found.", bufferHandle);
+        return false;
+    }
+
+    if (offset > bufferInfo->size || size > bufferInfo->size - offset) {
+        GFXSTREAM_ERROR("Failed to update Buffer:%d, [offset %" PRIu64 ", size %" PRIu64
+                        "] out of range of buffer size %" PRIu64 ".",
+                        bufferHandle, offset, size, bufferInfo->size);
         return false;
     }
 
