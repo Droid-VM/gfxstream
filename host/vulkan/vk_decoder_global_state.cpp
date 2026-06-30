@@ -3058,6 +3058,18 @@ class VkDecoderGlobalState::Impl {
             return VK_ERROR_OUT_OF_HOST_MEMORY;
         }
 
+        // Change creation parameters before the validation checks below as the
+        // creation format and its device properties may change
+        const bool needDecompression = deviceInfo->needEmulatedDecompression(pCreateInfo->format);
+        std::unique_ptr<CompressedImageInfo> cmpInfo = nullptr;
+        VkImageCreateInfo decompInfo;
+        if (needDecompression) {
+            cmpInfo = std::make_unique<CompressedImageInfo>(device, *pCreateInfo,
+                                                            deviceInfo->decompPipelines.get());
+            decompInfo = cmpInfo->getOutputCreateInfo(*pCreateInfo);
+            pCreateInfo = &decompInfo;
+        }
+
 #ifdef __APPLE__
         // TODO(b/438924843) this is probably not optimal as it might slow down image creation a
         // bit. Not validating the dimensions seems to be only fatal on macOS, and can create false
@@ -3084,8 +3096,10 @@ class VkDecoderGlobalState::Impl {
 
             if (res != VK_SUCCESS) {
                 GFXSTREAM_WARNING(
-                    "vkCreateImage: vkGetPhysicalDeviceImageFormatProperties failed with %s",
-                    string_VkResult(res));
+                    "vkCreateImage: vkGetPhysicalDeviceImageFormatProperties failed with %s on "
+                    "format %s[%d]",
+                    string_VkResult(res), string_VkFormat(pCreateInfo->format),
+                    pCreateInfo->format);
                 return VK_ERROR_VALIDATION_FAILED_EXT;
             }
 
@@ -3102,16 +3116,6 @@ class VkDecoderGlobalState::Impl {
             }
         }
 #endif
-
-        const bool needDecompression = deviceInfo->needEmulatedDecompression(pCreateInfo->format);
-        std::unique_ptr<CompressedImageInfo> cmpInfo = nullptr;
-        VkImageCreateInfo decompInfo;
-        if (needDecompression) {
-            cmpInfo = std::make_unique<CompressedImageInfo>(device, *pCreateInfo,
-                                                            deviceInfo->decompPipelines.get());
-            decompInfo = cmpInfo->getOutputCreateInfo(*pCreateInfo);
-            pCreateInfo = &decompInfo;
-        }
 
         std::unique_ptr<AndroidNativeBufferInfo> anbInfo = nullptr;
         const VkNativeBufferANDROID* nativeBufferANDROID =
