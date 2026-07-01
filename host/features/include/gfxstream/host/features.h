@@ -449,6 +449,11 @@ struct FeatureSet {
         " not related to the host vulkan level available or used.",
         &map,
     };
+    U64FeatureInfo VulkanMaxSafeHeapSize = {
+        "VulkanMaxSafeHeapSize",
+        "If set to a non-zero value, limits the memory heap size reported to the guest (in bytes).",
+        &map,
+    };
 };
 
 #define GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(set, feature, condition) \
