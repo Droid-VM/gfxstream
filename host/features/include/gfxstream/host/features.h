@@ -32,7 +32,8 @@ using FeatureMap = std::map<std::string, FeatureInfoBase*>;
 // The potential types for the "value" of a given feature
 using StringFeatureValue = std::optional<std::string>;
 using U32FeatureValue = std::optional<uint32_t>;
-using FeatureValue = std::variant<bool, StringFeatureValue, U32FeatureValue>;
+using U64FeatureValue = std::optional<uint64_t>;
+using FeatureValue = std::variant<bool, StringFeatureValue, U32FeatureValue, U64FeatureValue>;
 
 class FeatureInfoBase {
    public:
@@ -96,12 +97,22 @@ class U32FeatureInfo : public FeatureInfoBase {
     std::string getValueReadable() const override;
 };
 
+class U64FeatureInfo : public FeatureInfoBase {
+   public:
+    U64FeatureInfo(std::string_view name, std::string_view description, FeatureMap* map)
+        : FeatureInfoBase(name, description, map, U64FeatureValue(std::nullopt)) {}
+
+    U64FeatureValue getValue() const { return std::get<U64FeatureValue>(value); }
+    void setValue(uint64_t val) { value = U64FeatureValue(val); }
+
+    bool parseValue(std::string_view strValue) override;
+    std::string getValueReadable() const override;
+};
+
 class VulkanVersionFeatureInfo : public U32FeatureInfo {
    public:
     VulkanVersionFeatureInfo(std::string_view name, std::string_view description, FeatureMap* map)
         : U32FeatureInfo(name, description, map) {}
-
-    U32FeatureValue getValue() const { return std::get<U32FeatureValue>(value); }
 
     bool parseValue(std::string_view strValue) override;
     std::string getValueReadable() const override;
