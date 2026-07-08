@@ -160,7 +160,7 @@ public:
 
         mFb->readColorBuffer(
             mColorBuffer, 0, 0, mWidth, mHeight,
-            GfxstreamFormat::R8G8B8A8_UNORM, forRead.data());
+            GfxstreamFormat::R8G8B8A8_UNORM, forRead.data(), forRead.size());
 
         EXPECT_TRUE(
             ImageMatches(mWidth, mHeight, 4, mWidth, targetBuffer.data(), forRead.data()));

@@ -119,6 +119,7 @@ cc_defaults {
         "libgfxstream_host_tracing",
         "libgfxstream_host_gles2_dec",
         "libgfxstream_host_glsnapshot",
+        "libgfxstream_host_address_space",
         "libgfxstream_host_vulkan_cereal",
     ],
     shared_libs: [
@@ -201,6 +202,7 @@ cc_test_host {
         "libgfxstream_host_snapshot",
         "libgfxstream_host_test_support",
         "libgfxstream_host_vulkan_server",
+        "libgfxstream_host_address_space",
         "libgfxstream_oswindow_test_support",
         "libgmock",
     ],

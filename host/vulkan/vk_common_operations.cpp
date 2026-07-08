@@ -3029,11 +3029,12 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
 
     // Requesting invalid texture sizes can crash some drivers, early out to gracefully handle
     // the errors and avoid total emulator crash.
-    if (width > mDeviceInfo.physdevProps.limits.maxFramebufferWidth ||
+    if (width == 0 || width > mDeviceInfo.physdevProps.limits.maxFramebufferWidth || height == 0 ||
         height > mDeviceInfo.physdevProps.limits.maxFramebufferHeight) {
         GFXSTREAM_ERROR(
-            "%s: Cannot create color buffer(%u) with size '%u x %u', driver limits: '%u x %u'",
-            __func__, colorBufferHandle, width, height,
+            "%s: Cannot create color buffer(%u) with size '%u x %u' and format '%s', driver "
+            "limits: '%u x %u'",
+            __func__, colorBufferHandle, width, height, ToString(format).c_str(),
             mDeviceInfo.physdevProps.limits.maxFramebufferWidth,
             mDeviceInfo.physdevProps.limits.maxFramebufferHeight);
         return false;
@@ -3774,7 +3775,7 @@ bool VkEmulation::readColorBufferPixelsScaledGpu(uint32_t colorBufferHandle, int
 
     // Check if we need to stage to GPU
     const int outBpp = (pixelsFormat == GfxstreamFormat::R8G8B8_UNORM) ? 3 : 4;
-    const uint64_t outPixelsSize = outBpp * pixelsWidth * pixelsHeight;
+    const uint64_t outPixelsSize = (uint64_t)outBpp * (uint64_t)pixelsWidth * (uint64_t)pixelsHeight;
     const int readbackBpp = 4;
     int readbackWidth = sourceCbInfo->width;
     int readbackHeight = sourceCbInfo->height;

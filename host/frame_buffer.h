@@ -312,7 +312,7 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
     AsyncResult composeWithCallback(uint32_t bufferSize, void* buffer,
                              Post::CompletionCallback callback);
 
-    void onSave(Stream* stream,
+    bool onSave(Stream* stream,
                 const ITextureSaverPtr& textureSaver);
     bool onLoad(Stream* stream,
                 const ITextureLoaderPtr& textureLoader);

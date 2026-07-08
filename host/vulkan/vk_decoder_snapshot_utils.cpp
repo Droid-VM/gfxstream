@@ -54,16 +54,16 @@ constexpr uint32_t kBadImageSnapshot = 0xbaadbeef;
 constexpr uint32_t kGoodImageSnapshot = 0x900df00d;
 }  // namespace
 
-void saveImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage image,
+bool saveImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage image,
                       const ImageInfo* imageInfo) {
     if (imageInfo->layout == VK_IMAGE_LAYOUT_UNDEFINED) {
         stream->putBe32(kBadImageSnapshot);
-        return;
+        return true;
     }
     // TODO(b/333936705): snapshot multi-sample images
     if (imageInfo->imageCreateInfoShallow.samples != VK_SAMPLE_COUNT_1_BIT) {
         stream->putBe32(kBadImageSnapshot);
-        return;
+        return true;
     }
 
     VulkanDispatch* dispatch = stateBlock->deviceDispatch;
@@ -73,7 +73,7 @@ void saveImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
     if (!getFormatTransferInfo(imageCreateInfo.format, imageCreateInfo.extent, &transferInfo) ||
         !transferInfo.stagingBufferCopySize) {
         stream->putBe32(kBadImageSnapshot);
-        return;
+        return true;
     }
     VkDeviceSize stagingBufferSize = transferInfo.stagingBufferCopySize;
 
@@ -123,8 +123,11 @@ void saveImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
         dispatch->vkBindBufferMemory(stateBlock->device, readbackBuffer, readbackMemory, 0));
 
     void* mapped = nullptr;
-    VK_CHECK(dispatch->vkMapMemory(stateBlock->device, readbackMemory, 0, VK_WHOLE_SIZE,
-                                         VkMemoryMapFlags{}, &mapped));
+    if (dispatch->vkMapMemory(stateBlock->device, readbackMemory, 0, VK_WHOLE_SIZE,
+                                         VkMemoryMapFlags{}, &mapped) != VK_SUCCESS || mapped == nullptr) {
+        GFXSTREAM_ERROR("Failed to map memory for image snapshot save");
+        return false;
+    }
 
     for (uint32_t mipLevel = 0; mipLevel < imageInfo->imageCreateInfoShallow.mipLevels;
          mipLevel++) {
@@ -135,12 +138,14 @@ void saveImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
                 .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             };
             if (dispatch->vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-                GFXSTREAM_FATAL("Failed to start command buffer on snapshot save");
+                GFXSTREAM_ERROR("Failed to start command buffer on snapshot save");
+                return false;
             }
 
             VkExtent3D mipmapExtent = getMipmapExtent(imageCreateInfo.extent, mipLevel);
             if (!getFormatTransferInfo(imageCreateInfo.format, mipmapExtent, &transferInfo)) {
-                GFXSTREAM_FATAL("Failed to get transfer info for snapshot save");
+                GFXSTREAM_ERROR("Failed to get transfer info for snapshot save");
+                return false;
             }
             VkDeviceSize mipmapStagingBufferSize = transferInfo.stagingBufferCopySize;
             std::vector<VkBufferImageCopy>& bufferImageCopies = transferInfo.bufferImageCopies;
@@ -209,13 +214,14 @@ void saveImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
     dispatch->vkDestroyBuffer(stateBlock->device, readbackBuffer, nullptr);
     dispatch->vkFreeMemory(stateBlock->device, readbackMemory, nullptr);
     dispatch->vkFreeCommandBuffers(stateBlock->device, stateBlock->commandPool, 1, &commandBuffer);
+    return true;
 }
 
-void loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage image,
+bool loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage image,
                       const ImageInfo* imageInfo) {
     const bool validImage = (stream->getBe32() == kGoodImageSnapshot);
     if (!validImage) {
-        return;
+        return true;
     }
 
     VulkanDispatch* dispatch = stateBlock->deviceDispatch;
@@ -223,7 +229,7 @@ void loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
 
     TransferInfo transferInfo;
     if (!getFormatTransferInfo(imageCreateInfo.format, imageCreateInfo.extent, &transferInfo)) {
-        return;
+        return true;
     }
     VkDeviceSize stagingBufferSize = transferInfo.stagingBufferCopySize;
 
@@ -287,7 +293,7 @@ void loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
         dispatch->vkDestroyFence(stateBlock->device, fence, nullptr);
         dispatch->vkFreeCommandBuffers(stateBlock->device, stateBlock->commandPool, 1,
                                        &commandBuffer);
-        return;
+        return true;
     }
     VkBufferCreateInfo bufferCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -321,8 +327,11 @@ void loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
         dispatch->vkBindBufferMemory(stateBlock->device, stagingBuffer, stagingMemory, 0));
 
     void* mapped = nullptr;
-    VK_CHECK(dispatch->vkMapMemory(stateBlock->device, stagingMemory, 0, VK_WHOLE_SIZE,
-                                         VkMemoryMapFlags{}, &mapped));
+    if (dispatch->vkMapMemory(stateBlock->device, stagingMemory, 0, VK_WHOLE_SIZE,
+                                         VkMemoryMapFlags{}, &mapped) != VK_SUCCESS || mapped == nullptr) {
+        GFXSTREAM_ERROR("Failed to map memory for image snapshot load");
+        return false;
+    }
 
     for (uint32_t mipLevel = 0; mipLevel < imageInfo->imageCreateInfoShallow.mipLevels;
          mipLevel++) {
@@ -333,12 +342,14 @@ void loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
                 .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             };
             if (dispatch->vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-                GFXSTREAM_FATAL("Failed to start command buffer on snapshot save");
+                GFXSTREAM_ERROR("Failed to start command buffer on snapshot load");
+                return false;
             }
 
             VkExtent3D mipmapExtent = getMipmapExtent(imageCreateInfo.extent, mipLevel);
             if (!getFormatTransferInfo(imageCreateInfo.format, mipmapExtent, &transferInfo)) {
-                GFXSTREAM_FATAL("Failed to get transfer info for snapshot load");
+                GFXSTREAM_ERROR("Failed to get transfer info for snapshot load");
+                return false;
             }
 
             // Require the serialized size to match the expected per-mip transfer size.
@@ -408,14 +419,15 @@ void loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
     dispatch->vkDestroyBuffer(stateBlock->device, stagingBuffer, nullptr);
     dispatch->vkFreeMemory(stateBlock->device, stagingMemory, nullptr);
     dispatch->vkFreeCommandBuffers(stateBlock->device, stateBlock->commandPool, 1, &commandBuffer);
+    return true;
 }
 
-void saveBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuffer buffer,
+bool saveBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuffer buffer,
                        const BufferInfo* bufferInfo) {
     VkBufferUsageFlags requiredUsages =
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     if ((bufferInfo->usage & requiredUsages) != requiredUsages) {
-        return;
+        return true;
     }
     VulkanDispatch* dispatch = stateBlock->deviceDispatch;
     VkCommandBufferAllocateInfo allocInfo{
@@ -463,8 +475,11 @@ void saveBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuff
         dispatch->vkBindBufferMemory(stateBlock->device, readbackBuffer, readbackMemory, 0));
 
     void* mapped = nullptr;
-    VK_CHECK(dispatch->vkMapMemory(stateBlock->device, readbackMemory, 0, VK_WHOLE_SIZE,
-                                         VkMemoryMapFlags{}, &mapped));
+    if (dispatch->vkMapMemory(stateBlock->device, readbackMemory, 0, VK_WHOLE_SIZE,
+                                         VkMemoryMapFlags{}, &mapped) != VK_SUCCESS || mapped == nullptr) {
+        GFXSTREAM_ERROR("Failed to map memory for buffer snapshot save");
+        return false;
+    }
 
     VkBufferCopy bufferCopy = {
         .srcOffset = 0,
@@ -476,7 +491,8 @@ void saveBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuff
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
     };
     if (dispatch->vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-        GFXSTREAM_FATAL("Failed to start command buffer on snapshot save");
+        GFXSTREAM_ERROR("Failed to start command buffer on snapshot save");
+        return false;
     }
     dispatch->vkCmdCopyBuffer(commandBuffer, buffer, readbackBuffer, 1, &bufferCopy);
     VkBufferMemoryBarrier barrier{.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -510,6 +526,7 @@ void saveBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuff
     dispatch->vkDestroyBuffer(stateBlock->device, readbackBuffer, nullptr);
     dispatch->vkFreeMemory(stateBlock->device, readbackMemory, nullptr);
     dispatch->vkFreeCommandBuffers(stateBlock->device, stateBlock->commandPool, 1, &commandBuffer);
+    return true;
 }
 
 void setEventInQueue(StateBlock* stateBlock, VkEvent event, uint64_t eventflags) {
@@ -570,12 +587,12 @@ void signalSemaphore(StateBlock* stateBlock, VkSemaphore unboxed_semaphore) {
     dispatch->vkDestroyFence(stateBlock->device, fence, nullptr);
 }
 
-void loadBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuffer buffer,
+bool loadBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuffer buffer,
                        const BufferInfo* bufferInfo) {
     VkBufferUsageFlags requiredUsages =
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     if ((bufferInfo->usage & requiredUsages) != requiredUsages) {
-        return;
+        return true;
     }
     VulkanDispatch* dispatch = stateBlock->deviceDispatch;
     VkCommandBufferAllocateInfo allocInfo{
@@ -623,11 +640,15 @@ void loadBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuff
         dispatch->vkBindBufferMemory(stateBlock->device, stagingBuffer, stagingMemory, 0));
 
     void* mapped = nullptr;
-    VK_CHECK(dispatch->vkMapMemory(stateBlock->device, stagingMemory, 0, VK_WHOLE_SIZE,
-                                         VkMemoryMapFlags{}, &mapped));
+    if (dispatch->vkMapMemory(stateBlock->device, stagingMemory, 0, VK_WHOLE_SIZE,
+                                         VkMemoryMapFlags{}, &mapped) != VK_SUCCESS || mapped == nullptr) {
+        GFXSTREAM_ERROR("Failed to map memory for buffer snapshot load");
+        return false;
+    }
     size_t bufferSize = stream->getBe64();
     if (bufferSize != bufferInfo->size) {
-        GFXSTREAM_FATAL("Failed to read buffer on snapshot load");
+        GFXSTREAM_ERROR("Failed to read buffer on snapshot load");
+        return false;
     }
     stream->read(mapped, bufferInfo->size);
 
@@ -641,7 +662,8 @@ void loadBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuff
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
     };
     if (dispatch->vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-        GFXSTREAM_FATAL("Failed to start command buffer on snapshot load");
+        GFXSTREAM_ERROR("Failed to start command buffer on snapshot load");
+        return false;
     }
     dispatch->vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer, 1, &bufferCopy);
     VkBufferMemoryBarrier barrier{.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -673,6 +695,7 @@ void loadBufferContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkBuff
     dispatch->vkDestroyBuffer(stateBlock->device, stagingBuffer, nullptr);
     dispatch->vkFreeMemory(stateBlock->device, stagingMemory, nullptr);
     dispatch->vkFreeCommandBuffers(stateBlock->device, stateBlock->commandPool, 1, &commandBuffer);
+    return true;
 }
 
 }  // namespace vk

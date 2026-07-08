@@ -18,6 +18,10 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <thread>
+#include <chrono>
+#include <future>
+#include "render_channel_impl.h"
 
 #include "render_thread_info.h"
 #include "gfxstream/common/testing/graphics_test_environment.h"
@@ -889,6 +893,83 @@ TEST_F(FrameBufferTest, ComposeMultiDisplay) {
     mFb->destroyDisplay(ids[1]);
     mFb->destroyDisplay(ids[2]);
     mFb->destroyEmulatedEglWindowSurface(surface);
+}
+
+class RenderThreadDeadlockTest : public ::testing::Test {
+  protected:
+    static void SetUpTestSuite() {
+        ASSERT_THAT(gfxstream::testing::SetupGraphicsTestEnvironment(), ::testing::IsTrue())
+            << "Failed to configure graphics test environment!";
+    }
+
+    void SetUp() override {
+        const EGLDispatch* egl = LazyLoadedEGLDispatch::get();
+        ASSERT_NE(nullptr, egl);
+        ASSERT_NE(nullptr, LazyLoadedGLESv2Dispatch::get());
+
+        bool useHostGpu = shouldUseHostGpu();
+
+        FeatureSet features = {};
+        features.EglOnEgl.setEnabled(!useHostGpu);
+        features.Vulkan.setEnabled(true);
+        features.VulkanQueueSubmitWithCommands.setEnabled(true);
+
+        gfxstream::base::setEnvironmentVariable("ANDROID_EMU_HEADLESS", "1");
+        EXPECT_TRUE(FrameBuffer::initialize(256, 256, features, false));
+    }
+
+    void TearDown() override {
+        FrameBuffer::finalize();
+    }
+};
+
+TEST_F(RenderThreadDeadlockTest, ReproDeadlockOnTeardown) {
+    auto fb = FrameBuffer::getFB();
+    ASSERT_NE(nullptr, fb);
+    if (!fb->hasEmulationVk()) {
+        GTEST_SKIP() << "Vulkan emulation not supported on this host.";
+    }
+
+    const uint32_t contextId = 12345;
+    fb->createGraphicsProcessResources(contextId);
+
+    auto channel = std::make_unique<RenderChannelImpl>(nullptr, contextId);
+    ASSERT_NE(nullptr, channel->renderThread());
+
+    RenderChannel::Buffer buffer;
+    uint32_t flags = 0;
+    uint32_t opcode = 200000000; // OP_vkCreateInstance
+    uint32_t packetLen = 12;
+    uint32_t seqno = 2;
+
+    buffer.resize(16);
+    std::memcpy(buffer.data(), &flags, sizeof(flags));
+    std::memcpy(buffer.data() + 4, &opcode, sizeof(opcode));
+    std::memcpy(buffer.data() + 8, &packetLen, sizeof(packetLen));
+    std::memcpy(buffer.data() + 12, &seqno, sizeof(seqno));
+
+    channel->tryWrite(std::move(buffer));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    std::promise<void> teardownPromise;
+    std::future<void> teardownFuture = teardownPromise.get_future();
+
+    std::thread teardownThread([&]() {
+        channel->stop();
+        channel.reset();
+        teardownPromise.set_value();
+    });
+
+    std::future_status status = teardownFuture.wait_for(std::chrono::seconds(3));
+    if (status == std::future_status::timeout) {
+        teardownThread.detach();
+        ADD_FAILURE() << "Deadlock detected! Channel teardown timed out after 3 seconds.";
+    } else {
+        teardownThread.join();
+    }
+
+    fb->removeGraphicsProcessResources(contextId);
 }
 
 }  // namespace

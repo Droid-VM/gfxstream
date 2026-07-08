@@ -490,7 +490,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     AsyncResult composeWithCallback(uint32_t bufferSize, void* buffer,
                                     Post::CompletionCallback callback);
 
-    void onSave(gfxstream::Stream* stream, const ITextureSaverPtr& textureSaver);
+    bool onSave(gfxstream::Stream* stream, const ITextureSaverPtr& textureSaver);
     bool onLoad(gfxstream::Stream* stream, const ITextureLoaderPtr& textureLoader);
 
     // lock and unlock handles (EmulatedEglContext, ColorBuffer, EmulatedEglWindowSurface)
@@ -3014,14 +3014,26 @@ int FrameBuffer::Impl::getScreenshot(unsigned int nChannels, unsigned int* width
         *height = screenHeight;
     }
 
-    int needed =
-        useSnipping ? (nChannels * rect.size.w * rect.size.h) : (nChannels * (*width) * (*height));
+    // Clamp to something the GL/Vk backends can actually allocate, and
+    // compute the byte count in 64-bit so a hostile desiredWidth/Height
+    // (poisoned via rcSetDisplayPose + unauthenticated gRPC) cannot wrap
+    // `needed` and bypass the size check below.
+    constexpr unsigned int kMaxScreenshotDim = 1 << 16;
+    if (*width  <= 0 || *width  > kMaxScreenshotDim ||
+        *height <= 0 || *height > kMaxScreenshotDim) {
+        *cPixels = 0;
+        return -1;
+    }
 
-    if (*cPixels < (size_t)needed) {
-        *cPixels = needed;
+    const uint64_t needed64 =
+        useSnipping ? (uint64_t)nChannels * rect.size.w * rect.size.h
+                    : (uint64_t)nChannels * (*width) * (*height);
+
+    if (needed64 > SIZE_MAX || *cPixels < (size_t)needed64) {
+        *cPixels = needed64;
         return Renderer::GET_SCREENSHOT_RESULT_PIXELS_SIZE;
     }
-    *cPixels = needed;
+    *cPixels = needed64;
     if (desiredRotation == GFXSTREAM_ROTATION_90 || desiredRotation == GFXSTREAM_ROTATION_270) {
         std::swap(*width, *height);
         std::swap(screenWidth, screenHeight);
@@ -3230,7 +3242,7 @@ AsyncResult FrameBuffer::Impl::composeWithCallback(uint32_t bufferSize, void* bu
     }
 }
 
-void FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSaver) {
+bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSaver) {
     // Things we do not need to snapshot:
     //     m_eglSurface
     //     m_eglContext
@@ -3277,6 +3289,21 @@ void FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
                        s->putBe32(pair.second.dpiX);
                        s->putBe32(pair.second.dpiY);
                    });
+
+    // Save display ids created through createDisplay
+    std::vector<uint32_t> displayIds;
+    int32_t currentId = -1;
+    uint32_t nextId;
+    while (get_gfxstream_multi_display_operations().get_next_display_info(
+        currentId, &nextId, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+        displayIds.push_back(nextId);
+        currentId = nextId;
+    }
+
+    stream->putBe32(displayIds.size());
+    for (uint32_t id : displayIds) {
+        stream->putBe32(id);
+    }
 
     stream->putBe32(m_useSubWindow);
     stream->putBe32(/*Obsolete m_eglContextInitialized =*/1);
@@ -3342,7 +3369,10 @@ void FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
 
     // Save Vulkan state
     if (m_features.VulkanSnapshots.enabled() && vk::VkDecoderGlobalState::get()) {
-        vk::VkDecoderGlobalState::get()->save(stream);
+        bool res = vk::VkDecoderGlobalState::get()->save(stream);
+        if (!res) {
+            return false;
+        }
     }
 
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -3361,6 +3391,7 @@ void FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
         EmulatedEglFenceSync::onSave(stream);
     }
 #endif
+    return true;
 }
 
 bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureLoader) {
@@ -3498,6 +3529,12 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
                        int dpiY = static_cast<int>(s->getBe32());
                        return {idx, {w, h, dpiX, dpiY}};
                    });
+
+    uint32_t numDisplays = stream->getBe32();
+    for (uint32_t i = 0; i < numDisplays; ++i) {
+        uint32_t displayId = stream->getBe32();
+        get_gfxstream_multi_display_operations().create_display(&displayId);
+    }
 
     // TODO: resize the window
     //
@@ -5262,8 +5299,8 @@ AsyncResult FrameBuffer::composeWithCallback(uint32_t bufferSize, void* buffer,
     return mImpl->composeWithCallback(bufferSize, buffer, callback);
 }
 
-void FrameBuffer::onSave(gfxstream::Stream* stream, const ITextureSaverPtr& textureSaver) {
-    mImpl->onSave(stream, textureSaver);
+bool FrameBuffer::onSave(gfxstream::Stream* stream, const ITextureSaverPtr& textureSaver) {
+    return mImpl->onSave(stream, textureSaver);
 }
 
 bool FrameBuffer::onLoad(gfxstream::Stream* stream, const ITextureLoaderPtr& textureLoader) {

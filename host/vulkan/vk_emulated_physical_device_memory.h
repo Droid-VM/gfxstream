@@ -30,14 +30,9 @@ namespace vk {
 // guest, and helps to convert between both.
 class EmulatedPhysicalDeviceMemoryProperties {
    public:
-    // Hide any bogus heap sizes from bad drivers with a reasonable default that will not
-    // break the bank on 32-bit userspaces.
-    static constexpr VkDeviceSize kDefaultMaxSafeHeapSize = 2ULL * 1024ULL * 1024ULL * 1024ULL;
-
     EmulatedPhysicalDeviceMemoryProperties(const VkPhysicalDeviceMemoryProperties& host,
                                            uint32_t hostColorBufferMemoryTypeIndex,
-                                           const gfxstream::host::FeatureSet& features,
-                                           VkDeviceSize maxSafeHeapSize = kDefaultMaxSafeHeapSize);
+                                           const gfxstream::host::FeatureSet& features);
 
     struct HostMemoryInfo {
         uint32_t index;
@@ -55,9 +50,7 @@ class EmulatedPhysicalDeviceMemoryProperties {
         return mHostMemoryProperties;
     }
 
-    uint32_t getGuestColorBufferMemoryTypeIndex() const {
-        return mGuestColorBufferMemoryTypeIndex;
-    }
+    uint32_t getGuestColorBufferMemoryTypeIndex() const { return mGuestColorBufferMemoryTypeIndex; }
 
     void transformToGuestMemoryRequirements(VkMemoryRequirements* hostMemoryRequirements) const;
 
@@ -66,7 +59,6 @@ class EmulatedPhysicalDeviceMemoryProperties {
         VkPhysicalDeviceMemoryBudgetPropertiesEXT* budgetProps) const;
 
    private:
-    VkDeviceSize mMaxSafeHeapSize;
     VkPhysicalDeviceMemoryProperties mGuestMemoryProperties;
     VkPhysicalDeviceMemoryProperties mHostMemoryProperties;
     uint32_t mGuestToHostMemoryTypeIndexMap[VK_MAX_MEMORY_TYPES];

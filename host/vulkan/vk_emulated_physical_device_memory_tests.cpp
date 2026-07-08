@@ -17,8 +17,8 @@
 
 #include <vector>
 
-#include "vk_emulated_physical_device_memory.h"
 #include "gfxstream/host/features.h"
+#include "vk_emulated_physical_device_memory.h"
 
 namespace gfxstream {
 namespace host {
@@ -259,6 +259,122 @@ TEST(VkGuestMemoryUtilsTest, VulkanAllocateDeviceMemoryOnly) {
     EXPECT_THAT(actualGuestMemoryProperties,
                 EqsVkPhysicalDeviceMemoryProperties(expectedGuestMemoryProperties));
 }
+
+TEST(VkGuestMemoryUtilsTest, VulkanMaxSafeHeapSizeUnset) {
+    const VkPhysicalDeviceMemoryProperties hostMemoryProperties = {
+        .memoryTypeCount = 1,
+        .memoryTypes =
+            {
+                {
+                    .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                    .heapIndex = 0,
+                },
+            },
+        .memoryHeapCount = 2,
+        .memoryHeaps =
+            {
+                {
+                    .size = 0x100000000ULL,  // 4 GB
+                    .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+                },
+                {
+                    .size = 0x200000000ULL,  // 8 GB
+                    .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+                },
+            },
+    };
+
+    gfxstream::host::FeatureSet features;
+    // VulkanMaxSafeHeapSize is left unset (default: zero, no limit)
+
+    EmulatedPhysicalDeviceMemoryProperties helper(hostMemoryProperties, 0, features);
+
+    const VkPhysicalDeviceMemoryProperties expectedGuestMemoryProperties = {
+        .memoryTypeCount = 1,
+        .memoryTypes =
+            {
+                {
+                    .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                    .heapIndex = 0,
+                },
+            },
+        .memoryHeapCount = 2,
+        .memoryHeaps =
+            {
+                {
+                    .size = 0x100000000ULL,
+                    .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+                },
+                {
+                    .size = 0x200000000ULL,
+                    .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+                },
+            },
+    };
+
+    const auto actualGuestMemoryProperties = helper.getGuestMemoryProperties();
+    EXPECT_THAT(actualGuestMemoryProperties,
+                EqsVkPhysicalDeviceMemoryProperties(expectedGuestMemoryProperties));
+}
+
+TEST(VkGuestMemoryUtilsTest, VulkanMaxSafeHeapSizeSet) {
+    const VkPhysicalDeviceMemoryProperties hostMemoryProperties = {
+        .memoryTypeCount = 1,
+        .memoryTypes =
+            {
+                {
+                    .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                    .heapIndex = 0,
+                },
+            },
+        .memoryHeapCount = 2,
+        .memoryHeaps =
+            {
+                {
+                    .size = 0x100000000ULL,  // 4 GB
+                    .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+                },
+                {
+                    .size = 0x200000000ULL,  // 8 GB
+                    .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+                },
+            },
+    };
+
+    gfxstream::host::FeatureSet features;
+    // Set limit to 3 GB (0xC0000000 bytes)
+    features.VulkanMaxSafeHeapSize.parseValue("0xC0000000");
+
+    EmulatedPhysicalDeviceMemoryProperties helper(hostMemoryProperties, 0, features);
+
+    const VkPhysicalDeviceMemoryProperties expectedGuestMemoryProperties = {
+        .memoryTypeCount = 1,
+        .memoryTypes =
+            {
+                {
+                    .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                    .heapIndex = 0,
+                },
+            },
+        .memoryHeapCount = 2,
+        .memoryHeaps =
+            {
+                {
+                    .size = 0xC0000000ULL,  // Limited to 3 GB
+                    .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+                },
+                {
+                    .size = 0xC0000000ULL,  // Limited to 3 GB
+                    .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+                },
+            },
+    };
+
+    const auto actualGuestMemoryProperties = helper.getGuestMemoryProperties();
+    EXPECT_THAT(actualGuestMemoryProperties,
+                EqsVkPhysicalDeviceMemoryProperties(expectedGuestMemoryProperties));
+}
+
 TEST(VkGuestMemoryUtilsTest, VulkanDisableCoherentMemoryAndEmulate) {
     const VkPhysicalDeviceMemoryProperties hostMemoryProperties = {
         .memoryTypeCount = 4,
@@ -406,39 +522,40 @@ TEST(VkGuestMemoryUtilsTest, VulkanAMDCoherentFlagsNotLeakedToGuest) {
     // Standard types (types 0-3):
     hostMemoryProperties.memoryTypes[0] = {.propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                                            .heapIndex = 1};
-    hostMemoryProperties.memoryTypes[1] = {.propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                           .heapIndex = 0};
+    hostMemoryProperties.memoryTypes[1] = {
+        .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        .heapIndex = 0};
     hostMemoryProperties.memoryTypes[2] = {.propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                            .heapIndex = 1};
     hostMemoryProperties.memoryTypes[3] = {.propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+                                                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                            VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
                                            .heapIndex = 0};
     // AMD-specific types (types 4-7) with DEVICE_COHERENT and DEVICE_UNCACHED:
-    hostMemoryProperties.memoryTypes[4] = {.propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-                                                             VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD |
-                                                             VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
-                                           .heapIndex = 1};
-    hostMemoryProperties.memoryTypes[5] = {.propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-                                                             VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD |
-                                                             VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
-                                           .heapIndex = 0};
-    hostMemoryProperties.memoryTypes[6] = {.propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-                                                             VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD |
-                                                             VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
-                                           .heapIndex = 1};
-    hostMemoryProperties.memoryTypes[7] = {.propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-                                                             VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
-                                                             VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD |
-                                                             VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
-                                           .heapIndex = 0};
+    hostMemoryProperties.memoryTypes[4] = {
+        .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                         VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD |
+                         VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
+        .heapIndex = 1};
+    hostMemoryProperties.memoryTypes[5] = {
+        .propertyFlags =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+            VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD | VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
+        .heapIndex = 0};
+    hostMemoryProperties.memoryTypes[6] = {
+        .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                         VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD |
+                         VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
+        .heapIndex = 1};
+    hostMemoryProperties.memoryTypes[7] = {
+        .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+                         VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD |
+                         VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
+        .heapIndex = 0};
 
     gfxstream::host::FeatureSet features;
     EmulatedPhysicalDeviceMemoryProperties helper(hostMemoryProperties, 0, features);
@@ -478,8 +595,7 @@ TEST(VkGuestMemoryUtilsTest, VulkanAMDCoherentFlagsNotLeakedToGuest) {
 }
 
 TEST(VkGuestMemoryUtilsTest, MemoryBudgetClampedToClampedGuestHeapSize) {
-    constexpr VkDeviceSize kMaxSafeHeapSize =
-        EmulatedPhysicalDeviceMemoryProperties::kDefaultMaxSafeHeapSize;
+    constexpr VkDeviceSize kMaxSafeHeapSize = 2ULL * 1024ULL * 1024ULL * 1024ULL;
 
     VkPhysicalDeviceMemoryProperties hostMemoryProperties = {};
     hostMemoryProperties.memoryHeapCount = 2;
@@ -491,6 +607,7 @@ TEST(VkGuestMemoryUtilsTest, MemoryBudgetClampedToClampedGuestHeapSize) {
                                            .heapIndex = 0};
 
     gfxstream::host::FeatureSet features;
+    features.VulkanMaxSafeHeapSize.setValue(kMaxSafeHeapSize);
     EmulatedPhysicalDeviceMemoryProperties helper(hostMemoryProperties, 0, features);
 
     ASSERT_EQ(helper.getGuestMemoryProperties().memoryHeaps[0].size, kMaxSafeHeapSize);

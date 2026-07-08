@@ -370,15 +370,15 @@ void RendererImpl::resumeAll() {
     repaintOpenGLDisplay();
 }
 
-void RendererImpl::save(gfxstream::Stream* stream,
+bool RendererImpl::save(gfxstream::Stream* stream,
                         const ITextureSaverPtr& textureSaver) {
     stream->putByte(mStopped);
     if (mStopped) {
-        return;
+        return true;
     }
     auto fb = FrameBuffer::getFB();
     assert(fb);
-    fb->onSave(stream, textureSaver);
+    return fb->onSave(stream, textureSaver);
 }
 
 bool RendererImpl::load(gfxstream::Stream* stream,

@@ -355,7 +355,8 @@ endfunction()
         target_link_libraries(
             Vulkan_unittests
             PUBLIC
-            "-framework AppKit")
+            "-framework AppKit"
+            "-framework OpenGL")
     endif()
     discover_tests(
             Vulkan_unittests
