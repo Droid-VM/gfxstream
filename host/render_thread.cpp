@@ -224,6 +224,7 @@ bool RenderThread::saveSnapshot(const SnapshotObjects& objects) {
 }
 
 void RenderThread::waitForFinished() {
+    mDecodersShouldStop.store(true, std::memory_order_relaxed);
     AutoLock lock(mLock);
     while (!mFinished.load(std::memory_order_relaxed)) {
         mFinishedSignal.wait(&lock);
