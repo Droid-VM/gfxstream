@@ -81,7 +81,7 @@ bool U32FeatureInfo::parseValue(std::string_view strValue) {
     uint32_t val;
     auto res = std::from_chars(strValue.data() + valueStart, strValue.data() + strValue.size(),
                                val, valueBase);
-    if (res.ec == std::errc()) {
+    if (res.ec == std::errc() && res.ptr == strValue.data() + strValue.size()) {
         value = U32FeatureValue(val);
         return true;
     }
@@ -95,8 +95,45 @@ std::string U32FeatureInfo::getValueReadable() const {
         return "(Unset)";
     }
 
-    // E.g. '123 (0x7B)'
+    // E.g. '123 (0x7b)'
     const uint32_t val = u32ValueOpt.value();
+    std::ostringstream oss;
+    oss << val << " (0x" << std::hex << val << ")";
+    return oss.str();
+}
+
+bool U64FeatureInfo::parseValue(std::string_view strValue) {
+    if (strValue.empty()) {
+        value = U64FeatureValue(std::nullopt);
+        return true;
+    }
+    int valueStart = 0;
+    int valueBase = 10;
+    // Check if the value is given as a hexadecimal value
+    if (strValue.size() > 2 && strValue[0] == '0' &&
+        (strValue[1] == 'x' || strValue[1] == 'X')) {
+        valueStart = 2;
+        valueBase = 16;
+    }
+    uint64_t val;
+    auto res = std::from_chars(strValue.data() + valueStart, strValue.data() + strValue.size(),
+                               val, valueBase);
+    if (res.ec == std::errc() && res.ptr == strValue.data() + strValue.size()) {
+        value = U64FeatureValue(val);
+        return true;
+    }
+    GFXSTREAM_ERROR("Cannot parse '%.*s' for feature '%s'", (int)strValue.size(), strValue.data(), name.c_str());
+    return false;
+}
+
+std::string U64FeatureInfo::getValueReadable() const {
+    auto u64ValueOpt = std::get<U64FeatureValue>(value);
+    if (!u64ValueOpt) {
+        return "(Unset)";
+    }
+
+    // E.g. '123 (0x7b)'
+    const uint64_t val = u64ValueOpt.value();
     std::ostringstream oss;
     oss << val << " (0x" << std::hex << val << ")";
     return oss.str();

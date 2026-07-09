@@ -27,6 +27,7 @@
 #include <GLES3/gl3.h>
 #include <GLES3/gl31.h>
 
+#include "gfxstream/host/address_space_operations.h"
 #include "gfxstream/host/dma_device.h"
 #include "gfxstream/host/vm_operations.h"
 #include "gfxstream/synchronization/Lock.h"
@@ -452,15 +453,14 @@ void GLESv2Decoder::s_glUnmapBufferDMA(void* self, GLenum target, GLintptr offse
 
 static std::pair<void*, GLsizeiptr> align_pointer_size(void* ptr, GLsizeiptr length)
 {
-    constexpr size_t kPageBits = 12;
-    constexpr size_t kPageSize = 1u << kPageBits;
-    constexpr size_t kPageOffsetMask = kPageSize - 1;
+    const size_t page_size = gfxstream::host::get_gfxstream_guest_page_size();
+    const size_t page_offset_mask = page_size - 1;
 
     uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-    uintptr_t page_offset = addr & kPageOffsetMask;
+    uintptr_t page_offset = addr & page_offset_mask;
 
     return { reinterpret_cast<void*>(addr - page_offset),
-             ((length + page_offset + kPageSize - 1) >> kPageBits) << kPageBits
+             (GLsizeiptr)((length + page_offset + page_size - 1) & ~page_offset_mask)
            };
 }
 

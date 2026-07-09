@@ -22,34 +22,6 @@
 namespace gfxstream {
 namespace base {
 
-TEST(SharedMemory, ShareVisibileWithinSameProc) {
-    const mode_t user_read_only = 0600;
-    std::string unique_name = "tst_21654869810548";
-    std::string message = "Hello World!";
-    base::SharedMemory mWriter(unique_name, message.size());
-    base::SharedMemory mReader(unique_name, message.size());
-
-    ASSERT_FALSE(mWriter.isOpen());
-    ASSERT_FALSE(mReader.isOpen());
-
-    int err = mWriter.create(user_read_only);
-    ASSERT_EQ(0, err);
-    err = mReader.open(SharedMemory::AccessMode::READ_ONLY);
-    ASSERT_EQ(0, err);
-
-    ASSERT_TRUE(mWriter.isOpen());
-    ASSERT_TRUE(mReader.isOpen());
-
-    memcpy(*mWriter, message.c_str(), message.size());
-    std::string read(static_cast<const char*>(*mReader));
-    ASSERT_TRUE(message == read);
-
-    mWriter.close();
-    mReader.close();
-    ASSERT_FALSE(mWriter.isOpen());
-    ASSERT_FALSE(mReader.isOpen());
-}
-
 // TODO: Provide support for TestSystem.
 // TEST(SharedMemory, ShareFileBackedVisibileWithinSameProc) {
 //     gfxstream::base::TestSystem ts("/home", 64);

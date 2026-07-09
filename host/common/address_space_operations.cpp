@@ -33,5 +33,13 @@ const address_space_device_control_ops &get_gfxstream_address_space_ops() {
     return gAddressSpaceOps;
 }
 
+uint32_t get_gfxstream_guest_page_size() {
+    if (const auto* hwFuncs = gAddressSpaceOps.control_get_hw_funcs()) {
+        return hwFuncs->getGuestPageSize();
+    }
+    // Fallback to default
+    return 4096;
+}
+
 }  // namespace host
 }  // namespace gfxstream

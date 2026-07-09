@@ -42,12 +42,14 @@ EmulatedPhysicalDeviceMemoryProperties::EmulatedPhysicalDeviceMemoryProperties(
     }
     mGuestColorBufferMemoryTypeIndex = hostColorBufferMemoryTypeIndex;
 
-    // Hide any bogus heap sizes from bad drivers with a reasonable default that will not
-    // break the bank on 32-bit userspaces.
-    static constexpr VkDeviceSize kMaxSafeHeapSize = 2ULL * 1024ULL * 1024ULL * 1024ULL;
-    for (uint32_t i = 0; i < mHostMemoryProperties.memoryHeapCount; i++) {
-        if (mGuestMemoryProperties.memoryHeaps[i].size > kMaxSafeHeapSize) {
-            mGuestMemoryProperties.memoryHeaps[i].size = kMaxSafeHeapSize;
+    // Limit max safe memory heap size if the VulkanMaxSafeHeapSize feature is set to a non-zero
+    // value.
+    const uint64_t maxSafeHeapSizeLimit = features.VulkanMaxSafeHeapSize.getValue().value_or(0);
+    if (maxSafeHeapSizeLimit > 0) {
+        for (uint32_t i = 0; i < mHostMemoryProperties.memoryHeapCount; i++) {
+            if (mGuestMemoryProperties.memoryHeaps[i].size > maxSafeHeapSizeLimit) {
+                mGuestMemoryProperties.memoryHeaps[i].size = maxSafeHeapSizeLimit;
+            }
         }
     }
 
@@ -81,10 +83,13 @@ EmulatedPhysicalDeviceMemoryProperties::EmulatedPhysicalDeviceMemoryProperties(
     // Let cached memory pretend as coherent on the guest side.
     if (features.VulkanDisableCoherentMemoryAndEmulate.enabled()) {
         for (uint32_t i = 0; i < mGuestMemoryProperties.memoryTypeCount; i++) {
-            if (mGuestMemoryProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
-                mGuestMemoryProperties.memoryTypes[i].propertyFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            if (mGuestMemoryProperties.memoryTypes[i].propertyFlags &
+                VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
+                mGuestMemoryProperties.memoryTypes[i].propertyFlags |=
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
             } else {
-                mGuestMemoryProperties.memoryTypes[i].propertyFlags &= ~(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                mGuestMemoryProperties.memoryTypes[i].propertyFlags &=
+                    ~(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
             }
         }
     }
@@ -130,8 +135,9 @@ EmulatedPhysicalDeviceMemoryProperties::EmulatedPhysicalDeviceMemoryProperties(
     // memory.
     if (features.VulkanUseDedicatedAhbMemoryType.enabled()) {
         if (mGuestMemoryProperties.memoryTypeCount == VK_MAX_MEMORY_TYPES) {
-            GFXSTREAM_FATAL("Unable to create emulated AHB memory type because VK_MAX_MEMORY_TYPES "
-                            "already in use.");
+            GFXSTREAM_FATAL(
+                "Unable to create emulated AHB memory type because VK_MAX_MEMORY_TYPES "
+                "already in use.");
         }
 
         uint32_t ahbMemoryTypeIndex = mGuestMemoryProperties.memoryTypeCount;
@@ -196,6 +202,22 @@ void EmulatedPhysicalDeviceMemoryProperties::transformToGuestMemoryRequirements(
     }
 
     memoryRequirements->memoryTypeBits = guestMemoryTypeBits;
+}
+
+void EmulatedPhysicalDeviceMemoryProperties::clampMemoryBudgetToGuestHeapSizes(
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT* budgetProps) const {
+    if (budgetProps == nullptr) {
+        return;
+    }
+    for (uint32_t i = 0; i < mGuestMemoryProperties.memoryHeapCount; i++) {
+        const VkDeviceSize heapSize = mGuestMemoryProperties.memoryHeaps[i].size;
+        if (budgetProps->heapBudget[i] > heapSize) {
+            budgetProps->heapBudget[i] = heapSize;
+        }
+        if (budgetProps->heapUsage[i] > heapSize) {
+            budgetProps->heapUsage[i] = heapSize;
+        }
+    }
 }
 
 }  // namespace vk

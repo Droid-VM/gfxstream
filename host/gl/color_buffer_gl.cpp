@@ -638,7 +638,7 @@ bool ColorBufferGl::readPixelsScaled(int width, int height, int rotation, const 
         std::vector<uint8_t> tmpPixels;
         void* readPixelsDst = pixels;
         if (needConvert4To3Channel) {
-            tmpPixels.resize(width * height * 4);
+            tmpPixels.resize((uint64_t)width * (uint64_t)height * 4);
             pixelDataComponents = GL_RGBA;
             readPixelsDst = tmpPixels.data();
         }

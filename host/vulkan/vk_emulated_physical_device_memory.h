@@ -50,11 +50,13 @@ class EmulatedPhysicalDeviceMemoryProperties {
         return mHostMemoryProperties;
     }
 
-    uint32_t getGuestColorBufferMemoryTypeIndex() const {
-        return mGuestColorBufferMemoryTypeIndex;
-    }
+    uint32_t getGuestColorBufferMemoryTypeIndex() const { return mGuestColorBufferMemoryTypeIndex; }
 
     void transformToGuestMemoryRequirements(VkMemoryRequirements* hostMemoryRequirements) const;
+
+    // Clamp heapBudget/heapUsage to the guest-visible heap sizes. No-op if budgetProps is null.
+    void clampMemoryBudgetToGuestHeapSizes(
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT* budgetProps) const;
 
    private:
     VkPhysicalDeviceMemoryProperties mGuestMemoryProperties;
