@@ -17136,8 +17136,11 @@ void reservedunmarshal_extension_struct(VulkanStream* vkStream, VkStructureType 
 #endif
         default: {
             // fatal; the switch is only taken if the extension struct is known
-            fprintf(stderr, " %s, Unhandled Vulkan structure type %s [%d], aborting.\n", __func__,
-                    string_VkStructureType(VkStructureType(structType)), structType);
+            // Print the raw sType first: string_VkStructureType() returns NULL for
+            // sTypes this codegen does not know, and "%s" on NULL crashes before the
+            // message is ever emitted (a SIGSEGV that hides the real cause).
+            fprintf(stderr, " %s, Unhandled Vulkan structure type [%d] (0x%x), aborting.\n",
+                    __func__, structType, structType);
             abort();
         }
     }

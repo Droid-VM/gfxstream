@@ -2511,10 +2511,10 @@ size_t goldfish_vk_extension_struct_size(VkStructureType rootType, const void* s
         }
 #endif
         default: {
-            const std::string structTypeString =
-                string_VkStructureType(VkStructureType(structType));
-            GFXSTREAM_FATAL("Unhandled Vulkan structure type %s [%d], aborting.",
-                            structTypeString.c_str(), structType);
+            // Raw sType only: string_VkStructureType() returns NULL for unknown
+            // types, and constructing a std::string from NULL is UB (SIGSEGV).
+            GFXSTREAM_FATAL("Unhandled Vulkan structure type [%d] (0x%x), aborting.",
+                            structType, structType);
             return static_cast<size_t>(0);
         }
     }
@@ -4998,10 +4998,10 @@ size_t goldfish_vk_extension_struct_size_with_stream_features(uint32_t streamFea
         }
 #endif
         default: {
-            const std::string structTypeString =
-                string_VkStructureType(VkStructureType(structType));
-            GFXSTREAM_FATAL("Unhandled Vulkan structure type %s [%d], aborting.",
-                            structTypeString.c_str(), structType);
+            // Raw sType only: string_VkStructureType() returns NULL for unknown
+            // types, and constructing a std::string from NULL is UB (SIGSEGV).
+            GFXSTREAM_FATAL("Unhandled Vulkan structure type [%d] (0x%x), aborting.",
+                            structType, structType);
             return static_cast<size_t>(0);
         }
     }
