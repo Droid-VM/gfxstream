@@ -26,6 +26,7 @@
 
 #ifndef _WIN32
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 #ifdef __ANDROID__
@@ -95,7 +96,14 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
     auto& pool = GetGunyahRingBlobPool();
     std::lock_guard<std::mutex> lock(pool.mutex);
 
-    auto it = pool.freeBySize.find(size);
+    // Round the backing up to a 2MB multiple so the shmem can be collapsed into
+    // whole order-9 folios (the memfd is created sealed, so it cannot be grown
+    // later with ftruncate). The recycle map is keyed by the rounded size, which
+    // matches blob->size() on Release.
+    constexpr uint64_t kPmdSize2 = 2ULL * 1024 * 1024;
+    const uint64_t roundedSize = (size + kPmdSize2 - 1) & ~(kPmdSize2 - 1);
+
+    auto it = pool.freeBySize.find(roundedSize);
     if (it != pool.freeBySize.end() && !it->second.empty()) {
         std::shared_ptr<RingBlob> blob = std::move(it->second.back());
         it->second.pop_back();
@@ -107,11 +115,62 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
     // NOT exportable, so always back the RingBlob with shmem (memfd) when pinning for Gunyah,
     // regardless of the ExternalBlob feature flag.
     (void)externalBlob;
-    std::unique_ptr<RingBlob> created = RingBlob::CreateWithShmem(id, size);
+    std::unique_ptr<RingBlob> created = RingBlob::CreateWithShmem(id, roundedSize);
     if (!created) {
         return nullptr;
     }
     std::shared_ptr<RingBlob> blob = std::move(created);
+
+#ifndef _WIN32
+    // Back the blob with 2MB (order-9) folios from the gh_hugepage_reserve pool.
+    //
+    // crosvm is a tracked gunyah-VM owner, so every order-9 allocation it makes is
+    // intercepted and served from the module's reserve pool: the blob then consumes
+    // VM reserve quota instead of competing with apps for system RAM, gunyah_share_66
+    // coalesces each folio into a single 2MB mem_entry (instead of 512 4K entries),
+    // and on ANY exit path — including SIGKILL/SIGSEGV — the final folio free reaches
+    // the buddy allocator at order 9, where the module's free hook reclaims it back
+    // into the pool. The folio must never be split (no partial unmap/hole-punch of a
+    // 2MB chunk), or its 4K frees become invisible to the hook and the pages are lost
+    // to the pool until the owner dies.
+    //
+    // Recipe mirrors crosvm's proven mthp guest-RAM path: round the memfd up to a 2MB
+    // multiple, fault it in through a PMD-aligned temporary mapping, MADV_COLLAPSE.
+    // Collapse allocates the order-9 folio in-process (madvise runs in crosvm's mm,
+    // which is what the module's intercept matches on). Best-effort: on failure the
+    // blob simply stays 4K-backed like before.
+    {
+        constexpr uint64_t kPmdSize = 2ULL * 1024 * 1024;
+#ifndef MADV_COLLAPSE
+        constexpr int kMadvCollapse = 25;
+#else
+        constexpr int kMadvCollapse = MADV_COLLAPSE;
+#endif
+        int hfd = blob->isExportable() ? blob->dupHandle() : -1;
+        if (hfd >= 0) {
+            int collapseRet = -1, collapseErrno = 0;
+            void* rsv = mmap(nullptr, roundedSize + kPmdSize, PROT_NONE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (rsv != MAP_FAILED) {
+                uintptr_t alignedAddr =
+                    (reinterpret_cast<uintptr_t>(rsv) + kPmdSize - 1) & ~(kPmdSize - 1);
+                void* aligned = mmap(reinterpret_cast<void*>(alignedAddr), roundedSize,
+                                     PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, hfd, 0);
+                if (aligned != MAP_FAILED) {
+                    madvise(aligned, roundedSize, MADV_HUGEPAGE);
+                    std::memset(aligned, 0, roundedSize);
+                    collapseRet = madvise(aligned, roundedSize, kMadvCollapse);
+                    collapseErrno = collapseRet ? errno : 0;
+                }
+                munmap(rsv, roundedSize + kPmdSize);
+            }
+            close(hfd);
+            fprintf(stderr, "RINGBLOB-POOL: id=%u size=%llu rounded=%llu collapse=%d errno=%d\n",
+                    id, (unsigned long long)size, (unsigned long long)roundedSize, collapseRet,
+                    collapseErrno);
+        }
+    }
+#endif
 
     // Gunyah SHARE (lend=false) does not fault in or lock the backing pages. A shmem/memfd-backed
     // RingBlob is demand-paged, so the guest's first access to a not-yet-present page would SIGBUS.
@@ -119,8 +178,8 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
     // (mirrors how qemu's pre-allocated hostmem backend is always resident).
 #ifndef _WIN32
     if (void* addr = blob->map()) {
-        std::memset(addr, 0, size);
-        if (mlock(addr, size) != 0) {
+        std::memset(addr, 0, roundedSize);
+        if (mlock(addr, roundedSize) != 0) {
             fprintf(stderr, "RINGBLOB-PIN: mlock failed id=%u size=%llu errno=%d\n", id,
                     (unsigned long long)size, errno);
         } else {
