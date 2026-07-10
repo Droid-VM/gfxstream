@@ -55,11 +55,21 @@ class EmulatedPhysicalDeviceMemoryProperties {
 
     void transformToGuestMemoryRequirements(VkMemoryRequirements* hostMemoryRequirements) const;
 
+    // True if the guest memory type is one of the synthesized device-local-only "shadow"
+    // types (see the constructor). Allocations of those types stay entirely in host GPU
+    // memory: the guest never maps them, so no host-visible blob / PCI BAR space is used.
+    bool isDeviceLocalOnlyShadow(uint32_t guestMemoryTypeIndex) const;
+
    private:
     VkPhysicalDeviceMemoryProperties mGuestMemoryProperties;
     VkPhysicalDeviceMemoryProperties mHostMemoryProperties;
     uint32_t mGuestToHostMemoryTypeIndexMap[VK_MAX_MEMORY_TYPES];
     uint32_t mHostToGuestMemoryTypeIndexMap[VK_MAX_MEMORY_TYPES];
+
+    // hostMemoryTypeIndex -> guest index of its device-local-only shadow (or kInvalid).
+    uint32_t mHostToGuestDeviceLocalShadowMap[VK_MAX_MEMORY_TYPES];
+    // Guest memory type indices that are device-local-only shadows.
+    bool mGuestMemoryTypeIsShadow[VK_MAX_MEMORY_TYPES];
 
     // The memory type index reported to the guest for VkDeviceMemory requirements which would
     // try to import host ColorBuffer allocations
