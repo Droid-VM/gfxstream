@@ -1193,8 +1193,9 @@ class VkDecoderGlobalState::Impl {
             std::lock_guard<std::mutex> lock(mMutex);
 
             for (const auto& [device, deviceInfo] : mDeviceInfo) {
-                auto* physDevInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo.physicalDevice);
-                if (physDevInfo && instance == physDevInfo->instance) {
+                // Select by the device's own creating instance, NOT via the physdev
+                // backpointer (see DeviceInfo::parentInstance).
+                if (deviceInfo.parentInstance == instance) {
                     devicesToDestroy.push_back(device);
                 }
             }
@@ -1414,11 +1415,18 @@ class VkDecoderGlobalState::Impl {
         auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
         if (!instanceInfo) return;
 
-        if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
-            physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        // Pick by host dispatch-pointer availability, NOT guest apiVersion / advertised
+        // extension. gfxstream builds the host `vk` dispatch from the host instance's
+        // vkGetInstanceProcAddr. For an apiVersion-1.0 host instance BOTH the core
+        // entrypoint (GIPA gates 1.1+ core functions to NULL below instance 1.1) AND the
+        // KHR alias (NULL unless the host instance enabled the extension) can be NULL,
+        // even though the guest advertised the extension. Calling either NULL pointer
+        // segfaults the whole host process. Verified with turnip via HMI: on a 1.0
+        // instance vkGetPhysicalDeviceProperties2 and ...Properties2KHR are both NULL,
+        // only the plain vkGetPhysicalDeviceProperties is present.
+        if (vk->vkGetPhysicalDeviceFeatures2) {
             vk->vkGetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
-        } else if (hasInstanceExtension(physdevInfo->instance,
-                                        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+        } else if (vk->vkGetPhysicalDeviceFeatures2KHR) {
             vk->vkGetPhysicalDeviceFeatures2KHR(physicalDevice, pFeatures);
         } else {
             // No instance extension, fake it!!!!
@@ -1563,14 +1571,13 @@ class VkDecoderGlobalState::Impl {
             return res;
         }
 
-        if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
-            physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        // Pick by host dispatch-pointer availability; see vkGetPhysicalDeviceFeatures2.
+        if (vk->vkGetPhysicalDeviceImageFormatProperties2) {
             res = vk->vkGetPhysicalDeviceImageFormatProperties2(physicalDevice, pImageFormatInfo,
                                                                 pImageFormatProperties);
-        } else if (hasInstanceExtension(physdevInfo->instance,
-                                        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
-            res = vk->vkGetPhysicalDeviceImageFormatProperties2KHR(physicalDevice, pImageFormatInfo,
-                                                                   pImageFormatProperties);
+        } else if (vk->vkGetPhysicalDeviceImageFormatProperties2KHR) {
+            res = vk->vkGetPhysicalDeviceImageFormatProperties2KHR(
+                physicalDevice, pImageFormatInfo, pImageFormatProperties);
         } else {
             // No instance extension, fake it!!!!
             if (pImageFormatProperties->pNext) {
@@ -1699,8 +1706,14 @@ class VkDecoderGlobalState::Impl {
                 getPhysicalDeviceFormatPropertiesCore<VkFormatProperties2>(
                     [vk](VkPhysicalDevice physicalDevice, VkFormat format,
                          VkFormatProperties2* pFormatProperties) {
-                        vk->vkGetPhysicalDeviceFormatProperties2KHR(physicalDevice, format,
-                                                                    pFormatProperties);
+                        // Prefer core; else KHR alias. See vkGetPhysicalDeviceFeatures2.
+                        if (vk->vkGetPhysicalDeviceFormatProperties2) {
+                            vk->vkGetPhysicalDeviceFormatProperties2(physicalDevice, format,
+                                                                     pFormatProperties);
+                        } else if (vk->vkGetPhysicalDeviceFormatProperties2KHR) {
+                            vk->vkGetPhysicalDeviceFormatProperties2KHR(physicalDevice, format,
+                                                                        pFormatProperties);
+                        }
                     },
                     vk, physicalDevice, format, pFormatProperties);
                 break;
@@ -1754,11 +1767,10 @@ class VkDecoderGlobalState::Impl {
         auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
         if (!instanceInfo) return;
 
-        if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
-            physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        // Pick by host dispatch-pointer availability; see vkGetPhysicalDeviceFeatures2.
+        if (vk->vkGetPhysicalDeviceProperties2) {
             vk->vkGetPhysicalDeviceProperties2(physicalDevice, pProperties);
-        } else if (hasInstanceExtension(physdevInfo->instance,
-                                        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+        } else if (vk->vkGetPhysicalDeviceProperties2KHR) {
             vk->vkGetPhysicalDeviceProperties2KHR(physicalDevice, pProperties);
         } else {
             // No instance extension, fake it!!!!
@@ -1881,11 +1893,10 @@ class VkDecoderGlobalState::Impl {
         auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physicalDeviceInfo->instance);
         if (!instanceInfo) return;
 
-        if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
-            physicalDeviceInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        // Pick by host dispatch-pointer availability; see vkGetPhysicalDeviceFeatures2.
+        if (vk->vkGetPhysicalDeviceMemoryProperties2) {
             vk->vkGetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);
-        } else if (hasInstanceExtension(physicalDeviceInfo->instance,
-                                        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+        } else if (vk->vkGetPhysicalDeviceMemoryProperties2KHR) {
             vk->vkGetPhysicalDeviceMemoryProperties2KHR(physicalDevice, pMemoryProperties);
         } else {
             // No instance extension, fake it!!!!
@@ -2326,6 +2337,7 @@ class VkDecoderGlobalState::Impl {
         VALIDATE_NEW_HANDLE_INFO_ENTRY(mDeviceInfo, *pDevice);
         auto& deviceInfo = mDeviceInfo[*pDevice];
         deviceInfo.physicalDevice = physicalDevice;
+        deviceInfo.parentInstance = physicalDeviceInfo.instance;
         deviceInfo.emulateTextureEtc2 = emulateTextureEtc2;
         deviceInfo.emulateTextureAstc = emulateTextureAstc;
         deviceInfo.useAstcCpuDecompression =
@@ -2620,8 +2632,17 @@ class VkDecoderGlobalState::Impl {
 
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
-        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR(physicalDevice, pFormatInfo,
-                                                                      pPropertyCount, pProperties);
+        // Prefer core; else KHR alias. See vkGetPhysicalDeviceFeatures2.
+        if (vk->vkGetPhysicalDeviceSparseImageFormatProperties2) {
+            return vk->vkGetPhysicalDeviceSparseImageFormatProperties2(
+                physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        }
+        if (vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR) {
+            return vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
+                physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        }
+        if (pPropertyCount) *pPropertyCount = 0;
+        return;
     }
 
     void on_vkGetDeviceImageMemoryRequirements(gfxstream::base::BumpPool* pool,
@@ -6917,6 +6938,52 @@ class VkDecoderGlobalState::Impl {
         deviceDispatch->vkFreeMemory(device, memory, pAllocator);
     }
 
+    // Validate and execute mapped-memory-range ops entirely under mMutex, so
+    // vkFreeMemory (which also takes mMutex) cannot destroy a memory object
+    // between the liveness check and the driver call. Guests can race a
+    // flush/invalidate against a free; handing the stale handle to the driver
+    // segfaults the whole host process. Stale ranges are dropped: blob memories
+    // are host-coherent, so the op is a near-no-op for them anyway.
+    VkResult flushMappedMemoryRangesGuarded(VkDevice device, VulkanDispatch* vk,
+                                            uint32_t rangeCount,
+                                            const VkMappedMemoryRange* pRanges) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        std::vector<VkMappedMemoryRange> valid;
+        valid.reserve(rangeCount);
+        for (uint32_t i = 0; i < rangeCount; ++i) {
+            auto* info = gfxstream::base::find(mMemoryInfo, pRanges[i].memory);
+            if (info && info->ptr) {
+                valid.push_back(pRanges[i]);
+            } else {
+                fprintf(stderr, "FLUSH-DROP: memory %p not live, dropping range\n",
+                        (void*)pRanges[i].memory);
+            }
+        }
+        if (valid.empty()) return VK_SUCCESS;
+        return vk->vkFlushMappedMemoryRanges(device, static_cast<uint32_t>(valid.size()),
+                                             valid.data());
+    }
+
+    VkResult invalidateMappedMemoryRangesGuarded(VkDevice device, VulkanDispatch* vk,
+                                                 uint32_t rangeCount,
+                                                 const VkMappedMemoryRange* pRanges) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        std::vector<VkMappedMemoryRange> valid;
+        valid.reserve(rangeCount);
+        for (uint32_t i = 0; i < rangeCount; ++i) {
+            auto* info = gfxstream::base::find(mMemoryInfo, pRanges[i].memory);
+            if (info && info->ptr) {
+                valid.push_back(pRanges[i]);
+            } else {
+                fprintf(stderr, "INVALIDATE-DROP: memory %p not live, dropping range\n",
+                        (void*)pRanges[i].memory);
+            }
+        }
+        if (valid.empty()) return VK_SUCCESS;
+        return vk->vkInvalidateMappedMemoryRanges(device, static_cast<uint32_t>(valid.size()),
+                                                  valid.data());
+    }
+
     void freeMemoryLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkDeviceMemory memory,
                           const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
         auto memoryInfoIt = mMemoryInfo.find(memory);
@@ -10180,10 +10247,12 @@ class VkDecoderGlobalState::Impl {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
             .pNext = &swapchainMaintenance1Features,
         };
-        if (hasGetPhysicalDeviceFeatures2) {
+        if (hasGetPhysicalDeviceFeatures2 && vk->vkGetPhysicalDeviceFeatures2) {
             vk->vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
-        } else if (hasGetPhysicalDeviceFeatures2KHR) {
+        } else if (hasGetPhysicalDeviceFeatures2KHR && vk->vkGetPhysicalDeviceFeatures2KHR) {
             vk->vkGetPhysicalDeviceFeatures2KHR(physicalDevice, &features2);
+        } else if (vk->vkGetPhysicalDeviceFeatures2) {
+            vk->vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
         } else {
             return false;
         }
@@ -10290,8 +10359,8 @@ class VkDecoderGlobalState::Impl {
             // "Extracting a node invalidates only the iterators to the extracted element ..."
             auto current = it++;
             VkDevice device = current->first;
-            auto* physDevInfo = gfxstream::base::find(mPhysdevInfo, current->second.physicalDevice);
-            if (physDevInfo && physDevInfo->instance == instance) {
+            // Select by the device's own creating instance (see DeviceInfo::parentInstance).
+            if (current->second.parentInstance == instance) {
                 InstanceObjects::DeviceObjects& deviceObjects = objects.devices.emplace_back();
                 deviceObjects.device = mDeviceInfo.extract(current);
                 extractDeviceAndDependenciesLocked(device, deviceObjects);
@@ -11027,6 +11096,18 @@ void VkDecoderGlobalState::on_vkGetPhysicalDeviceProperties2(
     gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
     VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties2* pProperties) {
     mImpl->on_vkGetPhysicalDeviceProperties2(pool, apiCallHandle, physicalDevice, pProperties);
+}
+
+VkResult VkDecoderGlobalState::flushMappedMemoryRangesGuarded(
+    VkDevice device, VulkanDispatch* vk, uint32_t rangeCount,
+    const VkMappedMemoryRange* pRanges) {
+    return mImpl->flushMappedMemoryRangesGuarded(device, vk, rangeCount, pRanges);
+}
+
+VkResult VkDecoderGlobalState::invalidateMappedMemoryRangesGuarded(
+    VkDevice device, VulkanDispatch* vk, uint32_t rangeCount,
+    const VkMappedMemoryRange* pRanges) {
+    return mImpl->invalidateMappedMemoryRangesGuarded(device, vk, rangeCount, pRanges);
 }
 
 void VkDecoderGlobalState::on_vkGetPhysicalDeviceQueueFamilyProperties(

@@ -1946,8 +1946,12 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 VkResult vkFlushMappedMemoryRanges_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
-                    vkFlushMappedMemoryRanges_VkResult_return = vk->vkFlushMappedMemoryRanges(
-                        unboxed_device, memoryRangeCount, pMemoryRanges);
+                    // Executed under the global-state lock: validates range liveness and
+                    // calls the driver atomically w.r.t. vkFreeMemory (flush-after-free
+                    // race otherwise segfaults the host).
+                    vkFlushMappedMemoryRanges_VkResult_return =
+                        m_state->flushMappedMemoryRangesGuarded(unboxed_device, vk,
+                                                                memoryRangeCount, pMemoryRanges);
                 }
                 if ((vkFlushMappedMemoryRanges_VkResult_return) == VK_ERROR_DEVICE_LOST)
                     m_state->on_DeviceLost();
@@ -2005,9 +2009,11 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 VkResult vkInvalidateMappedMemoryRanges_VkResult_return =
                     VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
+                    // See flushMappedMemoryRangesGuarded: same free-vs-op race applies.
                     vkInvalidateMappedMemoryRanges_VkResult_return =
-                        vk->vkInvalidateMappedMemoryRanges(unboxed_device, memoryRangeCount,
-                                                           pMemoryRanges);
+                        m_state->invalidateMappedMemoryRangesGuarded(unboxed_device, vk,
+                                                                     memoryRangeCount,
+                                                                     pMemoryRanges);
                 }
                 if ((vkInvalidateMappedMemoryRanges_VkResult_return) == VK_ERROR_DEVICE_LOST)
                     m_state->on_DeviceLost();

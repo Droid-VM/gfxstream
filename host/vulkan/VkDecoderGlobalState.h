@@ -167,6 +167,15 @@ class VkDecoderGlobalState {
                                            VkSnapshotApiCallHandle apiCallHandle,
                                            VkPhysicalDevice physicalDevice,
                                            VkPhysicalDeviceProperties2* pProperties);
+
+    // Validate + execute under the global lock so a concurrent vkFreeMemory
+    // cannot invalidate a range's memory between check and driver call.
+    VkResult flushMappedMemoryRangesGuarded(VkDevice device, VulkanDispatch* vk,
+                                            uint32_t rangeCount,
+                                            const VkMappedMemoryRange* pRanges);
+    VkResult invalidateMappedMemoryRangesGuarded(VkDevice device, VulkanDispatch* vk,
+                                                 uint32_t rangeCount,
+                                                 const VkMappedMemoryRange* pRanges);
     void on_vkGetPhysicalDeviceProperties2KHR(gfxstream::base::BumpPool* pool,
                                               VkSnapshotApiCallHandle apiCallHandle,
                                               VkPhysicalDevice physicalDevice,

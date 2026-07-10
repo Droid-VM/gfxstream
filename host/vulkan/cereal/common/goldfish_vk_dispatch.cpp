@@ -1463,6 +1463,11 @@ void init_vulkan_dispatch_from_instance(VulkanDispatch* vk, VkInstance instance,
     out->vkCmdPushDescriptorSetWithTemplate2 =
         (PFN_vkCmdPushDescriptorSetWithTemplate2)vk->vkGetInstanceProcAddr(
             instance, "vkCmdPushDescriptorSetWithTemplate2");
+    if (!out->vkCmdPushDescriptorSetWithTemplate2) {
+        out->vkCmdPushDescriptorSetWithTemplate2 =
+            (PFN_vkCmdPushDescriptorSetWithTemplate2)vk->vkGetInstanceProcAddr(
+                instance, "vkCmdPushDescriptorSetWithTemplate2KHR");
+    }
     out->vkCopyMemoryToImage =
         (PFN_vkCopyMemoryToImage)vk->vkGetInstanceProcAddr(instance, "vkCopyMemoryToImage");
     out->vkCopyImageToMemory =
@@ -2494,6 +2499,19 @@ void init_vulkan_dispatch_from_device(VulkanDispatch* vk, VkDevice device, Vulka
     out->vkCmdPushDescriptorSetWithTemplate =
         (PFN_vkCmdPushDescriptorSetWithTemplate)vk->vkGetDeviceProcAddr(
             device, "vkCmdPushDescriptorSetWithTemplate");
+    // Drivers loaded via the Android HAL/HMI bridge only export the KHR-alias
+    // entrypoints for functions promoted to core in 1.4; GetDeviceProcAddr on the
+    // core name returns NULL and any call through it would segfault the host.
+    // Backfill the core slots from the KHR aliases (identical signatures).
+    if (!out->vkCmdPushDescriptorSet) {
+        out->vkCmdPushDescriptorSet = (PFN_vkCmdPushDescriptorSet)vk->vkGetDeviceProcAddr(
+            device, "vkCmdPushDescriptorSetKHR");
+    }
+    if (!out->vkCmdPushDescriptorSetWithTemplate) {
+        out->vkCmdPushDescriptorSetWithTemplate =
+            (PFN_vkCmdPushDescriptorSetWithTemplate)vk->vkGetDeviceProcAddr(
+                device, "vkCmdPushDescriptorSetWithTemplateKHR");
+    }
     out->vkCmdSetRenderingAttachmentLocations =
         (PFN_vkCmdSetRenderingAttachmentLocations)vk->vkGetDeviceProcAddr(
             device, "vkCmdSetRenderingAttachmentLocations");
@@ -2506,9 +2524,18 @@ void init_vulkan_dispatch_from_device(VulkanDispatch* vk, VkDevice device, Vulka
         (PFN_vkCmdPushConstants2)vk->vkGetDeviceProcAddr(device, "vkCmdPushConstants2");
     out->vkCmdPushDescriptorSet2 =
         (PFN_vkCmdPushDescriptorSet2)vk->vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSet2");
+    if (!out->vkCmdPushDescriptorSet2) {
+        out->vkCmdPushDescriptorSet2 = (PFN_vkCmdPushDescriptorSet2)vk->vkGetDeviceProcAddr(
+            device, "vkCmdPushDescriptorSet2KHR");
+    }
     out->vkCmdPushDescriptorSetWithTemplate2 =
         (PFN_vkCmdPushDescriptorSetWithTemplate2)vk->vkGetDeviceProcAddr(
             device, "vkCmdPushDescriptorSetWithTemplate2");
+    if (!out->vkCmdPushDescriptorSetWithTemplate2) {
+        out->vkCmdPushDescriptorSetWithTemplate2 =
+            (PFN_vkCmdPushDescriptorSetWithTemplate2)vk->vkGetDeviceProcAddr(
+                device, "vkCmdPushDescriptorSetWithTemplate2KHR");
+    }
     out->vkCopyMemoryToImage =
         (PFN_vkCopyMemoryToImage)vk->vkGetDeviceProcAddr(device, "vkCopyMemoryToImage");
     out->vkCopyImageToMemory =
