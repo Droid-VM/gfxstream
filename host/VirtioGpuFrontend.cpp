@@ -191,6 +191,12 @@ int VirtioGpuFrontend::destroyContext(VirtioGpuCtxId contextId) {
 
     context.Destroy(get_gfxstream_address_space_ops());
 
+    // Close every not-yet-consumed blob descriptor exported for this context
+    // (vkGetBlobGOOGLE exports a fresh dup per call): with the context gone,
+    // nothing can consume them anymore, and on Android they carry raw dma-buf
+    // fds / AHB references that would otherwise leak for the process lifetime.
+    ExternalObjectManager::get()->removeContextBlobDescriptorInfos(contextId);
+
     mContexts.erase(contextIt);
     return 0;
 }

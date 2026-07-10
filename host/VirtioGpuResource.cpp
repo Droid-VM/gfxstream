@@ -577,6 +577,33 @@ int VirtioGpuResource::Destroy() {
     } else if (mResourceType == VirtioGpuResourceType::COLOR_BUFFER) {
         FrameBuffer::getFB()->closeColorBuffer(mId);
     }
+#ifdef __ANDROID__
+    // Android's BlobDescriptorType is a raw handle with no RAII: close/release the
+    // stored descriptor exactly once when the resource dies. Every ColorBuffer- or
+    // Buffer-backed blob used to leak one dma-buf fd here (the dup made at export
+    // time): ~17 fds / ~30MB of dma-heap memory per Minecraft launch, gigabytes of
+    // invisible host memory over a day — the memory-pressure ratchet behind the
+    // guest page-death incidents.
+    if (mBlobMemory && std::holds_alternative<ExternalMemoryInfo>(*mBlobMemory)) {
+        auto& memory = std::get<ExternalMemoryInfo>(*mBlobMemory);
+        if (memory && memory->descriptorInfo.handle) {
+            switch (memory->descriptorInfo.streamHandleType) {
+                case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
+                case STREAM_HANDLE_TYPE_MEM_DMABUF:
+                case STREAM_HANDLE_TYPE_MEM_SHM:
+                    close(static_cast<int>(memory->descriptorInfo.handle));
+                    break;
+                case STREAM_HANDLE_TYPE_MEM_AHB:
+                    AHardwareBuffer_release(reinterpret_cast<AHardwareBuffer*>(
+                        memory->descriptorInfo.handle));
+                    break;
+                default:
+                    break;
+            }
+            memory->descriptorInfo.handle = 0;
+        }
+    }
+#endif
     return 0;
 }
 
@@ -1143,7 +1170,26 @@ int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
     } else if (std::holds_alternative<ExternalMemoryInfo>(*mBlobMemory)) {
         auto& memory = std::get<ExternalMemoryInfo>(*mBlobMemory);
 #ifdef __ANDROID__
+        // fd-backed handles: hand the VMM its own dup and keep ours (closed in
+        // Destroy()). Handing out the stored value transferred ownership implicitly
+        // when the VMM closed it (dangling value here), and leaked it when the VMM
+        // never asked for an export at all.
         auto rawDescriptor = memory->descriptorInfo.handle;
+        switch (memory->descriptorInfo.streamHandleType) {
+            case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
+            case STREAM_HANDLE_TYPE_MEM_DMABUF:
+            case STREAM_HANDLE_TYPE_MEM_SHM: {
+                int dupFd = dup(static_cast<int>(rawDescriptor));
+                if (dupFd < 0) {
+                    GFXSTREAM_ERROR("failed to export blob for resource %u: dup failed.", mId);
+                    return -EINVAL;
+                }
+                rawDescriptor = dupFd;
+                break;
+            }
+            default:
+                break;
+        }
 #else
         auto rawDescriptorOpt = memory->descriptorInfo.descriptor.release();
         if (!rawDescriptorOpt) {

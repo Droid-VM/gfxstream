@@ -15,7 +15,44 @@
 
 #include <utility>
 
+#if defined(__ANDROID__)
+#include <unistd.h>
+
+#include <android/hardware_buffer.h>
+#endif
+
 namespace gfxstream {
+
+namespace {
+
+// Android's BlobDescriptorType is a raw handle with no RAII: any path that drops a
+// BlobDescriptorInfo without consuming it must close/release the handle explicitly,
+// or the dma-buf fd / AHardwareBuffer reference leaks for the life of the process.
+void closeBlobDescriptorHandle(BlobDescriptorInfo& info) {
+#if defined(__ANDROID__)
+    if (!info.descriptorInfo.handle) {
+        return;
+    }
+    switch (info.descriptorInfo.streamHandleType) {
+        case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
+        case STREAM_HANDLE_TYPE_MEM_DMABUF:
+        case STREAM_HANDLE_TYPE_MEM_SHM:
+            close(static_cast<int>(info.descriptorInfo.handle));
+            break;
+        case STREAM_HANDLE_TYPE_MEM_AHB:
+            AHardwareBuffer_release(
+                reinterpret_cast<AHardwareBuffer*>(info.descriptorInfo.handle));
+            break;
+        default:
+            break;
+    }
+    info.descriptorInfo.handle = 0;
+#else
+    (void)info;  // ManagedDescriptor closes itself.
+#endif
+}
+
+}  // namespace
 
 static ExternalObjectManager* sMapping() {
     static ExternalObjectManager* s = new ExternalObjectManager;
@@ -70,7 +107,27 @@ void ExternalObjectManager::addBlobDescriptorInfo(uint32_t ctxId, uint64_t blobI
 
     auto key = std::make_pair(ctxId, blobId);
     std::lock_guard<std::mutex> lock(mMutex);
+    // insert() does not overwrite: a re-export of the same (ctx, blob) used to drop
+    // the freshly dup'd descriptor on the floor (leaked on Android). Close the stale
+    // entry and store the newest export instead.
+    auto found = mBlobDescriptorInfos.find(key);
+    if (found != mBlobDescriptorInfos.end()) {
+        closeBlobDescriptorHandle(found->second);
+        mBlobDescriptorInfos.erase(found);
+    }
     mBlobDescriptorInfos.insert(std::make_pair(key, std::move(info)));
+}
+
+void ExternalObjectManager::removeContextBlobDescriptorInfos(uint32_t ctxId) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    for (auto it = mBlobDescriptorInfos.begin(); it != mBlobDescriptorInfos.end();) {
+        if (it->first.first == ctxId) {
+            closeBlobDescriptorHandle(it->second);
+            it = mBlobDescriptorInfos.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 std::optional<BlobDescriptorInfo> ExternalObjectManager::removeBlobDescriptorInfo(uint32_t ctxId,

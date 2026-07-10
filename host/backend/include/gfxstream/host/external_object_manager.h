@@ -138,6 +138,10 @@ class ExternalObjectManager {
                                uint32_t streamHandleType, uint32_t caching,
                                std::optional<VulkanInfo> vulkanInfoOpt);
     std::optional<BlobDescriptorInfo> removeBlobDescriptorInfo(uint32_t ctx_id, uint64_t blobId);
+    // Drop (and on Android close/release) every not-yet-consumed blob descriptor of a
+    // context. Called on context destroy so orphaned exports cannot leak dma-buf
+    // fds/AHB references for the life of the process.
+    void removeContextBlobDescriptorInfos(uint32_t ctx_id);
 
     void addSyncDescriptorInfo(uint32_t ctx_id, uint64_t syncId, ManagedDescriptor descriptor,
                                uint32_t streamHandleType);
