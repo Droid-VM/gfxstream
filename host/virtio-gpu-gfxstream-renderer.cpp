@@ -165,11 +165,6 @@ ParseGfxstreamFeatures(const int rendererFlags,
     GFXSTREAM_SET_FEATURE_ON_CONDITION(&features, ExternalBlob,
                                        rendererFlags & STREAM_RENDERER_FLAGS_USE_EXTERNAL_BLOB ||
                                            features.VulkanAllocateHostVisibleAsUdmabuf.enabled);
-    fprintf(stderr,
-            "BLOBDIAG2: ParseFeatures rendererFlags=0x%x USE_EXTERNAL_BLOB=0x%x "
-            "udmabuf=%d -> ExternalBlob.enabled=%d\n",
-            (unsigned)rendererFlags, (unsigned)STREAM_RENDERER_FLAGS_USE_EXTERNAL_BLOB,
-            features.VulkanAllocateHostVisibleAsUdmabuf.enabled, features.ExternalBlob.enabled);
     GFXSTREAM_SET_FEATURE_ON_CONDITION(&features, VulkanEnsureCachedCoherentMemoryAvailable, true);
     // DroidVM: zink (the guest compositor GL driver) requires the nullDescriptor
     // feature of VK_EXT_robustness2. The guest ICD reports the capability, but
@@ -532,11 +527,6 @@ VG_EXPORT int stream_renderer_create_blob(uint32_t ctx_id, uint32_t res_handle,
                           "stream_renderer_create_blob()");
 
     int blobRc = sFrontend()->createBlob(ctx_id, res_handle, create_blob, handle, iovecs, num_iovs);
-    fprintf(stderr,
-            "BLOBDIAG: createBlob res=%u ctx=%u blob_id=%llu blob_mem=%u blob_flags=0x%x size=%llu "
-            "rc=%d\n",
-            res_handle, ctx_id, (unsigned long long)create_blob->blob_id, create_blob->blob_mem,
-            create_blob->blob_flags, (unsigned long long)create_blob->size, blobRc);
     // Previously this swallowed createBlob's return (always returned 0), so a failed host blob
     // create still looked successful to the VMM, leaving a phantom resource. Propagate it.
     return blobRc;

@@ -165,9 +165,10 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
                 munmap(rsv, roundedSize + kPmdSize);
             }
             close(hfd);
-            fprintf(stderr, "RINGBLOB-POOL: id=%u size=%llu rounded=%llu collapse=%d errno=%d\n",
-                    id, (unsigned long long)size, (unsigned long long)roundedSize, collapseRet,
-                    collapseErrno);
+            if (collapseRet) {
+                fprintf(stderr, "RINGBLOB-POOL: collapse failed id=%u rounded=%llu errno=%d\n",
+                        id, (unsigned long long)roundedSize, collapseErrno);
+            }
         }
     }
 #endif
@@ -182,9 +183,6 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
         if (mlock(addr, roundedSize) != 0) {
             fprintf(stderr, "RINGBLOB-PIN: mlock failed id=%u size=%llu errno=%d\n", id,
                     (unsigned long long)size, errno);
-        } else {
-            fprintf(stderr, "RINGBLOB-PIN: pinned id=%u size=%llu addr=%p\n", id,
-                    (unsigned long long)size, addr);
         }
     }
 #endif
@@ -414,9 +412,6 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
 
     std::optional<BlobDescriptorInfo> descriptorInfoOpt;
 
-    fprintf(stderr, "BLOBDIAG2: Create res=%u blob_id=%llu blob_mem=%u flags=0x%x hasCreateArgs=%d\n",
-            resourceId, (unsigned long long)createBlobArgs->blob_id, createBlobArgs->blob_mem,
-            createBlobArgs->blob_flags, createArgs != nullptr);
     if (createArgs != nullptr) {
         auto resourceType = GetResourceType(*createArgs);
         if (resourceType != VirtioGpuResourceType::BUFFER &&
@@ -441,9 +436,6 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
             GFXSTREAM_ERROR("failed to create blob resource: unhandled type.");
             return std::nullopt;
         }
-        fprintf(stderr, "BLOBDIAG2: res=%u type=%d exportDescriptor=%d\n", resourceId,
-                (int)resourceType, descriptorInfoOpt.has_value());
-
         resource = std::move(*resourceOpt);
     } else {
         resource.mResourceType = VirtioGpuResourceType::BLOB;
@@ -491,8 +483,6 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
         // Without this, cross-device scanout blobs (blob_flags=SHAREABLE|CROSS_DEVICE) created with
         // ExternalBlob off were falling into the removeMapping branch and failing, leaving the
         // VMM with a phantom resource.
-        fprintf(stderr, "BLOBDIAG2: res=%u using exported descriptor (ExternalBlob.enabled=%d)\n",
-                resourceId, features.ExternalBlob.enabled);
         resource.mBlobMemory.emplace(
             std::make_shared<BlobDescriptorInfo>(std::move(*descriptorInfoOpt)));
     } else if (features.ExternalBlob.enabled) {
@@ -525,8 +515,6 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
                 std::make_shared<BlobDescriptorInfo>(std::move(*descriptorInfoOpt)));
         }
     } else {
-        fprintf(stderr, "BLOBDIAG2: res=%u ExternalBlob DISABLED -> removeMapping path\n",
-                resourceId);
         auto memoryMappingOpt =
             ExternalObjectManager::get()->removeMapping(contextId, createBlobArgs->blob_id);
         if (!memoryMappingOpt) {
@@ -566,8 +554,6 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
         }
     }
 
-    fprintf(stderr, "BLOBDIAG2: res=%u Create OK type=%d hasBlobMemory=%d\n", resourceId,
-            (int)resource.mResourceType, resource.mBlobMemory.has_value());
     return resource;
 }
 

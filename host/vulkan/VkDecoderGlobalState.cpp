@@ -1974,9 +1974,6 @@ class VkDecoderGlobalState::Impl {
             }
             it = drop ? properties.erase(it) : std::next(it);
         }
-        fprintf(stderr, "GFXSTREAM-EXTFILTER: device-ext-enum returning count=%zu\n",
-                properties.size());
-
         // If MoltenVK is supported on host, we need to ensure that we include
         // VK_MVK_moltenvk extenstion in returned properties.
 
@@ -6145,19 +6142,6 @@ class VkDecoderGlobalState::Impl {
             localDedicatedAllocInfo = vk_make_orphan_copy(*dedicatedAllocInfoPtr);
         }
         {
-            const VkImportColorBufferGOOGLE* importCb =
-                vk_find_struct<VkImportColorBufferGOOGLE>(pAllocateInfo);
-            const VkImportBufferGOOGLE* importBufLog =
-                vk_find_struct<VkImportBufferGOOGLE>(pAllocateInfo);
-            fprintf(stderr,
-                    "ZC-ALLOCMEM: size=%llu typeIdx=%u dedicatedImg=%d dedicatedBuf=%d "
-                    "importCb=%d(cb=%u) importBuf=%d(buf=%u)\n",
-                    (unsigned long long)pAllocateInfo->allocationSize,
-                    pAllocateInfo->memoryTypeIndex,
-                    (dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE),
-                    (dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->buffer != VK_NULL_HANDLE),
-                    importCb != nullptr, importCb ? importCb->colorBuffer : 0u,
-                    importBufLog != nullptr, importBufLog ? importBufLog->buffer : 0u);
         }
         if (!usingDirectMapping()) {
             // We copy bytes 1 page at a time from the guest to the host
@@ -6351,8 +6335,6 @@ class VkDecoderGlobalState::Impl {
                             (dupHandleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_DMABUF)
                                 ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
                                 : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-                        fprintf(stderr, "ZC-ALLOCMEM: import cb via fd handleType=0x%x fd=%d\n",
-                                importFdInfo.handleType, importFdInfo.fd);
                         vk_append_struct(&structChainIter, &importFdInfo);
                     } else {
                         importInfo.buffer = static_cast<AHardwareBuffer*>(
@@ -6384,12 +6366,6 @@ class VkDecoderGlobalState::Impl {
                         &localAllocInfo.memoryTypeIndex, &bufferMemoryUsesDedicatedAlloc,
                         &mappedPtr)) {
                     resolvedAsColorBuffer = true;
-                    fprintf(stderr,
-                            "ZC-ALLOCMEM3: importBuffer=%u resolved as ColorBuffer (cross-ctx "
-                            "dmabuf wl_buffer) size=%llu typeIdx=%u\n",
-                            importBufferInfoPtr->buffer,
-                            (unsigned long long)localAllocInfo.allocationSize,
-                            localAllocInfo.memoryTypeIndex);
                 } else {
                     fprintf(stderr,
                             "ZC-ALLOCMEM3: importBuffer=%u missing on host (and not a "
@@ -6482,10 +6458,6 @@ class VkDecoderGlobalState::Impl {
                         (dupHandleInfo->streamHandleType == STREAM_HANDLE_TYPE_MEM_DMABUF)
                             ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
                             : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-                    fprintf(stderr,
-                            "ZC-ALLOCMEM3: importBuffer via fd handleType=0x%x fd=%d "
-                            "(resolvedAsColorBuffer=%d)\n",
-                            importFdInfo.handleType, importFdInfo.fd, resolvedAsColorBuffer);
                     vk_append_struct(&structChainIter, &importFdInfo);
                 } else {
                     importInfo.buffer = static_cast<AHardwareBuffer*>(
@@ -6567,16 +6539,6 @@ class VkDecoderGlobalState::Impl {
             vk_append_struct(&structChainIter, &localDedicatedAllocInfo);
         }
 
-        if (importCbInfoPtr) {
-            fprintf(stderr,
-                    "ZC-ALLOCMEM: about to vkAllocateMemory(importCb=%u) dedicated=%d "
-                    "dedImg=%p size=%llu typeIdx=%u\n",
-                    importCbInfoPtr->colorBuffer, shouldUseDedicatedAllocInfo ? 1 : 0,
-                    (void*)localDedicatedAllocInfo.image,
-                    (unsigned long long)localAllocInfo.allocationSize,
-                    localAllocInfo.memoryTypeIndex);
-        }
-
         VkExportMemoryAllocateInfo ahbExportAllocInfo = {
             .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
             .pNext = nullptr,
@@ -6610,11 +6572,6 @@ class VkDecoderGlobalState::Impl {
         const bool hostVisible = memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
         bool importEmulatedExternalMemory = importCbInfoPtr || importBufferInfoPtr;
         const bool emulateHostVisible = hostVisible && !importEmulatedExternalMemory;
-        fprintf(stderr,
-                "ZC-ALLOCMEM2: hostVisible=%d importEmu=%d emulateHostVisible=%d createBlob=%p\n",
-                hostVisible, importEmulatedExternalMemory, emulateHostVisible,
-                (const void*)createBlobInfoPtr);
-
         std::optional<SharedMemory> sharedMemory = std::nullopt;
         std::optional<VkImportMemoryHostPointerInfoEXT> importHostInfo;
         std::optional<VkExportMemoryAllocateInfo> exportAllocateInfo;
@@ -6723,10 +6680,14 @@ class VkDecoderGlobalState::Impl {
                     if (folioCharge.bytes()) {
                         int collapseErr = CollapseMemfdToFolios(
                             memory.getFd(), localAllocInfo.allocationSize);
-                        fprintf(stderr, "VKFOLIO: size=%llu collapse=%d used=%lluMB/%lluMB\n",
-                                (unsigned long long)localAllocInfo.allocationSize, collapseErr,
-                                (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
-                                (unsigned long long)(kFolioCfg.quotaBytes >> 20));
+                        if (collapseErr) {
+                            fprintf(stderr,
+                                    "VKFOLIO: collapse failed errno=%d size=%llu used=%lluMB/%lluMB\n",
+                                    collapseErr,
+                                    (unsigned long long)localAllocInfo.allocationSize,
+                                    (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
+                                    (unsigned long long)(kFolioCfg.quotaBytes >> 20));
+                        }
                         if (collapseErr && kFolioCfg.strict()) {
                             GFXSTREAM_ERROR(
                                 "VKFOLIO: MADV_COLLAPSE failed (errno %d), strict mode -> "
@@ -6880,24 +6841,7 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
-        fprintf(stderr, "ZC-ALLOCMEM: about to call host vkAllocateMemory size=%llu typeIdx=%u\n",
-                (unsigned long long)localAllocInfo.allocationSize, localAllocInfo.memoryTypeIndex);
         VkResult result = vk->vkAllocateMemory(device, &localAllocInfo, pAllocator, pMemory);
-        if (importCbInfoPtr) {
-            fprintf(stderr, "ZC-ALLOCMEM: vkAllocateMemory(importCb=%u) returned res=%d mem=%p\n",
-                    importCbInfoPtr->colorBuffer, (int)result, (void*)*pMemory);
-        } else {
-            // Always trace non-importCb allocs too, so we can see when zink hits OOD-without-error
-            // (host succeeds but mem=NULL, or guest ResourceTracker rejects post-host).
-            fprintf(stderr,
-                    "ZC-ALLOCMEM: vkAllocateMemory done res=%d mem=%p size=%llu typeIdx=%u "
-                    "dedImg=%p dedBuf=%p exportHandleTypes=0x%x\n",
-                    (int)result, (void*)*pMemory,
-                    (unsigned long long)localAllocInfo.allocationSize, localAllocInfo.memoryTypeIndex,
-                    (void*)(dedicatedAllocInfoPtr ? dedicatedAllocInfoPtr->image : VK_NULL_HANDLE),
-                    (void*)(dedicatedAllocInfoPtr ? dedicatedAllocInfoPtr->buffer : VK_NULL_HANDLE),
-                    exportAllocateInfo ? exportAllocateInfo->handleTypes : 0u);
-        }
         if (result != VK_SUCCESS) {
             return result;
         }

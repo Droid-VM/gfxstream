@@ -230,12 +230,6 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 .setAnnotations(std::move(executionData))
                 .build();
 
-        // gfxstream-zerocopy debug: trace each Vulkan opcode to stderr so a render-thread crash
-        // can be pinned to the exact call. Unconditional (the launch wrapper does not forward
-        // arbitrary env vars); remove once the dmabuf import path is stable.
-        fprintf(stderr, "ZC-OP: %s (0x%x) len=%u\n", api_opcode_to_string(opcode), opcode,
-                packetLen);
-
         switch (opcode) {
 #ifdef VK_VERSION_1_0
             case OP_vkCreateInstance: {
@@ -3942,11 +3936,6 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                     zc_origAspect == VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT) {
                     pLayout->rowPitch = m_state->getEmulatedLinearImageRowPitch(image);
                 }
-                fprintf(stderr,
-                        "ZEROCOPY-STRIDE: img=%p origAspect=0x%x usedAspect=0x%x rowPitch=%llu\n",
-                        (void*)image, zc_origAspect,
-                        pSubresource ? (uint32_t)((VkImageSubresource*)pSubresource)->aspectMask : 0u,
-                        pLayout ? (unsigned long long)pLayout->rowPitch : 0ull);
                 vkStream->unsetHandleMapping();
                 if (pLayout) {
                     transform_fromhost_VkSubresourceLayout(m_state,
