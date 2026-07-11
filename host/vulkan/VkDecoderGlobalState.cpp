@@ -31,6 +31,7 @@
 #include "VkDecoderInternalStructs.h"
 #include "VkDecoderSnapshot.h"
 #include "VkDecoderSnapshotUtils.h"
+#include "HostVisibleArena.h"
 #include "VkEmulatedPhysicalDeviceMemory.h"
 #include "VkEmulatedPhysicalDeviceQueue.h"
 #include "VkUtils.h"
@@ -6667,6 +6668,29 @@ class VkDecoderGlobalState::Impl {
                                     static_cast<unsigned long long>(alignedSize));
                 }
                 localAllocInfo.allocationSize = alignedSize;
+
+                // Production arena routing (GFXSTREAM_ARENA_* env; see
+                // HostVisibleArena.h / GFXSTREAM_ARENA_PLAN.md).  Parsed once.
+                // v1 scaffold: decision is computed and logged; the blessed
+                // recycle pool that acts on it lands next.  Default config
+                // (threshold 0) is a no-op, so behavior is unchanged.
+                static const HostVisibleArenaConfig kArenaCfg =
+                    HostVisibleArenaConfig::fromEnv();
+                static bool kArenaLogged = false;
+                if (kArenaCfg.enabled() && !kArenaLogged) {
+                    kArenaLogged = true;
+                    GFXSTREAM_INFO(
+                        "host-visible arena: mode=%d capMB=%llu thresholdKB=%lld",
+                        (int)kArenaCfg.mode,
+                        (unsigned long long)(kArenaCfg.capBytes >> 20),
+                        (long long)(kArenaCfg.thresholdBytes == UINT64_MAX
+                                        ? -1
+                                        : (long long)(kArenaCfg.thresholdBytes >> 10)));
+                }
+                const bool arenaRoute =
+                    kArenaCfg.routesToArena(localAllocInfo.allocationSize);
+                (void)arenaRoute;  // consumed by the pool (next step)
+
                 auto memory = SharedMemory("shared-memory-vk-" + std::to_string(sUniqueShmemId++),
                                            localAllocInfo.allocationSize);
 
