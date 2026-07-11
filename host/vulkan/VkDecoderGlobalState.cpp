@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "FrameBuffer.h"
+#include "HostVisibleFolio.h"
 #include "RenderThreadInfoVk.h"
 #include "TrivialStream.h"
 #include "VkAndroidNativeBuffer.h"
@@ -6618,6 +6619,7 @@ class VkDecoderGlobalState::Impl {
         std::optional<VkImportMemoryHostPointerInfoEXT> importHostInfo;
         std::optional<VkExportMemoryAllocateInfo> exportAllocateInfo;
         std::shared_ptr<PrivateMemory> privateMemory = {};
+        HostVisibleFolioCharge folioCharge;
 
         if (emulateHostVisible) {
             if (createBlobInfoPtr && createBlobInfoPtr->blobMem == STREAM_BLOB_MEM_GUEST &&
@@ -6667,6 +6669,43 @@ class VkDecoderGlobalState::Impl {
                                     static_cast<unsigned long long>(alignedSize));
                 }
                 localAllocInfo.allocationSize = alignedSize;
+
+                // DroidVM: back the memfd with 2MB order-9 folios (see
+                // HostVisibleFolio.h). Round up so the shmem collapses into
+                // whole folios; the extra tail is invisible to the guest (it
+                // maps only its own blob size) and to blob export (crosvm
+                // receives the memfd and maps the blob size).
+                static const HostVisibleFolioConfig kFolioCfg = [] {
+                    auto cfg = HostVisibleFolioConfig::fromEnv();
+                    fprintf(stderr, "VKFOLIO: mode=%d thresholdKB=%llu quotaMB=%llu\n",
+                            (int)cfg.mode, (unsigned long long)(cfg.thresholdBytes >> 10),
+                            (unsigned long long)(cfg.quotaBytes >> 20));
+                    return cfg;
+                }();
+                const bool udmabufEnabled =
+                    m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled;
+                if (udmabufEnabled && kFolioCfg.routesToFolio(alignedSize)) {
+                    VkDeviceSize roundedSize = ALIGN(alignedSize, kFolioSize);
+                    if (folioCharge.tryCharge(roundedSize, kFolioCfg.quotaBytes)) {
+                        localAllocInfo.allocationSize = roundedSize;
+                    } else if (kFolioCfg.strict()) {
+                        GFXSTREAM_ERROR(
+                            "VKFOLIO: quota exhausted (used %llu MB + %llu MB > cap %llu MB), "
+                            "strict mode -> VK_ERROR_OUT_OF_DEVICE_MEMORY",
+                            (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
+                            (unsigned long long)(roundedSize >> 20),
+                            (unsigned long long)(kFolioCfg.quotaBytes >> 20));
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    } else {
+                        fprintf(stderr,
+                                "VKFOLIO: quota exhausted (used %llu MB, need %llu MB, cap %llu "
+                                "MB), falling back to 4K path\n",
+                                (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
+                                (unsigned long long)(roundedSize >> 20),
+                                (unsigned long long)(kFolioCfg.quotaBytes >> 20));
+                    }
+                }
+
                 auto memory = SharedMemory("shared-memory-vk-" + std::to_string(sUniqueShmemId++),
                                            localAllocInfo.allocationSize);
 
@@ -6677,6 +6716,26 @@ class VkDecoderGlobalState::Impl {
                         GFXSTREAM_ERROR("Failed to create shared memory, error: %d", ret);
                         return VK_ERROR_OUT_OF_HOST_MEMORY;
                     }
+
+#if defined(__linux__)
+                    // Collapse before the udmabuf is created: udmabuf pins the
+                    // pages, and extra references block MADV_COLLAPSE.
+                    if (folioCharge.bytes()) {
+                        int collapseErr = CollapseMemfdToFolios(
+                            memory.getFd(), localAllocInfo.allocationSize);
+                        fprintf(stderr, "VKFOLIO: size=%llu collapse=%d used=%lluMB/%lluMB\n",
+                                (unsigned long long)localAllocInfo.allocationSize, collapseErr,
+                                (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
+                                (unsigned long long)(kFolioCfg.quotaBytes >> 20));
+                        if (collapseErr && kFolioCfg.strict()) {
+                            GFXSTREAM_ERROR(
+                                "VKFOLIO: MADV_COLLAPSE failed (errno %d), strict mode -> "
+                                "VK_ERROR_OUT_OF_DEVICE_MEMORY",
+                                collapseErr);
+                            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                        }
+                    }
+#endif
 
                     auto creator = m_vkEmulation->getUdmabufCreator();
                     if (!creator) {
@@ -6852,6 +6911,7 @@ class VkDecoderGlobalState::Impl {
                                                   : localAllocInfo.allocationSize;
         memoryInfo.device = device;
         memoryInfo.memoryIndex = localAllocInfo.memoryTypeIndex;
+        memoryInfo.folioBytes = folioCharge.transfer();
 
         if (importCbInfoPtr) {
             memoryInfo.boundColorBuffer = importCbInfoPtr->colorBuffer;
@@ -6933,6 +6993,11 @@ class VkDecoderGlobalState::Impl {
 
         if (memoryInfo.needUnmap && memoryInfo.ptr) {
             deviceDispatch->vkUnmapMemory(device, memory);
+        }
+
+        if (memoryInfo.folioBytes) {
+            HostVisibleFolioQuota::release(memoryInfo.folioBytes);
+            memoryInfo.folioBytes = 0;
         }
 
         deviceDispatch->vkFreeMemory(device, memory, pAllocator);

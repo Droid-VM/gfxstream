@@ -172,6 +172,9 @@ struct MemoryInfo {
     uint32_t memoryIndex = 0;
     // Set if the memory is backed by shared memory.
     std::optional<gfxstream::base::SharedMemory> sharedMemory;
+    // Folio-backed quota charged against the HostVisibleFolio budget;
+    // released when the memory is destroyed.
+    uint64_t folioBytes = 0;
 
     std::shared_ptr<PrivateMemory> privateMemory;
     // virtio-gpu blobs
