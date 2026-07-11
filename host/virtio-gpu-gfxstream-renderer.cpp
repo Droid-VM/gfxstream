@@ -171,6 +171,16 @@ ParseGfxstreamFeatures(const int rendererFlags,
             (unsigned)rendererFlags, (unsigned)STREAM_RENDERER_FLAGS_USE_EXTERNAL_BLOB,
             features.VulkanAllocateHostVisibleAsUdmabuf.enabled, features.ExternalBlob.enabled);
     GFXSTREAM_SET_FEATURE_ON_CONDITION(&features, VulkanEnsureCachedCoherentMemoryAvailable, true);
+    // DroidVM: zink (the guest compositor GL driver) requires the nullDescriptor
+    // feature of VK_EXT_robustness2. The guest ICD reports the capability, but
+    // the generated marshaling cannot carry Robustness2 feature structs, so the
+    // only way the feature actually reaches vkCreateDevice is the force-enable
+    // in VkDecoderGlobalState, which is gated on this feature flag. Without it
+    // every null descriptor is a raw address-0 read -> kgsl GPU PAGE FAULT
+    // (UCHE, addr=0) on each draw -> black frames.
+    GFXSTREAM_SET_FEATURE_ON_CONDITION(
+        &features, VulkanRobustness,
+        gfxstream::base::getEnvironmentVariable("GFXSTREAM_VULKAN_ROBUSTNESS") != "0");
 
     for (const std::string& rendererFeature : gfxstream::Split(rendererFeatures, ",")) {
         if (rendererFeature.empty()) continue;
