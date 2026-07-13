@@ -6493,8 +6493,6 @@ class VkDecoderGlobalState::Impl {
         uint32_t virtioGpuContextId = 0;
         VkMemoryPropertyFlags memoryPropertyFlags;
 
-        bool deviceHasDmabufExt = false;
-
         // Map guest memory index to host memory index and lookup memory properties:
         {
             std::lock_guard<std::mutex> lock(mMutex);
@@ -6511,9 +6509,6 @@ class VkDecoderGlobalState::Impl {
             if (!physicalDeviceInfo) {
                 GFXSTREAM_FATAL("No info available for VkPhysicalDevice:%p", deviceInfo->physicalDevice);
             }
-
-            deviceHasDmabufExt =
-                hasDeviceExtension(device, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
 
             const auto hostMemoryInfoOpt =
                 physicalDeviceInfo->memoryPropertiesHelper
@@ -6590,7 +6585,7 @@ class VkDecoderGlobalState::Impl {
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
 
-                if (!m_vkEmulation->supportsDmaBuf() || !deviceHasDmabufExt) {
+                if (m_vkEmulation->getExternalMemoryMode() != ExternalMemory::Mode::DmaBuf) {
                     GFXSTREAM_ERROR("dmabuf not supported");
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
@@ -6600,7 +6595,6 @@ class VkDecoderGlobalState::Impl {
                 vk_append_struct(&structChainIter, &importFdInfo);
 #else
                 (void)virtioGpuContextId;  // suppress warnings
-                (void)deviceHasDmabufExt;
                 GFXSTREAM_ERROR("Guest Handle flow should not work here");
                 return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 #endif
@@ -6639,7 +6633,7 @@ class VkDecoderGlobalState::Impl {
 
                     // Import operation takes ownership of descriptor
 #if defined(__linux__)
-                    if (!m_vkEmulation->supportsDmaBuf() || !deviceHasDmabufExt) {
+                    if (m_vkEmulation->getExternalMemoryMode() != ExternalMemory::Mode::DmaBuf) {
                         GFXSTREAM_ERROR("dmabuf not supported");
                         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                     }
@@ -6681,12 +6675,6 @@ class VkDecoderGlobalState::Impl {
             } else if (m_vkEmulation->getFeatures().ExternalBlob.enabled()) {
                 VkExternalMemoryHandleTypeFlags handleTypes =
                     m_vkEmulation->getDefaultExternalMemoryHandleType();
-#ifdef __linux__
-                if (m_vkEmulation->supportsDmaBuf() && deviceHasDmabufExt) {
-                    handleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-                }
-#endif
-
                 exportAllocateInfo = {
                     .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
                     .pNext = NULL,
@@ -10155,14 +10143,6 @@ class VkDecoderGlobalState::Impl {
         }
 #endif
 
-#if defined(__linux__)
-        // A dma-buf is a Linux kernel construct, commonly used with open-source DRM drivers.
-        // See https://docs.kernel.org/driver-api/dma-buf.html for details.
-        if (m_vkEmulation->supportsDmaBuf()) {
-            hostAlwaysDeviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
-        }
-#endif
-
         // Enable all the device extensions that should always be enabled on the host (if available)
         for (auto extName : hostAlwaysDeviceExtensions) {
             if (hasDeviceExtension(properties, extName)) {
@@ -10353,6 +10333,7 @@ class VkDecoderGlobalState::Impl {
         const auto extMemMode = m_vkEmulation->getExternalMemoryMode();
         switch (extMemMode) {
 #if defined(__unix__) && !defined(__ANDROID__)
+            case ExternalMemory::Mode::DmaBuf:
             case ExternalMemory::Mode::OpaqueFd: {
                 if (!vk->vkGetMemoryFdKHR) {
                     GFXSTREAM_ERROR("%s: External memory function not supported.", __func__);
@@ -10362,16 +10343,13 @@ class VkDecoderGlobalState::Impl {
                     .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
                     .pNext = nullptr,
                     .memory = memory,
-                    .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+                    .handleType = (extMemMode == ExternalMemory::Mode::DmaBuf)
+                                      ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
+                                      : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
                 };
-                ret.streamHandleType = STREAM_HANDLE_TYPE_MEM_OPAQUE_FD;
-
-#if defined(__linux__)
-                if (m_vkEmulation->supportsDmaBuf()) {
-                    memoryGetFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-                    ret.streamHandleType = STREAM_HANDLE_TYPE_MEM_DMABUF;
-                }
-#endif
+                ret.streamHandleType = (extMemMode == ExternalMemory::Mode::DmaBuf)
+                                           ? STREAM_HANDLE_TYPE_MEM_DMABUF
+                                           : STREAM_HANDLE_TYPE_MEM_OPAQUE_FD;
 
                 int fd = -1;
                 VkResult res = vk->vkGetMemoryFdKHR(device, &memoryGetFdInfo, &fd);
