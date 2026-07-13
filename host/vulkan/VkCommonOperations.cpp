@@ -1031,7 +1031,10 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             GFXSTREAM_DEBUG("Found out that we can create a higher version instance.");
             appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
 
-            gvk->vkDestroyInstance(emulation->mInstance, nullptr);
+            // vkDestroyInstance is an instance-level command -> use the instance dispatch (ivk),
+            // not the global dispatch (gvk) whose vkDestroyInstance is NULL under DroidVM's custom
+            // VK loader. (vkCreateInstance below is a genuine global command, so it stays on gvk.)
+            ivk->vkDestroyInstance(emulation->mInstance, nullptr);
 
             res = gvk->vkCreateInstance(&instCi, nullptr, &emulation->mInstance);
             if (res != VK_SUCCESS) {
@@ -1825,7 +1828,13 @@ VkEmulation::~VkEmulation() {
 
     mIvk->vkDestroyDevice(mDevice, nullptr);
 
-    mGvk->vkDestroyInstance(mInstance, nullptr);
+    // vkDestroyInstance is an instance-level command, so it lives in the instance dispatch (mIvk),
+    // NOT the global dispatch (mGvk). DroidVM's custom VK loader only patches the true global
+    // commands (vkCreateInstance / vkEnumerateInstance*) into the global dispatch, so
+    // mGvk->vkDestroyInstance is a NULL function pointer -- calling it SIGSEGV'd the v_gpu thread at
+    // 0x0 during graceful VM teardown (guest-clean poweroff, which unlike SIGTERM runs device Drop
+    // and hence this destructor). Route it through the instance dispatch like vkDestroyDevice above.
+    mIvk->vkDestroyInstance(mInstance, nullptr);
 }
 
 bool VkEmulation::isYcbcrEmulationEnabled() const { return mEnableYcbcrEmulation; }
