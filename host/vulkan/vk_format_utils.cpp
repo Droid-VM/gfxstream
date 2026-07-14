@@ -71,32 +71,36 @@ void UnpackD16S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
     }
 }
 
+// Per the Vulkan spec, buffer copies of the depth aspect of D24 formats use
+// VK_FORMAT_X8_D24_UNORM_PACK32: one 32-bit word per texel, upper 8 bits unused.
 void PackD24S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
     const uint32_t numPixels = extent.width * extent.height * extent.depth;
-    const uint32_t plane0Size = numPixels * 3;
+    const uint32_t plane0Size = numPixels * 4;
     const uint32_t plane1Offset = alignToPower2(plane0Size, 4);
     const uint8_t* srcPixels = src;
     uint8_t* dstDepth = dst;
     uint8_t* dstStencil = dst + plane1Offset;
     for (uint32_t i = 0; i < numPixels; ++i) {
-        dstDepth[i * 3 + 0] = srcPixels[i * 4 + 0];
-        dstDepth[i * 3 + 1] = srcPixels[i * 4 + 1];
-        dstDepth[i * 3 + 2] = srcPixels[i * 4 + 2];
+        dstDepth[i * 4 + 0] = srcPixels[i * 4 + 0];
+        dstDepth[i * 4 + 1] = srcPixels[i * 4 + 1];
+        dstDepth[i * 4 + 2] = srcPixels[i * 4 + 2];
+        // Unused X8 byte; zero it so the staging contents are deterministic.
+        dstDepth[i * 4 + 3] = 0;
         dstStencil[i] = srcPixels[i * 4 + 3];
     }
 }
 
 void UnpackD24S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
     const uint32_t numPixels = extent.width * extent.height * extent.depth;
-    const uint32_t plane0Size = numPixels * 3;
+    const uint32_t plane0Size = numPixels * 4;
     const uint32_t plane1Offset = alignToPower2(plane0Size, 4);
     const uint8_t* srcDepth = src;
     const uint8_t* srcStencil = src + plane1Offset;
     uint8_t* dstPixels = dst;
     for (uint32_t i = 0; i < numPixels; ++i) {
-        dstPixels[i * 4 + 0] = srcDepth[i * 3 + 0];
-        dstPixels[i * 4 + 1] = srcDepth[i * 3 + 1];
-        dstPixels[i * 4 + 2] = srcDepth[i * 3 + 2];
+        dstPixels[i * 4 + 0] = srcDepth[i * 4 + 0];
+        dstPixels[i * 4 + 1] = srcDepth[i * 4 + 1];
+        dstPixels[i * 4 + 2] = srcDepth[i * 4 + 2];
         dstPixels[i * 4 + 3] = srcStencil[i];
     }
 }
@@ -247,7 +251,7 @@ const std::unordered_map<VkFormat, FormatPlaneLayouts>& getFormatPlaneLayoutsMap
                          {
                              .horizontalSubsampling = 1,
                              .verticalSubsampling = 1,
-                             .sampleIncrementBytes = 3,
+                             .sampleIncrementBytes = 4,
                              .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
                          },
                          {
@@ -336,6 +340,8 @@ std::optional<VkFormat> ToVkFormat(GfxstreamFormat format) {
             return VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16;
         case GfxstreamFormat::R10G10B10A2_UNORM:
             return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        case GfxstreamFormat::R4G4B4A4_UNORM:
+            return VK_FORMAT_R4G4B4A4_UNORM_PACK16;
         case GfxstreamFormat::R16_UNORM:
             return VK_FORMAT_R16_UNORM;
         case GfxstreamFormat::R16G16B16_FLOAT:
@@ -375,6 +381,8 @@ std::optional<GfxstreamFormat> ToGfxstreamFormat(VkFormat format) {
     switch (format) {
         case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
             return GfxstreamFormat::B4G4R4A4_UNORM;
+        case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+            return GfxstreamFormat::R4G4B4A4_UNORM;
         case VK_FORMAT_B5G5R5A1_UNORM_PACK16:
             return GfxstreamFormat::B5G5R5A1_UNORM;
         case VK_FORMAT_B8G8R8A8_UNORM:
