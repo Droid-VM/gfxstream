@@ -6634,9 +6634,10 @@ class VkDecoderGlobalState::Impl {
                 // receives the memfd and maps the blob size).
                 static const HostVisibleFolioConfig kFolioCfg = [] {
                     auto cfg = HostVisibleFolioConfig::fromEnv();
-                    fprintf(stderr, "VKFOLIO: mode=%d thresholdKB=%llu quotaMB=%llu\n",
-                            (int)cfg.mode, (unsigned long long)(cfg.thresholdBytes >> 10),
-                            (unsigned long long)(cfg.quotaBytes >> 20));
+                    fprintf(stderr, "VKFOLIO: limitMB=%llu thresholdKB=%llu policy=%s\n",
+                            (unsigned long long)(cfg.quotaBytes >> 20),
+                            (unsigned long long)(cfg.thresholdBytes >> 10),
+                            cfg.oomOnExceed() ? "oom" : "fallback");
                     return cfg;
                 }();
                 const bool udmabufEnabled =
@@ -6645,10 +6646,10 @@ class VkDecoderGlobalState::Impl {
                     VkDeviceSize roundedSize = ALIGN(alignedSize, kFolioSize);
                     if (folioCharge.tryCharge(roundedSize, kFolioCfg.quotaBytes)) {
                         localAllocInfo.allocationSize = roundedSize;
-                    } else if (kFolioCfg.strict()) {
+                    } else if (kFolioCfg.oomOnExceed()) {
                         GFXSTREAM_ERROR(
                             "VKFOLIO: quota exhausted (used %llu MB + %llu MB > cap %llu MB), "
-                            "strict mode -> VK_ERROR_OUT_OF_DEVICE_MEMORY",
+                            "exceed-policy=oom -> VK_ERROR_OUT_OF_DEVICE_MEMORY",
                             (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
                             (unsigned long long)(roundedSize >> 20),
                             (unsigned long long)(kFolioCfg.quotaBytes >> 20));
@@ -6688,9 +6689,9 @@ class VkDecoderGlobalState::Impl {
                                     (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
                                     (unsigned long long)(kFolioCfg.quotaBytes >> 20));
                         }
-                        if (collapseErr && kFolioCfg.strict()) {
+                        if (collapseErr && kFolioCfg.oomOnExceed()) {
                             GFXSTREAM_ERROR(
-                                "VKFOLIO: MADV_COLLAPSE failed (errno %d), strict mode -> "
+                                "VKFOLIO: MADV_COLLAPSE failed (errno %d), exceed-policy=oom -> "
                                 "VK_ERROR_OUT_OF_DEVICE_MEMORY",
                                 collapseErr);
                             return VK_ERROR_OUT_OF_DEVICE_MEMORY;

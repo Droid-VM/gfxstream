@@ -21,20 +21,20 @@
 // chunk), or its 4K frees become invisible to the reserve pool's free hook
 // and the pages are lost to the pool until the owner dies.
 //
-// Config (env, nothing hardcoded):
-//   GFXSTREAM_ARENA_MB           total folio budget, MiB (default 1024)
-//   GFXSTREAM_ARENA_THRESHOLD_KB routing gate, KiB (default 1024 = 1MB:
-//     worst-case rounding waste 50%, user-accepted):
-//     0   -> off: everything stays on the 4K dynamic path
-//     -1  -> strict: every host-visible allocation is folio-backed; quota
-//            full or collapse failure -> VK_ERROR_OUT_OF_DEVICE_MEMORY
-//     >0  -> allocations >= threshold are folio-backed (small dedicated/BDA
-//            allocations stay on the 4K path so they don't pay a 2MB tax);
-//            quota full or collapse failure falls back to the 4K path
+// Config comes from crosvm's --gpu sub-options (vram-limit / vram-folio-threshold /
+// vram-exceed-policy), plumbed in as env vars:
+//   GFXSTREAM_VRAM_LIMIT_MB           folio budget, MiB (default 1024); 0 disables folio
+//                                     backing (every host-visible alloc shares 4K pages)
+//   GFXSTREAM_VRAM_FOLIO_THRESHOLD_KB routing gate, KiB (default 1024 = 1MB): an allocation
+//                                     >= this takes a reserved 2MB folio; smaller ones share
+//                                     4K pages directly (no 2MB rounding tax). 0 => all folio.
+//   GFXSTREAM_VRAM_EXCEED_POLICY      on budget/collapse failure: "fallback" (default, drop
+//                                     to the 4K path) or "oom" (VK_ERROR_OUT_OF_DEVICE_MEMORY)
 #pragma once
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 #include <atomic>
 #include <utility>
@@ -52,49 +52,33 @@ namespace vk {
 constexpr uint64_t kFolioSize = 2ULL * 1024 * 1024;
 
 struct HostVisibleFolioConfig {
-    enum Mode {
-        kOff = 0,     // all allocations stay on the 4K dynamic path
-        kStrict,      // everything folio-backed; failure -> OOM
-        kThreshold,   // >= thresholdBytes folio-backed; failure -> 4K fallback
+    // What to do when the folio budget is exhausted (or MADV_COLLAPSE fails).
+    enum ExceedPolicy {
+        kFallback = 0,  // drop the allocation to the 4K dynamic path
+        kOom,           // fail with VK_ERROR_OUT_OF_DEVICE_MEMORY
     };
 
-    Mode mode = kOff;
-    uint64_t thresholdBytes = 0;
-    uint64_t quotaBytes = 0;
+    uint64_t quotaBytes = 0;      // 0 => folio backing disabled (all allocs on the 4K path)
+    uint64_t thresholdBytes = 0;  // allocs >= this route to folio; 0 => all
+    ExceedPolicy exceedPolicy = kFallback;
 
-    bool enabled() const { return mode != kOff; }
-    bool strict() const { return mode == kStrict; }
+    bool enabled() const { return quotaBytes > 0; }
+    bool oomOnExceed() const { return exceedPolicy == kOom; }
 
-    bool routesToFolio(uint64_t size) const {
-        switch (mode) {
-            case kStrict:
-                return true;
-            case kThreshold:
-                return size >= thresholdBytes;
-            case kOff:
-            default:
-                return false;
-        }
-    }
+    bool routesToFolio(uint64_t size) const { return enabled() && size >= thresholdBytes; }
 
     static HostVisibleFolioConfig fromEnv() {
         HostVisibleFolioConfig c;
-
-        const char* mb = getenv("GFXSTREAM_ARENA_MB");
-        uint64_t quotaMb = mb ? strtoull(mb, nullptr, 0) : 1024;
-        c.quotaBytes = quotaMb << 20;
-
-        const char* th = getenv("GFXSTREAM_ARENA_THRESHOLD_KB");
-        long long thkb = th ? strtoll(th, nullptr, 0) : 1024;  // default: 1MB gate
-        if (thkb == 0) {
-            c.mode = kOff;
-        } else if (thkb < 0) {
-            c.mode = kStrict;
-            c.thresholdBytes = 0;
-        } else {
-            c.mode = kThreshold;
-            c.thresholdBytes = static_cast<uint64_t>(thkb) << 10;
-        }
+        // vram-limit: folio budget MiB (0 disables folio backing).
+        const char* limit = getenv("GFXSTREAM_VRAM_LIMIT_MB");
+        c.quotaBytes = (limit ? strtoull(limit, nullptr, 0) : 1024) << 20;
+        // vram-folio-threshold: min alloc KiB for a folio; smaller share 4K. 0 => all folio.
+        const char* th = getenv("GFXSTREAM_VRAM_FOLIO_THRESHOLD_KB");
+        long long v = th ? strtoll(th, nullptr, 0) : 1024;
+        c.thresholdBytes = (v > 0) ? (static_cast<uint64_t>(v) << 10) : 0;
+        // vram-exceed-policy: "oom" or "fallback" (default).
+        const char* pol = getenv("GFXSTREAM_VRAM_EXCEED_POLICY");
+        c.exceedPolicy = (pol && !strcmp(pol, "oom")) ? kOom : kFallback;
         return c;
     }
 };
