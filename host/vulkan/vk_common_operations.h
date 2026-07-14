@@ -23,6 +23,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "vulkan/vk_vvl_configuration.h"
+
 #include "borrowed_image_vk.h"
 #include "compositor_vk.h"
 #include "debug_utils_helper.h"
@@ -158,6 +160,10 @@ class VkEmulation {
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT externalMemoryHostProperties() const;
 
     bool isGuestVulkanOnly() const;
+
+    std::unique_ptr<VVLContext> createVVLContext(
+        const std::string& appName, const std::string& engineName,
+        VkDebugUtilsMessengerCreateInfoEXT* outCreateInfo = nullptr) const;
 
     bool commandBufferCheckpointsEnabled() const;
 
@@ -736,6 +742,8 @@ class VkEmulation {
 
     // UdmabufCreator
     std::unique_ptr<UdmabufCreator> mUdmabufCreator;
+
+    std::optional<VVLConfiguration> mVVLConfig;
 };
 
 }  // namespace vk
