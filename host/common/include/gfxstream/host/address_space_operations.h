@@ -22,5 +22,7 @@ namespace host {
 void set_gfxstream_address_space_ops(const address_space_device_control_ops& ops);
 const address_space_device_control_ops& get_gfxstream_address_space_ops();
 
+uint32_t get_gfxstream_guest_page_size();
+
 }  // namespace host
 }  // namespace gfxstream

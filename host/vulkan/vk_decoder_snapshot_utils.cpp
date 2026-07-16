@@ -25,6 +25,15 @@ namespace vk {
 
 namespace {
 
+#define VK_RETURN_FALSE_ON_ERROR(x)                  \
+    do {                                             \
+        VkResult err = x;                            \
+        if (err != VK_SUCCESS) {                     \
+            GFXSTREAM_ERROR("Vulkan error %d", err); \
+            return false;                            \
+        }                                            \
+    } while (0)
+
 uint32_t GetMemoryType(const PhysicalDeviceInfo& physicalDevice,
                        const VkMemoryRequirements& memoryRequirements,
                        VkMemoryPropertyFlags memoryProperties) {
@@ -201,7 +210,7 @@ bool saveImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
                 .pCommandBuffers = &commandBuffer,
             };
             VK_CHECK(dispatch->vkQueueSubmit(stateBlock->queue, 1, &submitInfo, fence));
-            VK_CHECK(
+            VK_RETURN_FALSE_ON_ERROR(
                 dispatch->vkWaitForFences(stateBlock->device, 1, &fence, VK_TRUE, 3000000000L));
             VK_CHECK(dispatch->vkResetFences(stateBlock->device, 1, &fence));
             auto bytes = mipmapStagingBufferSize;
