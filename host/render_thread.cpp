@@ -86,7 +86,7 @@ RenderThread::RenderThread(RenderChannelImpl* channel,
             loadStream(load, &*mStream);
             mState = SnapshotState::StartLoading;
         } else {
-            mFinished.store(true, std::memory_order_relaxed);
+            setFinished();
         }
     }
 }
@@ -104,7 +104,7 @@ RenderThread::RenderThread(const AsgConsumerCreateInfo& info, Stream* load)
             loadStream(load, &*mStream);
             mState = SnapshotState::StartLoading;
         } else {
-            mFinished.store(true, std::memory_order_relaxed);
+            setFinished();
         }
     }
 }
@@ -281,6 +281,12 @@ intptr_t RenderThread::main() {
     ChecksumCalculator& checksumCalc = ChecksumCalculatorThreadInfo::get();
     bool needRestoreFromSnapshot = false;
 
+    if (!FrameBuffer::getFB()) {
+        GFXSTREAM_ERROR("Invalid framebuffer for RenderThread @%p", this);
+        setFinished();
+        return 0;
+    }
+
     //
     // initialize decoders
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -293,7 +299,7 @@ intptr_t RenderThread::main() {
 
     if (!mChannel && !mRingStream) {
         GFXSTREAM_DEBUG("Exited a loader RenderThread @%p", this);
-        mFinished.store(true, std::memory_order_relaxed);
+        setFinished();
         return 0;
     }
 
