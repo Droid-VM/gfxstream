@@ -4271,11 +4271,13 @@ void GL2Encoder::s_glFramebufferTextureLayer(void* self, GLenum target, GLenum a
                  GL_INVALID_OPERATION);
     state->attachTextureObject(target, attachment, texture, level, layer);
 
-    GLint max3DTextureSize;
-    ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max3DTextureSize);
-    SET_ERROR_IF(
-            layer >= max3DTextureSize,
-            GL_INVALID_VALUE);
+    if (lastBoundTarget == GL_TEXTURE_3D) {
+        GLint max3DTextureSize;
+        ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max3DTextureSize);
+        SET_ERROR_IF(
+                layer >= max3DTextureSize,
+                GL_INVALID_VALUE);
+    }
 
     ctx->m_glFramebufferTextureLayer_enc(self, target, attachment, texture, level, layer);
 }
@@ -4412,26 +4414,25 @@ void GL2Encoder::s_glTexImage3D(void* self, GLenum target, GLint level, GLint in
     SET_ERROR_IF(ctx->isBufferTargetMapped(GL_PIXEL_UNPACK_BUFFER), GL_INVALID_OPERATION);
 
     GLint max_texture_size;
-    GLint max_3d_texture_size;
     ctx->glGetIntegerv(ctx, GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
     SET_ERROR_IF(level < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(level > ilog2(max_texture_size), GL_INVALID_VALUE);
-    SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
 
     SET_ERROR_IF(width < 0 || height < 0 || depth < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(width > max_texture_size, GL_INVALID_VALUE);
     SET_ERROR_IF(height > max_texture_size, GL_INVALID_VALUE);
     if (target == GL_TEXTURE_3D) {
-        SET_ERROR_IF(depth > max_texture_size, GL_INVALID_VALUE);
+        GLint max_3d_texture_size;
+        ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
+        SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
+        SET_ERROR_IF(width > max_3d_texture_size, GL_INVALID_VALUE);
+        SET_ERROR_IF(height > max_3d_texture_size, GL_INVALID_VALUE);
+        SET_ERROR_IF(depth > max_3d_texture_size, GL_INVALID_VALUE);
     } else {
         GLint maxArrayTextureLayers;
         ctx->glGetIntegerv(ctx, GL_MAX_ARRAY_TEXTURE_LAYERS, &maxArrayTextureLayers);
         SET_ERROR_IF(depth > maxArrayTextureLayers, GL_INVALID_VALUE);
     }
-    SET_ERROR_IF(width > max_3d_texture_size, GL_INVALID_VALUE);
-    SET_ERROR_IF(height > max_3d_texture_size, GL_INVALID_VALUE);
-    SET_ERROR_IF(depth > max_3d_texture_size, GL_INVALID_VALUE);
     SET_ERROR_IF(border != 0, GL_INVALID_VALUE);
     // If unpack buffer is nonzero, verify buffer data fits and is evenly divisible by the type.
     SET_ERROR_IF(ctx->boundBuffer(GL_PIXEL_UNPACK_BUFFER) &&
@@ -4476,12 +4477,14 @@ void GL2Encoder::s_glTexSubImage3D(void* self, GLenum target, GLint level, GLint
     // If unpack buffer is nonzero, verify unmapped state.
     SET_ERROR_IF(ctx->isBufferTargetMapped(GL_PIXEL_UNPACK_BUFFER), GL_INVALID_OPERATION);
     GLint max_texture_size;
-    GLint max_3d_texture_size;
     ctx->glGetIntegerv(ctx, GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
     SET_ERROR_IF(level < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(level > ilog2(max_texture_size), GL_INVALID_VALUE);
-    SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
+    if (target == GL_TEXTURE_3D) {
+        GLint max_3d_texture_size;
+        ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
+        SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
+    }
     SET_ERROR_IF(width < 0 || height < 0 || depth < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(xoffset < 0 || yoffset < 0 || zoffset < 0, GL_INVALID_VALUE);
     GLuint tex = state->getBoundTexture(target);
@@ -4538,26 +4541,25 @@ void GL2Encoder::s_glCompressedTexImage3D(void* self, GLenum target, GLint level
     SET_ERROR_IF(border, GL_INVALID_VALUE);
 
     GLint max_texture_size;
-    GLint max_3d_texture_size;
     ctx->glGetIntegerv(ctx, GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
     SET_ERROR_IF(level < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(level > ilog2(max_texture_size), GL_INVALID_VALUE);
-    SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
 
     SET_ERROR_IF(width < 0 || height < 0 || depth < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(width > max_texture_size, GL_INVALID_VALUE);
     SET_ERROR_IF(height > max_texture_size, GL_INVALID_VALUE);
     if (target == GL_TEXTURE_3D) {
-        SET_ERROR_IF(depth > max_texture_size, GL_INVALID_VALUE);
+        GLint max_3d_texture_size;
+        ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
+        SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
+        SET_ERROR_IF(width > max_3d_texture_size, GL_INVALID_VALUE);
+        SET_ERROR_IF(height > max_3d_texture_size, GL_INVALID_VALUE);
+        SET_ERROR_IF(depth > max_3d_texture_size, GL_INVALID_VALUE);
     } else {
         GLint maxArrayTextureLayers;
         ctx->glGetIntegerv(ctx, GL_MAX_ARRAY_TEXTURE_LAYERS, &maxArrayTextureLayers);
         SET_ERROR_IF(depth > maxArrayTextureLayers, GL_INVALID_VALUE);
     }
-    SET_ERROR_IF(width > max_3d_texture_size, GL_INVALID_VALUE);
-    SET_ERROR_IF(height > max_3d_texture_size, GL_INVALID_VALUE);
-    SET_ERROR_IF(depth > max_3d_texture_size, GL_INVALID_VALUE);
     SET_ERROR_IF(GLESTextureUtils::isAstcFormat(internalformat) && GL_TEXTURE_3D == target, GL_INVALID_OPERATION);
 
     // If unpack buffer is nonzero, verify buffer data fits.
@@ -4598,12 +4600,14 @@ void GL2Encoder::s_glCompressedTexSubImage3D(void* self, GLenum target, GLint le
     SET_ERROR_IF(xoffset < 0 || yoffset < 0 || zoffset < 0, GL_INVALID_VALUE);
 
     GLint max_texture_size;
-    GLint max_3d_texture_size;
     ctx->glGetIntegerv(ctx, GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
     SET_ERROR_IF(level < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(level > ilog2(max_texture_size), GL_INVALID_VALUE);
-    SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
+    if (target == GL_TEXTURE_3D) {
+        GLint max_3d_texture_size;
+        ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
+        SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
+    }
     SET_ERROR_IF(width < 0 || height < 0 || depth < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(xoffset < 0 || yoffset < 0 || zoffset < 0, GL_INVALID_VALUE);
     GLenum stateTarget = target;
@@ -4669,22 +4673,20 @@ void GL2Encoder::s_glTexStorage3D(void* self, GLenum target, GLsizei levels, GLe
     SET_ERROR_IF(!state->getBoundTexture(target), GL_INVALID_OPERATION);
     SET_ERROR_IF(levels < 1 || width < 1 || height < 1 || depth < 1, GL_INVALID_VALUE);
     GLint max_texture_size;
-    GLint max_3d_texture_size;
     ctx->glGetIntegerv(ctx, GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
     SET_ERROR_IF(width > max_texture_size, GL_INVALID_VALUE);
     SET_ERROR_IF(height > max_texture_size, GL_INVALID_VALUE);
     if (target == GL_TEXTURE_3D) {
-        SET_ERROR_IF(depth > max_texture_size, GL_INVALID_VALUE);
+        GLint max_3d_texture_size;
+        ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
+        SET_ERROR_IF(width > max_3d_texture_size, GL_INVALID_VALUE);
+        SET_ERROR_IF(height > max_3d_texture_size, GL_INVALID_VALUE);
+        SET_ERROR_IF(depth > max_3d_texture_size, GL_INVALID_VALUE);
     } else {
         GLint maxArrayTextureLayers;
         ctx->glGetIntegerv(ctx, GL_MAX_ARRAY_TEXTURE_LAYERS, &maxArrayTextureLayers);
         SET_ERROR_IF(depth > maxArrayTextureLayers, GL_INVALID_VALUE);
     }
-
-    SET_ERROR_IF(width > max_3d_texture_size, GL_INVALID_VALUE);
-    SET_ERROR_IF(height > max_3d_texture_size, GL_INVALID_VALUE);
-    SET_ERROR_IF(depth > max_3d_texture_size, GL_INVALID_VALUE);
 
     SET_ERROR_IF(GLESTextureUtils::isAstcFormat(internalformat) && GL_TEXTURE_3D == target, GL_INVALID_OPERATION);
 
@@ -6418,12 +6420,14 @@ void GL2Encoder::s_glCopyTexSubImage3D(void *self , GLenum target, GLint level, 
                  target != GL_TEXTURE_2D_ARRAY,
                  GL_INVALID_ENUM);
     GLint max_texture_size;
-    GLint max_3d_texture_size;
     ctx->glGetIntegerv(ctx, GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
     SET_ERROR_IF(level < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(level > ilog2(max_texture_size), GL_INVALID_VALUE);
-    SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
+    if (target == GL_TEXTURE_3D) {
+        GLint max_3d_texture_size;
+        ctx->glGetIntegerv(ctx, GL_MAX_3D_TEXTURE_SIZE, &max_3d_texture_size);
+        SET_ERROR_IF(level > ilog2(max_3d_texture_size), GL_INVALID_VALUE);
+    }
     SET_ERROR_IF(width < 0 || height < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(xoffset < 0 || yoffset < 0 || zoffset < 0, GL_INVALID_VALUE);
     GLuint tex = ctx->m_state->getBoundTexture(target);
