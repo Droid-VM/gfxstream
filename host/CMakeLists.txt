@@ -325,6 +325,7 @@ endfunction()
         Vulkan_unittests
         virtio_gpu_timelines_tests.cpp
         vulkan/compositor_vk_unittest.cpp
+        vulkan/device_op_tracker_unittest.cpp
         vulkan/display_vk_unittest.cpp
         vulkan/swap_chain_state_vk_unittest.cpp
         vulkan/vk_decoder_global_state_unittest.cpp
