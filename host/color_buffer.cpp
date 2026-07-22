@@ -39,6 +39,18 @@ bool shouldAttemptExternalMemorySharing(GfxstreamFormat format) {
     return !gfxstream::host::IsYuvFormat(format);
 }
 
+GfxstreamFormat GfxstreamFormatFromUint32(uint32_t value) {
+    if (!IsValidGfxstreamFormat(value)) {
+        GFXSTREAM_ERROR("Unsupported gfxstream format: %u", value);
+        return GfxstreamFormat::UNKNOWN;
+    }
+    return static_cast<GfxstreamFormat>(value);
+}
+
+uint32_t GfxstreamFormatToUint32(GfxstreamFormat format) {
+    return static_cast<uint32_t>(format);
+}
+
 }  // namespace
 
 class ColorBuffer::Impl : public LazySnapshotObj<ColorBuffer::Impl> {
@@ -135,6 +147,11 @@ ColorBuffer::Impl::Impl(HandleType handle, uint32_t width, uint32_t height, Gfxs
 std::unique_ptr<ColorBuffer::Impl> ColorBuffer::Impl::create(
     gl::EmulationGl* emulationGl, vk::VkEmulation* emulationVk, uint32_t width, uint32_t height,
     GfxstreamFormat format, HandleType handle, gfxstream::Stream* stream) {
+    if (format == GfxstreamFormat::UNKNOWN) {
+        GFXSTREAM_ERROR("Invalid format for color buffer %u, with size %ux%u", handle, width,
+                        height);
+        return nullptr;
+    }
     std::unique_ptr<Impl> colorBuffer(new Impl(handle, width, height, format));
 
     if (stream) {
@@ -211,7 +228,9 @@ std::unique_ptr<ColorBuffer::Impl> ColorBuffer::Impl::onLoad(gl::EmulationGl* em
     const auto handle = static_cast<HandleType>(stream->getBe32());
     const auto width = static_cast<uint32_t>(stream->getBe32());
     const auto height = static_cast<uint32_t>(stream->getBe32());
-    const auto format = static_cast<GfxstreamFormat>(stream->getBe32());
+    const auto format = GfxstreamFormatFromUint32(stream->getBe32());
+    GFXSTREAM_DEBUG("snapshot load: color buffer %u, (%ux%u %s)", handle, width, height,
+                    ToString(format).c_str());
 
     std::unique_ptr<Impl> colorBuffer = Impl::create(emulationGl, emulationVk, width, height,
                                                      format, handle, stream);
@@ -220,10 +239,12 @@ std::unique_ptr<ColorBuffer::Impl> ColorBuffer::Impl::onLoad(gl::EmulationGl* em
 }
 
 void ColorBuffer::Impl::onSave(gfxstream::Stream* stream) {
+    GFXSTREAM_DEBUG("snapshot save: color buffer %u, (%ux%u %s)", getHndl(), mWidth, mHeight,
+                    ToString(mFormat).c_str());
     stream->putBe32(getHndl());
     stream->putBe32(mWidth);
     stream->putBe32(mHeight);
-    stream->putBe32(static_cast<uint32_t>(mFormat));
+    stream->putBe32(GfxstreamFormatToUint32(mFormat));
 
 #if GFXSTREAM_ENABLE_HOST_GLES
     if (mColorBufferGl) {

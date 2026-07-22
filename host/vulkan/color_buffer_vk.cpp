@@ -46,6 +46,7 @@ void ColorBufferVk::onLoad(gfxstream::Stream* stream, LoadImageBehavior behavior
 
     uint64_t size = stream->getBe64();
     if (size > 0) {
+        GFXSTREAM_DEBUG("snapshot load: color buffer %u size=%" PRIu64, mHandle, size);
         std::vector<uint8_t> pixels(size);
         stream->read(pixels.data(), size);
         mVkEmulation.updateColorBufferFromBytes(mHandle, pixels);
@@ -64,6 +65,7 @@ void ColorBufferVk::onSave(gfxstream::Stream* stream, SaveImageBehavior behavior
 
     std::vector<uint8_t> pixels;
     if (readToBytes(&pixels)) {
+        GFXSTREAM_DEBUG("snapshot save: color buffer %u size=%zu", mHandle, pixels.size());
         stream->putBe64(pixels.size());
         stream->write(pixels.data(), pixels.size());
     } else {

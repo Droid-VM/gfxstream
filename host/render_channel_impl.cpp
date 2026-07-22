@@ -49,25 +49,6 @@ ToIoResult(BufferQueueResult result) {
     }
 }
 
-
-// TODO: Delete after fully migrating Gfxstream interface to gfxstream::base::Stream.
-class AemuStreamToGfxstreamStreamWrapper : public Stream {
-  public:
-    AemuStreamToGfxstreamStreamWrapper(Stream* stream)
-        : mStream(stream) {}
-
-    ssize_t read(void* buffer, size_t size) override {
-        return mStream->read(buffer, size);
-    }
-
-    ssize_t write(const void* buffer, size_t size) override {
-        return mStream->write(buffer, size);
-    }
-
-  private:
-    Stream* const mStream = nullptr;
-};
-
 }  // namespace
 
 
@@ -88,9 +69,8 @@ RenderChannelImpl::RenderChannelImpl(Stream* loadStream, uint32_t contextId)
     : mFromGuest(kGuestToHostQueueCapacity, mLock),
       mToGuest(kHostToGuestQueueCapacity, mLock) {
     if (loadStream) {
-        AemuStreamToGfxstreamStreamWrapper loadStreamWrapped(loadStream);
-        mFromGuest.onLoadLocked(&loadStreamWrapped);
-        mToGuest.onLoadLocked(&loadStreamWrapped);
+        mFromGuest.onLoadLocked(loadStream);
+        mToGuest.onLoadLocked(loadStream);
         mState = (State)loadStream->getBe32();
         mWantedEvents = (State)loadStream->getBe32();
 #ifndef NDEBUG
@@ -251,10 +231,8 @@ void RenderChannelImpl::notifyStateChangeLocked() {
 
 void RenderChannelImpl::onSave(gfxstream::Stream* stream) {
     AutoLock lock(mLock);
-
-    AemuStreamToGfxstreamStreamWrapper saveStreamWrapped(stream);
-    mFromGuest.onSaveLocked(&saveStreamWrapped);
-    mToGuest.onSaveLocked(&saveStreamWrapped);
+    mFromGuest.onSaveLocked(stream);
+    mToGuest.onSaveLocked(stream);
     stream->putBe32(static_cast<uint32_t>(mState));
     stream->putBe32(static_cast<uint32_t>(mWantedEvents));
     lock.unlock();

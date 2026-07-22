@@ -3016,6 +3016,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
     if (!internalFormatOpt) {
         const std::string formatString = ToString(format);
         GFXSTREAM_ERROR("Unsupported format %s.", formatString.c_str());
+        return false;
     }
     const GfxstreamFormat internalFormat = *internalFormatOpt;
 
