@@ -7959,7 +7959,7 @@ class VkDecoderGlobalState::Impl {
             for (uint32_t i = 0; i < submitCount; ++i) {
                 const uint32_t cmdCount = getCommandBufferCount(pSubmits[i]);
                 for (uint32_t j = 0; j < cmdCount; ++j) {
-                    auto commandBuffer = getCommandBuffer(pSubmits[i], i);
+                    auto commandBuffer = getCommandBuffer(pSubmits[i], j);
                     processEventsForSubmittedCommandBuffer(queue, commandBuffer);
                 }
             }
