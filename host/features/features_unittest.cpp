@@ -105,6 +105,62 @@ TEST_F(FeaturesTest, U32FeatureInfoTest) {
     EXPECT_FALSE(u32Feature.parseValue("invalid_number"));
 }
 
+TEST_F(FeaturesTest, U64FeatureInfoTest) {
+    FeatureMap map;
+    U64FeatureInfo u64Feature("TestU64", "Description", &map);
+
+    EXPECT_EQ(u64Feature.getName(), "TestU64");
+    EXPECT_FALSE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValueReadable(), "(Unset)");
+
+    EXPECT_TRUE(u64Feature.parseValue("123"));
+    ASSERT_TRUE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValue().value(), 123uLL);
+    EXPECT_EQ(u64Feature.getValueReadable(), "123 (0x7b)");
+
+    EXPECT_TRUE(u64Feature.parseValue("0x7B"));
+    ASSERT_TRUE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValue().value(), 123uLL);
+    EXPECT_EQ(u64Feature.getValueReadable(), "123 (0x7b)");
+
+    EXPECT_TRUE(u64Feature.parseValue("0"));
+    ASSERT_TRUE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValue().value(), 0uLL);
+    EXPECT_EQ(u64Feature.getValueReadable(), "0 (0x0)");
+
+    // Test a number that requires > 32 bits, e.g. 5000000000 (0x12A05F200)
+    EXPECT_TRUE(u64Feature.parseValue("5000000000"));
+    ASSERT_TRUE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValue().value(), 5000000000uLL);
+    EXPECT_EQ(u64Feature.getValueReadable(), "5000000000 (0x12a05f200)");
+
+    EXPECT_TRUE(u64Feature.parseValue("0x12A05F200"));
+    ASSERT_TRUE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValue().value(), 5000000000uLL);
+    EXPECT_EQ(u64Feature.getValueReadable(), "5000000000 (0x12a05f200)");
+
+    EXPECT_TRUE(u64Feature.parseValue(""));
+    EXPECT_FALSE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValueReadable(), "(Unset)");
+
+    EXPECT_FALSE(u64Feature.parseValue("invalid_number"));
+
+    u64Feature.setValue(999uLL);
+    ASSERT_TRUE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValue().value(), 999uLL);
+    EXPECT_EQ(u64Feature.getValueReadable(), "999 (0x3e7)");
+
+    u64Feature.setValue(18446744073709551615uLL);
+    ASSERT_TRUE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValue().value(), 18446744073709551615uLL);
+    EXPECT_EQ(u64Feature.getValueReadable(), "18446744073709551615 (0xffffffffffffffff)");
+
+    EXPECT_TRUE(u64Feature.parseValue("18446744073709551615"));
+    ASSERT_TRUE(u64Feature.getValue().has_value());
+    EXPECT_EQ(u64Feature.getValue().value(), 18446744073709551615uLL);
+    EXPECT_EQ(u64Feature.getValueReadable(), "18446744073709551615 (0xffffffffffffffff)");
+}
+
 TEST_F(FeaturesTest, VulkanVersionFeatureInfoTest) {
     FeatureMap map;
     VulkanVersionFeatureInfo vkVersionFeature("TestVkVersion", "Description", &map);

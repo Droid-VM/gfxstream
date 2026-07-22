@@ -3014,14 +3014,26 @@ int FrameBuffer::Impl::getScreenshot(unsigned int nChannels, unsigned int* width
         *height = screenHeight;
     }
 
-    int needed =
-        useSnipping ? (nChannels * rect.size.w * rect.size.h) : (nChannels * (*width) * (*height));
+    // Clamp to something the GL/Vk backends can actually allocate, and
+    // compute the byte count in 64-bit so a hostile desiredWidth/Height
+    // (poisoned via rcSetDisplayPose + unauthenticated gRPC) cannot wrap
+    // `needed` and bypass the size check below.
+    constexpr unsigned int kMaxScreenshotDim = 1 << 16;
+    if (*width  <= 0 || *width  > kMaxScreenshotDim ||
+        *height <= 0 || *height > kMaxScreenshotDim) {
+        *cPixels = 0;
+        return -1;
+    }
 
-    if (*cPixels < (size_t)needed) {
-        *cPixels = needed;
+    const uint64_t needed64 =
+        useSnipping ? (uint64_t)nChannels * rect.size.w * rect.size.h
+                    : (uint64_t)nChannels * (*width) * (*height);
+
+    if (needed64 > SIZE_MAX || *cPixels < (size_t)needed64) {
+        *cPixels = needed64;
         return Renderer::GET_SCREENSHOT_RESULT_PIXELS_SIZE;
     }
-    *cPixels = needed;
+    *cPixels = needed64;
     if (desiredRotation == GFXSTREAM_ROTATION_90 || desiredRotation == GFXSTREAM_ROTATION_270) {
         std::swap(*width, *height);
         std::swap(screenWidth, screenHeight);
