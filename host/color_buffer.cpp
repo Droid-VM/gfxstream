@@ -135,6 +135,8 @@ class ColorBuffer::Impl : public LazySnapshotObj<ColorBuffer::Impl> {
 
     bool mGlAndVkAreSharingExternalMemory = false;
     bool mGlTexDirty = false;
+
+    static constexpr uint32_t kSnapshotMagicNumber = 0xCAFEFACE;
 };
 
 ColorBuffer::Impl::Impl(HandleType handle, uint32_t width, uint32_t height, GfxstreamFormat format)
@@ -225,6 +227,11 @@ std::unique_ptr<ColorBuffer::Impl> ColorBuffer::Impl::create(
 std::unique_ptr<ColorBuffer::Impl> ColorBuffer::Impl::onLoad(gl::EmulationGl* emulationGl,
                                                              vk::VkEmulation* emulationVk,
                                                              gfxstream::Stream* stream) {
+    const uint32_t magic = stream->getBe32();
+    if (magic != kSnapshotMagicNumber) {
+        GFXSTREAM_ERROR("Invalid color buffer snapshot magic number: 0x%x", magic);
+        return nullptr;
+    }
     const auto handle = static_cast<HandleType>(stream->getBe32());
     const auto width = static_cast<uint32_t>(stream->getBe32());
     const auto height = static_cast<uint32_t>(stream->getBe32());
@@ -241,6 +248,8 @@ std::unique_ptr<ColorBuffer::Impl> ColorBuffer::Impl::onLoad(gl::EmulationGl* em
 void ColorBuffer::Impl::onSave(gfxstream::Stream* stream) {
     GFXSTREAM_DEBUG("snapshot save: color buffer %u, (%ux%u %s)", getHndl(), mWidth, mHeight,
                     ToString(mFormat).c_str());
+
+    stream->putBe32(kSnapshotMagicNumber);
     stream->putBe32(getHndl());
     stream->putBe32(mWidth);
     stream->putBe32(mHeight);
