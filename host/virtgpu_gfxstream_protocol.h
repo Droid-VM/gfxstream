@@ -129,6 +129,14 @@ struct vulkanCapset {
     uint32_t virglSupportedFormats[16];
     uint32_t vulkanBatchedDescriptorSetUpdate;
     uint32_t hasTraceAsyncCommand;
+    uint32_t hasSetMetadataCommand;  // present in the guest copy; keep offsets aligned
+
+    // DroidVM pVM guest-alloc pool partition (CMDLINE_V2 v3, udmabuf=true only): the
+    // guest-owned slice the guest ICD carves BLOB_MEM_GUEST allocations from, as MB
+    // offset/size within the boot-blessed GpuPool. 0/0 => host-alloc mode (whole pool
+    // host-owned); the guest ignores these unless guestAllocSizeMb > 0.
+    uint32_t guestAllocOffsetMb;
+    uint32_t guestAllocSizeMb;
 };
 
 struct glesCapset {

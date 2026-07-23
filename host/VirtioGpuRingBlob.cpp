@@ -14,6 +14,9 @@
 
 #include "VirtioGpuRingBlob.h"
 
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
 #include <string>
 
 #ifndef _WIN32
@@ -109,6 +112,23 @@ std::unique_ptr<RingBlob> RingBlob::CreateWithExternalMemory(uint32_t id, void* 
 
     auto memory = std::make_unique<ExternalMemory>(addr);
     return std::unique_ptr<RingBlob>(new RingBlob(id, size, 1, std::move(memory)));
+}
+
+/*static*/
+std::unique_ptr<RingBlob> RingBlob::CreateFromPool(uint32_t id, uint64_t size, void* hva,
+                                                   int64_t poolOffset) {
+    // `hva` is a borrowed pointer into the once-mapped pool (HostVisiblePool::hvaForOffset). The
+    // guest reaches the same pages via the pool GPA; the host reads/writes the ASG ring through
+    // this VA. ExternalMemory does not own the memory, so freeing the RingBlob leaves the pool
+    // mapping intact (it lives for the VM's lifetime). No per-blob mmap.
+    if (!hva) {
+        GFXSTREAM_ERROR("RINGBLOB-POOL: null pool hva (poolOffset=%lld)", (long long)poolOffset);
+        return nullptr;
+    }
+    auto memory = std::make_unique<ExternalMemory>(hva);
+    auto blob = std::unique_ptr<RingBlob>(new RingBlob(id, size, 1, std::move(memory)));
+    blob->mPoolOffset = poolOffset;
+    return blob;
 }
 
 #ifdef GFXSTREAM_BUILD_WITH_SNAPSHOT_FRONTEND_SUPPORT

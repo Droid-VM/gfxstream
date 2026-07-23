@@ -108,5 +108,23 @@ std::optional<DescriptorType> UdmabufCreator::handleFromSharedMemory(SharedMemor
     return descriptorOpt;
 }
 
+std::optional<DescriptorType> UdmabufCreator::handleFromFd(int memfd, uint64_t offset,
+                                                           uint64_t size) {
+    // Alias a sub-range of an existing (pool) memfd; the pool memfd is owned by
+    // crosvm and outlives every sub-allocation, so this creator never closes it.
+    const struct udmabuf_create create = {
+        .memfd = (uint32_t)memfd,
+        .flags = UDMABUF_FLAGS_CLOEXEC,
+        .offset = offset,
+        .size = size,
+    };
+
+    DescriptorType udmabuf = ioctl(*mOsHandleCreator.get(), UDMABUF_CREATE, &create);
+    if (udmabuf < 0) {
+        return std::nullopt;
+    }
+    return std::make_optional(udmabuf);
+}
+
 }  // namespace base
 }  // namespace gfxstream

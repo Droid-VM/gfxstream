@@ -35,6 +35,7 @@
 
 #include "FrameBuffer.h"
 #include "VirtioGpuFormatUtils.h"
+#include "vulkan/HostVisiblePool.h"
 
 namespace gfxstream {
 namespace host {
@@ -108,6 +109,34 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
         std::shared_ptr<RingBlob> blob = std::move(it->second.back());
         it->second.pop_back();
         return blob;  // same physical pages as before
+    }
+
+    // DroidVM gfxstream PRE-ALLOC: back the ASG RingBlob from the boot-blessed GpuPool so it is
+    // pool-resident (guest maps the pool GPA directly) with ZERO runtime SHARE — the last thing
+    // that still needed /dev/gunyah_share. This makes pre-alloc fully self-sufficient on phones
+    // where the gunyah_host_share module can't be installed. The pool is already folio-backed and
+    // mlocked at boot, so no per-blob collapse/mlock is needed.
+    if (auto* hvPool = gfxstream::vk::HostVisiblePool::get()) {
+        auto chunks = hvPool->alloc(roundedSize, 2ULL * 1024 * 1024);
+        if (chunks.size() == 1) {
+            // map-once: back the RingBlob with a pointer into the whole-pool mapping
+            // (hvaForOffset = baseHva + offset), no per-blob mmap.
+            auto pooled = RingBlob::CreateFromPool(id, roundedSize,
+                                                   hvPool->hvaForOffset(chunks[0].offset),
+                                                   (int64_t)chunks[0].offset);
+            if (pooled) {
+                std::shared_ptr<RingBlob> pblob = std::move(pooled);
+                if (void* addr = pblob->map()) std::memset(addr, 0, roundedSize);
+                pool.pinned.push_back(pblob);
+                fprintf(stderr, "RINGBLOB-POOL: id=%u size=%llu -> pool offset=0x%llx (no SHARE)\n",
+                        id, (unsigned long long)roundedSize,
+                        (unsigned long long)chunks[0].offset);
+                return pblob;
+            }
+            hvPool->free(chunks);
+        } else if (!chunks.empty()) {
+            hvPool->free(chunks);  // fragmented: fall back to fresh memfd + runtime SHARE
+        }
     }
 
     // Gunyah persistent-BAR (fixed_blob_mapping) path: the VMM maps each blob into the shared BAR
@@ -1136,6 +1165,17 @@ int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
 
     if (std::holds_alternative<RingBlobMemory>(*mBlobMemory)) {
         auto& memory = std::get<RingBlobMemory>(*mBlobMemory);
+        // DroidVM gfxstream pre-alloc: pool-resident RingBlob. Hand crosvm the pool memfd (a dup;
+        // crosvm already holds the pool fd) + the pool offset, marked MEM_POOL, so it maps the
+        // pool GPA directly with no runtime SHARE. Must precede the isExportable() check (the
+        // pool RingBlob is ExternalMemory-backed and not fd-exportable in the shmem sense).
+        if (memory->poolOffset() >= 0) {
+            auto* hvPool = gfxstream::vk::HostVisiblePool::get();
+            outHandle->os_handle = hvPool ? (int64_t)dup(hvPool->memfd()) : -1;
+            outHandle->handle_type = STREAM_HANDLE_TYPE_MEM_POOL;
+            outHandle->pool_offset = (uint64_t)memory->poolOffset();
+            return 0;
+        }
         if (!memory->isExportable()) {
             return -EINVAL;
         }
@@ -1155,6 +1195,21 @@ int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
         return 0;
     } else if (std::holds_alternative<ExternalMemoryInfo>(*mBlobMemory)) {
         auto& memory = std::get<ExternalMemoryInfo>(*mBlobMemory);
+        // DroidVM gfxstream pre-alloc: GpuPool-resident blob. Hand crosvm the pool memfd
+        // (a dup — crosvm already holds the pool fd) plus the pool offset, and mark it
+        // MEM_POOL so crosvm maps the pool GPA directly instead of runtime-SHARE'ing.
+        if (memory->poolOffset >= 0) {
+#ifdef __ANDROID__
+            int rawDescriptor = dup(static_cast<int>(memory->descriptorInfo.handle));
+#else
+            auto rawDescriptorOpt = memory->descriptorInfo.descriptor.release();
+            int rawDescriptor = rawDescriptorOpt ? static_cast<int>(*rawDescriptorOpt) : -1;
+#endif
+            outHandle->os_handle = static_cast<int64_t>(rawDescriptor);
+            outHandle->handle_type = STREAM_HANDLE_TYPE_MEM_POOL;
+            outHandle->pool_offset = static_cast<uint64_t>(memory->poolOffset);
+            return 0;
+        }
 #ifdef __ANDROID__
         // fd-backed handles: hand the VMM its own dup and keep ours (closed in
         // Destroy()). Handing out the stored value transferred ownership implicitly

@@ -608,6 +608,24 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
             capset->noRenderControlEnc = 1;
             capset->blobAlignment = mPageSize;
 
+            // DroidVM pVM guest-alloc pool partition: split the boot-blessed GpuPool into
+            // a host slice [0, GFXSTREAM_POOL_HOST_MB) that serves all host-alloc requests
+            // (ASG rings etc.) and a guest slice [host_mb, pool_size) the guest ICD carves
+            // BLOB_MEM_GUEST from. crosvm sets GFXSTREAM_POOL_HOST_MB only for udmabuf=true,
+            // so these stay 0 (host-alloc mode) otherwise and the guest ignores them.
+            {
+                const char* hostMbS = getenv("GFXSTREAM_POOL_HOST_MB");
+                const char* poolSizeS = getenv("GFXSTREAM_POOL_SIZE");
+                if (hostMbS && poolSizeS) {
+                    uint64_t poolMb = strtoull(poolSizeS, nullptr, 0) >> 20;
+                    uint64_t hostMb = strtoull(hostMbS, nullptr, 0);
+                    if (hostMb < poolMb) {
+                        capset->guestAllocOffsetMb = (uint32_t)hostMb;
+                        capset->guestAllocSizeMb = (uint32_t)(poolMb - hostMb);
+                    }
+                }
+            }
+
 #if GFXSTREAM_UNSTABLE_VULKAN_BLOB_COLOR_BUFFER
             capset->alwaysBlob = 1;
 #endif

@@ -15,6 +15,7 @@
 extern "C" {
 #include "gfxstream/virtio-gpu-gfxstream-renderer-unstable.h"
 #include "gfxstream/virtio-gpu-gfxstream-renderer.h"
+#include "vulkan/HostVisibleFolio.h"
 }  // extern "C"
 
 #include <cstdint>
@@ -714,6 +715,8 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
     std::string renderer_features_str;
     stream_renderer_fence_callback fence_callback = nullptr;
     stream_renderer_debug_callback log_callback = nullptr;
+    stream_renderer_prepare_blob_backing_callback prepare_blob_backing_cb = nullptr;
+    stream_renderer_release_blob_backing_callback release_blob_backing_cb = nullptr;
     bool rendererInitializedExternally = false;
 
     // Iterate all parameters that we support.
@@ -812,6 +815,18 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
                     "fatal logs.");
                 break;
             }
+            case STREAM_RENDERER_PARAM_PREPARE_BLOB_BACKING_CALLBACK: {
+                prepare_blob_backing_cb =
+                    reinterpret_cast<stream_renderer_prepare_blob_backing_callback>(
+                        static_cast<uintptr_t>(param.value));
+                break;
+            }
+            case STREAM_RENDERER_PARAM_RELEASE_BLOB_BACKING_CALLBACK: {
+                release_blob_backing_cb =
+                    reinterpret_cast<stream_renderer_release_blob_backing_callback>(
+                        static_cast<uintptr_t>(param.value));
+                break;
+            }
             default: {
                 // We skip any parameters we don't recognize.
                 GFXSTREAM_ERROR(
@@ -821,6 +836,10 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
             }
         }
     }
+
+    // DroidVM: wire the host-visible blob-backing callbacks (VMM owns folio backing + VRAM quota).
+    gfxstream::HostVisibleBlobBacking::get().set(prepare_blob_backing_cb, release_blob_backing_cb,
+                                                 renderer_cookie);
 
     if (log_callback) {
         gfxstream::host::SetGfxstreamLogCallback([log_callback, log_user_data = renderer_cookie](

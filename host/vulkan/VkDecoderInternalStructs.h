@@ -175,6 +175,11 @@ struct MemoryInfo {
     // Folio-backed quota charged against the HostVisibleFolio budget;
     // released when the memory is destroyed.
     uint64_t folioBytes = 0;
+    // DroidVM gfxstream pre-alloc: byte offset within the boot-blessed GpuPool
+    // (HostVisiblePool) if this host-visible memory was sub-allocated from it;
+    // -1 = not pool-resident (fresh memfd / runtime-SHARE path). Carried to the
+    // blob export so crosvm reports the pool GPA to the guest (no runtime SHARE).
+    int64_t poolOffset = -1;
 
     std::shared_ptr<PrivateMemory> privateMemory;
     // virtio-gpu blobs

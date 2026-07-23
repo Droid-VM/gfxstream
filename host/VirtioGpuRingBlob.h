@@ -66,8 +66,19 @@ class RingBlob {
     static std::unique_ptr<RingBlob> CreateWithShmem(uint32_t id, uint64_t size);
     static std::unique_ptr<RingBlob> CreateWithHostMemory(uint32_t, uint64_t size, uint64_t alignment);
     static std::unique_ptr<RingBlob> CreateWithExternalMemory(uint32_t id, void* addr, uint64_t size);
+    // DroidVM gfxstream pre-alloc: back the RingBlob with a borrowed host VA into the boot-blessed
+    // GpuPool (the whole pool is mapped once by HostVisiblePool; `hva` = pool_base_hva + poolOffset,
+    // pure pointer arithmetic, no per-blob mmap). The guest maps the pool GPA directly. No fresh
+    // memfd, no runtime SHARE. `poolOffset` is the byte offset within the pool.
+    static std::unique_ptr<RingBlob> CreateFromPool(uint32_t id, uint64_t size, void* hva,
+                                                    int64_t poolOffset);
 
     bool isExportable() const;
+
+    // DroidVM gfxstream pre-alloc: byte offset within the GpuPool if this RingBlob is
+    // pool-resident (exported as MEM_POOL, mapped by the guest at pool_gpa + offset); -1 if
+    // it is an ordinary fresh-memfd RingBlob.
+    int64_t poolOffset() const { return mPoolOffset; }
 
     // Only valid if `isExportable()` returns `true`.
     gfxstream::base::SharedMemory::handle_type releaseHandle();
@@ -104,6 +115,8 @@ class RingBlob {
     std::variant<std::unique_ptr<AlignedMemory>,
                  std::unique_ptr<gfxstream::base::SharedMemory>,
                  std::unique_ptr<ExternalMemory>> mMemory;
+    // DroidVM gfxstream pre-alloc: >=0 when this RingBlob is GpuPool-resident (CreateFromPool).
+    int64_t mPoolOffset = -1;
 };
 
 // LINT.ThenChange(VirtioGpuRingBlobSnapshot.h:virtio_gpu_ring_blob)

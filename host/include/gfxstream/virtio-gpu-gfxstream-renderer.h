@@ -83,6 +83,7 @@ struct stream_renderer_fence {
 #define STREAM_HANDLE_TYPE_MEM_SHM 0x4
 #define STREAM_HANDLE_TYPE_MEM_ZIRCON 0x5
 #define STREAM_HANDLE_TYPE_MEM_AHB 0x6
+#define STREAM_HANDLE_TYPE_MEM_POOL 0x7  /* DroidVM gfxstream pre-alloc: GpuPool-resident, os_handle=pool memfd dup, pool_offset valid */
 
 #define STREAM_HANDLE_TYPE_SIGNAL_OPAQUE_FD 0x10
 #define STREAM_HANDLE_TYPE_SIGNAL_SYNC_FD 0x20
@@ -96,6 +97,11 @@ struct stream_renderer_fence {
 struct stream_renderer_handle {
     int64_t os_handle;
     uint32_t handle_type;
+    // DroidVM gfxstream pre-alloc: valid only when handle_type == STREAM_HANDLE_TYPE_MEM_POOL.
+    // Byte offset of this blob within the boot-blessed GpuPool; the VMM maps the pool GPA
+    // (pool_base + pool_offset) directly, with no runtime SHARE. Zeroed for every other type.
+    uint32_t _pad_pool;
+    uint64_t pool_offset;
 };
 
 // @user_data: custom user data passed during `stream_renderer_init`
@@ -118,6 +124,16 @@ typedef void (*stream_renderer_fence_callback)(void* user_data,
 typedef void (*stream_renderer_debug_callback)(void* user_data,
                                                struct stream_renderer_debug* debug);
 
+// DroidVM: host-visible blob backing callbacks. The VMM (crosvm) owns how a host-visible blob's
+// shmem is backed (e.g. Gunyah folds it into 2MB folios so its later stage-2 SHARE is exec-clean)
+// and accounts a VRAM quota. `prepare` is called inside VkAllocateMemory with the blob's shmem fd
+// and size, BEFORE any udmabuf pins the pages (a pin blocks MADV_COLLAPSE); it returns the bytes
+// charged against the VMM's quota (0 = not folio-backed / not charged). `release` is called at
+// VkFreeMemory with that value to refund the quota.
+typedef int64_t (*stream_renderer_prepare_blob_backing_callback)(void* user_data, int memfd,
+                                                                 uint64_t size);
+typedef void (*stream_renderer_release_blob_backing_callback)(void* user_data, uint64_t charged);
+
 // Parameters - data passed to initialize the renderer, with the goal of avoiding FFI breakages.
 // To change the data a parameter is passing safely, you should create a new parameter and
 // deprecate the old one. The old parameter may be removed after sufficient time.
@@ -139,6 +155,9 @@ typedef void (*stream_renderer_debug_callback)(void* user_data,
 #define STREAM_RENDERER_PARAM_WIN0_WIDTH 4
 #define STREAM_RENDERER_PARAM_WIN0_HEIGHT 5
 #define STREAM_RENDERER_PARAM_DEBUG_CALLBACK 6
+// DroidVM host-visible blob backing callbacks (see typedefs above). Custom key range.
+#define STREAM_RENDERER_PARAM_PREPARE_BLOB_BACKING_CALLBACK 2048
+#define STREAM_RENDERER_PARAM_RELEASE_BLOB_BACKING_CALLBACK 2049
 
 // An entry in the stream renderer parameters list.
 // The key should be one of STREAM_RENDERER_PARAM_*

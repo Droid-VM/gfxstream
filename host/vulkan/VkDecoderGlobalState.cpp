@@ -14,6 +14,7 @@
 #include "VkDecoderGlobalState.h"
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <functional>
 #include <list>
@@ -24,6 +25,7 @@
 
 #include "FrameBuffer.h"
 #include "HostVisibleFolio.h"
+#include "HostVisiblePool.h"
 #include "RenderThreadInfoVk.h"
 #include "TrivialStream.h"
 #include "VkAndroidNativeBuffer.h"
@@ -62,6 +64,17 @@
 #include <unistd.h>
 #endif
 
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <cerrno>
+// gh_unmovable (gunyah_host_mod): retype a memfd's pages non-movable so
+// gunyah_share's FOLL_LONGTERM pin never lands on a MOVABLE/CMA page.
+#ifndef GH_UNMOVABLE_MAKE
+#define GH_UNMOVABLE_MAKE _IO('H', 1) /* arg = memfd fd */
+#endif
+#endif
+
 #ifdef __ANDROID__
 #include <vndk/hardware_buffer.h>
 #endif
@@ -82,6 +95,12 @@
 
 namespace gfxstream {
 namespace vk {
+
+// DroidVM: process-wide outstanding runtime-share (folio) bytes, summed for the
+// guest-visible VK_EXT_memory_budget usage figure. Charged when the VMM accepts a
+// blob backing, refunded at VkFreeMemory. Pool sub-allocations are tracked
+// separately by HostVisiblePool::usedBytes().
+static std::atomic<uint64_t> sOutstandingFolioBytes{0};
 
 using gfxstream::ExternalObjectManager;
 using gfxstream::VulkanInfo;
@@ -1917,6 +1936,61 @@ class VkDecoderGlobalState::Impl {
         auto& physicalDeviceMemoryHelper = physicalDeviceInfo->memoryPropertiesHelper;
         pMemoryProperties->memoryProperties =
             physicalDeviceMemoryHelper->getGuestMemoryProperties();
+
+        // DroidVM VK_EXT_memory_budget: the host driver filled the budget struct against
+        // its OWN heap layout and its OWN GPU capacity -- neither matches what the guest
+        // actually sees. In host-alloc pre-alloc / fusion modes the guest's host-visible
+        // memory is bounded by our pool + runtime-share (vram-limit) quota, so overwrite
+        // the host-visible heap's budget/usage with those figures (mapped to the guest
+        // heap indices we just installed). Left untouched when neither is configured
+        // (pure upstream / guest-alloc), so the driver's values pass through.
+        overrideHostVisibleMemoryBudget(pMemoryProperties);
+    }
+
+    // Rewrite VkPhysicalDeviceMemoryBudgetPropertiesEXT (if chained) so the host-visible
+    // heap reports OUR capacity: budget = pool size + vram-limit; usage = pool used +
+    // outstanding runtime-share bytes. Called under mMutex.
+    void overrideHostVisibleMemoryBudget(VkPhysicalDeviceMemoryProperties2* pMemoryProperties) {
+        // Manual pNext walk (VkPhysicalDeviceMemoryBudgetPropertiesEXT is not registered
+        // with vk_get_vk_struct_id, so vk_find_struct can't resolve it).
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT* budget = nullptr;
+        for (auto* s = reinterpret_cast<VkBaseOutStructure*>(pMemoryProperties->pNext); s;
+             s = s->pNext) {
+            if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT) {
+                budget = reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(s);
+                break;
+            }
+        }
+        if (!budget) return;
+
+        uint64_t poolTotal = 0, poolUsed = 0;
+        if (auto* hvPool = HostVisiblePool::get()) {
+            poolTotal = hvPool->size();
+            poolUsed = hvPool->usedBytes();
+        }
+        uint64_t vramBudget = 0;
+        if (const char* s = getenv("GFXSTREAM_VRAM_BUDGET_MB")) {
+            vramBudget = strtoull(s, nullptr, 0) << 20;
+        }
+        if (poolTotal == 0 && vramBudget == 0) return;  // not a host-alloc backing mode
+
+        const uint64_t hvBudget = poolTotal + vramBudget;
+        const uint64_t hvUsage = poolUsed + sOutstandingFolioBytes.load();
+
+        const VkPhysicalDeviceMemoryProperties& props = pMemoryProperties->memoryProperties;
+        for (uint32_t h = 0; h < props.memoryHeapCount; ++h) {
+            bool hostVisibleHeap = false;
+            for (uint32_t t = 0; t < props.memoryTypeCount; ++t) {
+                if (props.memoryTypes[t].heapIndex == h &&
+                    (props.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                    hostVisibleHeap = true;
+                    break;
+                }
+            }
+            if (!hostVisibleHeap) continue;
+            budget->heapBudget[h] = std::min(hvBudget, props.memoryHeaps[h].size);
+            budget->heapUsage[h] = std::min(hvUsage, budget->heapBudget[h]);
+        }
     }
 
     VkResult on_vkEnumerateDeviceExtensionProperties(gfxstream::base::BumpPool* pool,
@@ -6576,19 +6650,38 @@ class VkDecoderGlobalState::Impl {
         std::optional<VkImportMemoryHostPointerInfoEXT> importHostInfo;
         std::optional<VkExportMemoryAllocateInfo> exportAllocateInfo;
         std::shared_ptr<PrivateMemory> privateMemory = {};
-        HostVisibleFolioCharge folioCharge;
+        // DroidVM: bytes the VMM charged against its host-visible VRAM quota when it folio-backed
+        // this blob (0 if not folio-backed). Refunded at VkFreeMemory. The folio backing itself is
+        // done by the VMM (crosvm) via the prepare-blob-backing callback, not here.
+        uint64_t blobBackingCharged = 0;
+        // DroidVM gfxstream pre-alloc: >=0 once this host-visible memory is
+        // sub-allocated from the boot-blessed GpuPool (skips the fresh-memfd +
+        // runtime-SHARE path). Reported to crosvm via the blob export.
+        int64_t poolOffset = -1;
 
         if (emulateHostVisible) {
             if (createBlobInfoPtr && createBlobInfoPtr->blobMem == STREAM_BLOB_MEM_GUEST &&
                 (createBlobInfoPtr->blobFlags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
-#if defined(__ANDROID__)
-                // Android host does not use dmabuf
-                (void)virtioGpuContextId; // suppress warning
-#elif defined(__linux__)
+// DroidVM: the Android host (Gunyah pVM on the phone) DOES use dmabuf for guest-alloc: the guest
+// carves a slice of the host-accessible gfx-guest pool (GpuPoolGuest) and crosvm wraps it in a
+// udmabuf, which we must import here as the VkDeviceMemory backing so the host GPU reads/writes the
+// SAME pages the guest does. The old `#if defined(__ANDROID__)` no-op ("Android host does not use
+// dmabuf") silently skipped the import -> the GPU got a fresh, disconnected allocation (black).
+#if defined(__linux__) || defined(__ANDROID__)
                 DescriptorType rawDescriptor;
                 auto descriptorInfoOpt = ExternalObjectManager::get()->removeBlobDescriptorInfo(
                     virtioGpuContextId, createBlobInfoPtr->blobId);
                 if (descriptorInfoOpt) {
+#if defined(__ANDROID__)
+                    // DroidVM: Android stores the dma-buf as a raw fd in descriptorInfo.handle.
+                    // removeBlobDescriptorInfo moved the entry out without closing, so we now own
+                    // this fd; hand it straight to the import (VkDeviceMemory takes ownership).
+                    rawDescriptor = (DescriptorType)(*descriptorInfoOpt).descriptorInfo.getFd();
+                    if ((int)rawDescriptor < 0) {
+                        GFXSTREAM_ERROR("Failed vkAllocateMemory: missing raw descriptor (android).");
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
+#else
                     auto rawDescriptorOpt =
                         (*descriptorInfoOpt).descriptorInfo.descriptor.release();
                     if (rawDescriptorOpt) {
@@ -6597,6 +6690,7 @@ class VkDecoderGlobalState::Impl {
                         GFXSTREAM_ERROR("Failed vkAllocateMemory: missing raw descriptor.");
                         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                     }
+#endif
                 } else {
                     GFXSTREAM_ERROR("Failed vkAllocateMemory: missing descriptor info.");
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -6627,43 +6721,73 @@ class VkDecoderGlobalState::Impl {
                 }
                 localAllocInfo.allocationSize = alignedSize;
 
-                // DroidVM: back the memfd with 2MB order-9 folios (see
-                // HostVisibleFolio.h). Round up so the shmem collapses into
-                // whole folios; the extra tail is invisible to the guest (it
-                // maps only its own blob size) and to blob export (crosvm
-                // receives the memfd and maps the blob size).
-                static const HostVisibleFolioConfig kFolioCfg = [] {
-                    auto cfg = HostVisibleFolioConfig::fromEnv();
-                    fprintf(stderr, "VKFOLIO: limitMB=%llu thresholdKB=%llu policy=%s\n",
-                            (unsigned long long)(cfg.quotaBytes >> 20),
-                            (unsigned long long)(cfg.thresholdBytes >> 10),
-                            cfg.oomOnExceed() ? "oom" : "fallback");
-                    return cfg;
-                }();
+                // DroidVM: the memfd's 2MB-folio backing is done by the VMM (crosvm) via the
+                // prepare-blob-backing callback below, before the udmabuf pins the pages. gfxstream
+                // no longer rounds the size or collapses here (see HostVisibleFolio.h).
                 const bool udmabufEnabled =
                     m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled;
-                if (udmabufEnabled && kFolioCfg.routesToFolio(alignedSize)) {
-                    VkDeviceSize roundedSize = ALIGN(alignedSize, kFolioSize);
-                    if (folioCharge.tryCharge(roundedSize, kFolioCfg.quotaBytes)) {
-                        localAllocInfo.allocationSize = roundedSize;
-                    } else if (kFolioCfg.oomOnExceed()) {
-                        GFXSTREAM_ERROR(
-                            "VKFOLIO: quota exhausted (used %llu MB + %llu MB > cap %llu MB), "
-                            "exceed-policy=oom -> VK_ERROR_OUT_OF_DEVICE_MEMORY",
-                            (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
-                            (unsigned long long)(roundedSize >> 20),
-                            (unsigned long long)(kFolioCfg.quotaBytes >> 20));
-                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-                    } else {
-                        fprintf(stderr,
-                                "VKFOLIO: quota exhausted (used %llu MB, need %llu MB, cap %llu "
-                                "MB), falling back to 4K path\n",
-                                (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
-                                (unsigned long long)(roundedSize >> 20),
-                                (unsigned long long)(kFolioCfg.quotaBytes >> 20));
+
+                // DroidVM gfxstream PRE-ALLOC: before touching the folio budget or
+                // creating a fresh memfd, try to sub-allocate this host-visible memory
+                // from the boot-blessed GpuPool (already SHARE'd into the guest stage-2
+                // and folio-backed). A single contiguous chunk lets the guest map the
+                // pool GPA directly with zero runtime SHARE; a fragmented or failed
+                // allocation falls through to the legacy fresh-memfd path (milestone
+                // 3a keeps only the contiguous case; 3b adds multi-chunk runs).
+                //
+                // CMDLINE_V2 v3 fusion size gate (GFXSTREAM_POOL_BLOB_MAX_KB, set by crosvm from
+                // `--gpu pool-blob-max-kb` when fusion routing is enabled): >0 => only allocations
+                // <= the gate try the pool -- larger ones go straight to the fresh-memfd +
+                // runtime-SHARE path so big transient buffers cannot exhaust/fragment the pool
+                // that the many small blobs (the RM ~39-memparcel killers) depend on. 0/absent =>
+                // no gate (pure pre-alloc: every allocation tries the pool).
+                static const uint64_t kPoolBlobMaxBytes = []() -> uint64_t {
+                    const char* s = getenv("GFXSTREAM_POOL_BLOB_MAX_KB");
+                    return s ? strtoull(s, nullptr, 0) * 1024ull : 0ull;
+                }();
+                if (udmabufEnabled &&
+                    (kPoolBlobMaxBytes == 0 ||
+                     localAllocInfo.allocationSize <= kPoolBlobMaxBytes)) {
+                    if (auto* hvPool = HostVisiblePool::get()) {
+                        auto chunks =
+                            hvPool->alloc(localAllocInfo.allocationSize, kPageSizeforBlob);
+                        if (chunks.size() == 1) {
+                            auto creator = m_vkEmulation->getUdmabufCreator();
+                            std::optional<int> dmabuf;
+                            if (creator) {
+                                dmabuf = creator->handleFromFd(
+                                    hvPool->memfd(), hvPool->memfdBase() + chunks[0].offset,
+                                    localAllocInfo.allocationSize);
+                            }
+#if defined(__linux__)
+                            if (dmabuf.has_value() && m_vkEmulation->supportsDmaBuf() &&
+                                deviceHasDmabufExt) {
+                                importFdInfo.fd = dmabuf.value();
+                                importFdInfo.handleType =
+                                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                                vk_append_struct(&structChainIter, &importFdInfo);
+                                poolOffset = (int64_t)chunks[0].offset;
+                                fprintf(stderr,
+                                        "GFXPOOL: alloc size=%llu -> pool offset=0x%llx (no SHARE)\n",
+                                        (unsigned long long)localAllocInfo.allocationSize,
+                                        (unsigned long long)chunks[0].offset);
+                            } else {
+                                if (dmabuf.has_value()) close(dmabuf.value());
+                                hvPool->free(chunks);
+                            }
+#else
+                            hvPool->free(chunks);
+#endif
+                        } else if (!chunks.empty()) {
+                            // 3a: reject fragmented allocations; keep the pool intact.
+                            hvPool->free(chunks);
+                        }
                     }
                 }
 
+              // PRE-ALLOC: skip the fresh-memfd path entirely when this memory was
+              // sub-allocated from the GpuPool above (importFdInfo already appended).
+              if (poolOffset < 0) {
                 auto memory = SharedMemory("shared-memory-vk-" + std::to_string(sUniqueShmemId++),
                                            localAllocInfo.allocationSize);
 
@@ -6676,25 +6800,45 @@ class VkDecoderGlobalState::Impl {
                     }
 
 #if defined(__linux__)
-                    // Collapse before the udmabuf is created: udmabuf pins the
-                    // pages, and extra references block MADV_COLLAPSE.
-                    if (folioCharge.bytes()) {
-                        int collapseErr = CollapseMemfdToFolios(
+                    // DroidVM: let the VMM back this blob per its policy (Gunyah: grow to a 2MB
+                    // multiple + MADV_COLLAPSE into order-9 folios so its later stage-2 SHARE is
+                    // exec-clean; KVM/gzvm no-op) BEFORE creating the udmabuf -- the udmabuf pins the
+                    // pages and extra references block MADV_COLLAPSE. Returns bytes charged against
+                    // the VMM's VRAM quota, refunded at VkFreeMemory. No callback / non-Gunyah => 0.
+                    // Negative => the VMM refused (--runtime-share exceed-policy=oom, reserve
+                    // exhausted): fail the allocation instead of silently proceeding on 4K pages.
+                    if (udmabufEnabled) {
+                        int64_t prepared = HostVisibleBlobBacking::get().prepare(
                             memory.getFd(), localAllocInfo.allocationSize);
-                        if (collapseErr) {
-                            fprintf(stderr,
-                                    "VKFOLIO: collapse failed errno=%d size=%llu used=%lluMB/%lluMB\n",
-                                    collapseErr,
-                                    (unsigned long long)localAllocInfo.allocationSize,
-                                    (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
-                                    (unsigned long long)(kFolioCfg.quotaBytes >> 20));
-                        }
-                        if (collapseErr && kFolioCfg.oomOnExceed()) {
+                        if (prepared < 0) {
                             GFXSTREAM_ERROR(
-                                "VKFOLIO: MADV_COLLAPSE failed (errno %d), exceed-policy=oom -> "
-                                "VK_ERROR_OUT_OF_DEVICE_MEMORY",
-                                collapseErr);
+                                "VMM refused blob backing (exceed-policy=oom); size=%llu",
+                                (unsigned long long)localAllocInfo.allocationSize);
                             return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                        }
+                        blobBackingCharged = static_cast<uint64_t>(prepared);
+
+                        // DroidVM: a non-folio-backed (small) blob otherwise faults
+                        // plain shmem pages into MOVABLE/CMA pageblocks, where
+                        // gunyah_share's FOLL_LONGTERM pin fails (-12) whenever the
+                        // reserve has lent memory to CMA. Retype this memfd non-
+                        // movable BEFORE udmabuf faults its pages, so they are born
+                        // in an UNMOVABLE pageblock (pinnable, zero migration). Only
+                        // the small/4K blobs need it; folio-backed ones (prepared>0)
+                        // already sit in isolated reserve folios. Best-effort: if
+                        // /dev/gh_unmovable is absent, fall back to today's movable
+                        // memfd.
+                        if (prepared == 0) {
+                            static int sGhuFd =
+                                open("/dev/gh_unmovable", O_RDWR | O_CLOEXEC);
+                            if (sGhuFd >= 0 &&
+                                ioctl(sGhuFd, GH_UNMOVABLE_MAKE,
+                                      (unsigned long)memory.getFd()) != 0) {
+                                GFXSTREAM_ERROR(
+                                    "gh_unmovable: retype failed for small blob "
+                                    "(errno=%d)",
+                                    errno);
+                            }
                         }
                     }
 #endif
@@ -6752,6 +6896,7 @@ class VkDecoderGlobalState::Impl {
                 }
 
                 sharedMemory = std::make_optional<SharedMemory>(std::move(memory));
+              }  // if (poolOffset < 0)
             } else if (m_vkEmulation->getFeatures().ExternalBlob.enabled) {
                 VkExternalMemoryHandleTypeFlags handleTypes;
 
@@ -6856,7 +7001,12 @@ class VkDecoderGlobalState::Impl {
                                                   : localAllocInfo.allocationSize;
         memoryInfo.device = device;
         memoryInfo.memoryIndex = localAllocInfo.memoryTypeIndex;
-        memoryInfo.folioBytes = folioCharge.transfer();
+        memoryInfo.folioBytes = blobBackingCharged;
+        // Count as outstanding only once committed (mirrors the refund at VkFreeMemory,
+        // which keys off memoryInfo.folioBytes) -- alloc-failure paths after the charge
+        // never reach here, so the guest-visible usage figure stays leak-free.
+        if (blobBackingCharged) sOutstandingFolioBytes.fetch_add(blobBackingCharged);
+        memoryInfo.poolOffset = poolOffset;
 
         if (importCbInfoPtr) {
             memoryInfo.boundColorBuffer = importCbInfoPtr->colorBuffer;
@@ -6941,8 +7091,18 @@ class VkDecoderGlobalState::Impl {
         }
 
         if (memoryInfo.folioBytes) {
-            HostVisibleFolioQuota::release(memoryInfo.folioBytes);
+            // DroidVM: refund the VMM's host-visible VRAM quota charged at allocation.
+            HostVisibleBlobBacking::get().release(memoryInfo.folioBytes);
+            sOutstandingFolioBytes.fetch_sub(memoryInfo.folioBytes);
             memoryInfo.folioBytes = 0;
+        }
+
+        // DroidVM gfxstream pre-alloc: return the sub-allocation to the GpuPool.
+        if (memoryInfo.poolOffset >= 0) {
+            if (auto* pool = HostVisiblePool::get()) {
+                pool->free({{(uint64_t)memoryInfo.poolOffset, memoryInfo.size}});
+            }
+            memoryInfo.poolOffset = -1;
         }
 
         deviceDispatch->vkFreeMemory(device, memory, pAllocator);
@@ -7329,7 +7489,23 @@ class VkDecoderGlobalState::Impl {
 
         hostBlobId = (info->blobId && !hostBlobId) ? info->blobId : hostBlobId;
 
-        if ((m_vkEmulation->getFeatures().SystemBlob.enabled ||
+        // DroidVM gfxstream pre-alloc: this memory is a GpuPool sub-allocation. It has no
+        // private memfd (info->sharedMemory is empty); the pool fd is owned by crosvm. Register
+        // a MEM_POOL descriptor carrying the pool offset. The os_handle is a harmless dup of the
+        // pool fd (crosvm already holds it and maps the pool GPA directly — no runtime SHARE).
+        if (info->poolOffset >= 0) {
+            auto* pool = HostVisiblePool::get();
+            int dupFd = pool ? dup(pool->memfd()) : -1;
+#if defined(__ANDROID__)
+            ExternalObjectManager::get()->addBlobDescriptorInfo(
+                virtioGpuContextId, hostBlobId, (int64_t)dupFd, STREAM_HANDLE_TYPE_MEM_POOL,
+                info->caching, std::nullopt, info->poolOffset);
+#else
+            ExternalObjectManager::get()->addBlobDescriptorInfo(
+                virtioGpuContextId, hostBlobId, ManagedDescriptor(dupFd),
+                STREAM_HANDLE_TYPE_MEM_POOL, info->caching, std::nullopt, info->poolOffset);
+#endif
+        } else if ((m_vkEmulation->getFeatures().SystemBlob.enabled ||
              m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled) &&
             info->sharedMemory.has_value()) {
             // We transfer ownership of the shared memory handle to the descriptor info.

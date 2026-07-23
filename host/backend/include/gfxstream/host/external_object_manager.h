@@ -56,6 +56,7 @@ namespace gfxstream {
 #define STREAM_HANDLE_TYPE_MEM_SHM 0x4
 #define STREAM_HANDLE_TYPE_MEM_ZIRCON 0x5
 #define STREAM_HANDLE_TYPE_MEM_AHB 0x6
+#define STREAM_HANDLE_TYPE_MEM_POOL 0x7  /* DroidVM gfxstream pre-alloc: GpuPool-resident, os_handle=pool memfd dup, pool_offset valid */
 
 #define STREAM_HANDLE_TYPE_SIGNAL_OPAQUE_FD 0x10
 #define STREAM_HANDLE_TYPE_SIGNAL_SYNC_FD 0x20
@@ -121,6 +122,10 @@ struct BlobDescriptorInfo {
     BlobDescriptorType descriptorInfo;
     uint32_t caching;
     std::optional<VulkanInfo> vulkanInfoOpt;
+    // DroidVM gfxstream pre-alloc: >=0 when this blob is backed by a GpuPool
+    // sub-allocation at that byte offset; the VMM maps the pool GPA directly
+    // (no runtime SHARE). -1 = ordinary fd/shm-backed blob.
+    int64_t poolOffset = -1;
 };
 
 using SyncDescriptorInfo = GenericDescriptorInfo;
@@ -136,7 +141,7 @@ class ExternalObjectManager {
 
     void addBlobDescriptorInfo(uint32_t ctx_id, uint64_t blobId, BlobDescriptorValueType descriptor,
                                uint32_t streamHandleType, uint32_t caching,
-                               std::optional<VulkanInfo> vulkanInfoOpt);
+                               std::optional<VulkanInfo> vulkanInfoOpt, int64_t poolOffset = -1);
     std::optional<BlobDescriptorInfo> removeBlobDescriptorInfo(uint32_t ctx_id, uint64_t blobId);
     // Drop (and on Android close/release) every not-yet-consumed blob descriptor of a
     // context. Called on context destroy so orphaned exports cannot leak dma-buf
