@@ -7824,6 +7824,7 @@ class VkDecoderGlobalState::Impl {
                 if (result != VK_SUCCESS) {
                     GFXSTREAM_WARNING("dispatchVkQueueSubmit failed: %s [%d]", string_VkResult(result),
                                     result);
+                    builder.OnQueueSubmissionAborted(usedFence);
                     return result;
                 }
             } else {
@@ -7861,6 +7862,7 @@ class VkDecoderGlobalState::Impl {
                 if (result != VK_SUCCESS) {
                     GFXSTREAM_WARNING("dispatchVkQueueSubmit failed: %s [%d]", string_VkResult(result),
                                     result);
+                    builder.OnQueueSubmissionAborted(usedFence);
                     return result;
                 }
             }
