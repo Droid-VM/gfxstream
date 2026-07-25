@@ -201,6 +201,67 @@ static constexpr uint64_t kPageMaskForBlob = ~(0xfff);
 static std::atomic<uint64_t> sNextHostBlobId{1};
 static std::atomic<uint64_t> sUniqueShmemId = 0;
 
+// Where the host's time goes inside a queue submit. A guest submit of an empty command buffer
+// costs the guest ~100us of wall time, which is the whole per-frame budget at the frame rates
+// this runs at -- this splits that into the bookkeeping before the driver call, the driver call
+// itself, and the bookkeeping after, so it can be attributed rather than guessed at.
+// Off unless GFXSTREAM_SUBMIT_TRACE is set.
+struct SubmitStageProfile {
+    static bool Enabled() {
+        static const bool on = getenv("GFXSTREAM_SUBMIT_TRACE") != nullptr;
+        return on;
+    }
+
+    static uint64_t NowNs() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
+    }
+
+    static void Record(uint64_t enterNs, uint64_t preNs, uint64_t dispatchNs, uint64_t postNs,
+                       uint64_t pollNs, uint64_t exitNs) {
+        static std::atomic<uint64_t> sPre{0};
+        static std::atomic<uint64_t> sDispatch{0};
+        static std::atomic<uint64_t> sPost{0};
+        static std::atomic<uint64_t> sGap{0};
+        static std::atomic<uint64_t> sPoll{0};
+        static std::atomic<uint64_t> sCount{0};
+        // Time between finishing one submit and being handed the next: large means the host is
+        // waiting on the guest, small means the host is the one holding things up.
+        static thread_local uint64_t tLastExitNs = 0;
+
+        const uint64_t gap = tLastExitNs ? (enterNs - tLastExitNs) : 0;
+        tLastExitNs = exitNs;
+
+        sPre += preNs;
+        sDispatch += dispatchNs;
+        sPost += postNs;
+        sGap += gap;
+        sPoll += pollNs;
+        const uint64_t n = ++sCount;
+        constexpr uint64_t kReportEvery = 2000;
+        if (n % kReportEvery != 0) {
+            return;
+        }
+        const uint64_t pre = sPre.exchange(0) / kReportEvery;
+        const uint64_t dispatch = sDispatch.exchange(0) / kReportEvery;
+        const uint64_t post = sPost.exchange(0) / kReportEvery;
+        const uint64_t idle = sGap.exchange(0) / kReportEvery;
+        const uint64_t poll = sPoll.exchange(0) / kReportEvery;
+        GFXSTREAM_WARNING(
+            "SUBMITPROF n=%llu avg/submit: pre=%llu.%03llu dispatch=%llu.%03llu post=%llu.%03llu "
+            "(of which PollAndProcessGarbage=%llu.%03llu) busy=%llu.%03llu "
+            "idle-waiting-for-guest=%llu.%03llu (us)",
+            (unsigned long long)n, (unsigned long long)(pre / 1000),
+            (unsigned long long)(pre % 1000), (unsigned long long)(dispatch / 1000),
+            (unsigned long long)(dispatch % 1000), (unsigned long long)(post / 1000),
+            (unsigned long long)(post % 1000), (unsigned long long)(poll / 1000),
+            (unsigned long long)(poll % 1000), (unsigned long long)((pre + dispatch + post) / 1000),
+            (unsigned long long)((pre + dispatch + post) % 1000), (unsigned long long)(idle / 1000),
+            (unsigned long long)(idle % 1000));
+    }
+};
+
 class VkDecoderGlobalState::Impl {
    public:
     Impl(VkEmulation* emulation)
@@ -8110,6 +8171,12 @@ class VkDecoderGlobalState::Impl {
     VkResult on_vkQueueSubmit(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
                               VkQueue boxed_queue, uint32_t submitCount,
                               const VkSubmitInfoType* pSubmits, VkFence fence) {
+        const bool profileSubmit = SubmitStageProfile::Enabled();
+        const uint64_t profEnterNs = profileSubmit ? SubmitStageProfile::NowNs() : 0;
+        uint64_t profDispatchBeginNs = 0;
+        uint64_t profDispatchEndNs = 0;
+        uint64_t profPollNs = 0;
+
         auto queue = unbox_VkQueue(boxed_queue);
         auto vk = dispatch_VkQueue(boxed_queue);
 
@@ -8229,6 +8296,7 @@ class VkDecoderGlobalState::Impl {
 
         {
             std::lock_guard<std::mutex> queueLock(*queueMutex);
+            if (profileSubmit) profDispatchBeginNs = SubmitStageProfile::NowNs();
             if (canDispatch) {
                 auto result = dispatchVkQueueSubmit(vk, queue, submitCount, pSubmits, usedFence);
                 if (result != VK_SUCCESS) {
@@ -8275,6 +8343,8 @@ class VkDecoderGlobalState::Impl {
                 }
             }
         }
+
+        if (profileSubmit) profDispatchEndNs = SubmitStageProfile::NowNs();
 
         DeviceOpWaitable queueCompletedWaitable = builder.OnQueueSubmittedWithFence(usedFence);
 
@@ -8363,7 +8433,11 @@ class VkDecoderGlobalState::Impl {
         if (!snapshotsEnabled()) {
             processDelayedRemovesForDevice(device);
         }
-        deviceOpTracker->PollAndProcessGarbage();
+        const uint64_t profBeforePollNs = profileSubmit ? SubmitStageProfile::NowNs() : 0;
+        deviceOpTracker->PollAndProcessGarbageIfDue();
+        if (profileSubmit) {
+            profPollNs = SubmitStageProfile::NowNs() - profBeforePollNs;
+        }
 
         if (snapshotsEnabled()) {
             for (uint32_t i = 0; i < submitCount; ++i) {
@@ -8406,6 +8480,12 @@ class VkDecoderGlobalState::Impl {
                     semaphoreInfo.onQueueSubmissionSignal();
                 }
             }
+        }
+        if (profileSubmit && profDispatchEndNs) {
+            const uint64_t exitNs = SubmitStageProfile::NowNs();
+            SubmitStageProfile::Record(profEnterNs, profDispatchBeginNs - profEnterNs,
+                                       profDispatchEndNs - profDispatchBeginNs,
+                                       exitNs - profDispatchEndNs, profPollNs, exitNs);
         }
         return VK_SUCCESS;
     }

@@ -15,6 +15,7 @@
 #include "DeviceOpTracker.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <type_traits>
 
 #include "gfxstream/common/logging.h"
@@ -64,6 +65,36 @@ void DeviceOpTracker::AddPendingGarbage(DeviceOpWaitable waitable, VkSemaphore s
         GFXSTREAM_WARNING("VkDevice:%p has %d pending garbage objects.", mDevice,
                           mPendingGarbage.size());
     }
+}
+
+void DeviceOpTracker::PollAndProcessGarbageIfDue() {
+    // Long enough that a submit-rate sweep becomes negligible, short enough that objects whose
+    // last use has completed are still reclaimed promptly. Overridable so the trade-off can be
+    // measured; 0 restores a sweep on every call.
+    static const uint64_t kMinIntervalNs = [] {
+        const char* env = getenv("GFXSTREAM_DEVICE_OP_POLL_US");
+        if (env) {
+            char* end = nullptr;
+            const unsigned long v = strtoul(env, &end, 10);
+            if (end != env) return static_cast<uint64_t>(v) * 1000ull;
+        }
+        return 1000000ull;  // 1 ms
+    }();
+
+    const uint64_t now = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    uint64_t last = mLastPollNs.load(std::memory_order_relaxed);
+    if (kMinIntervalNs && now - last < kMinIntervalNs) {
+        return;
+    }
+    // Only the thread that wins the claim sweeps, so concurrent submits do not all pile into
+    // the same scan.
+    if (!mLastPollNs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+        return;
+    }
+    PollAndProcessGarbage();
 }
 
 void DeviceOpTracker::PollAndProcessGarbage() {

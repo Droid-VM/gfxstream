@@ -16,6 +16,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <functional>
@@ -64,6 +65,13 @@ class DeviceOpTracker {
     // objects.
     void PollAndProcessGarbage();
 
+    // Same, but does nothing if it already ran recently. Every poll asks the driver for the
+    // status of every operation still in flight, so calling it once per queue submit -- as the
+    // submit path does -- costs a driver round trip per in-flight op on every submit. Nothing
+    // waits on these waitables (they are only checked with the non-blocking IsDone()), so
+    // deferring a sweep only defers reclaiming objects that are already dead.
+    void PollAndProcessGarbageIfDue();
+
     void OnDestroyDevice();
 
    private:
@@ -81,6 +89,9 @@ class DeviceOpTracker {
     };
     std::mutex mPollFunctionsMutex;
     std::deque<PollFunction> mPollFunctions GUARDED_BY(mPollFunctionsMutex);
+
+    // steady_clock nanoseconds of the last sweep, for PollAndProcessGarbageIfDue().
+    std::atomic<uint64_t> mLastPollNs{0};
 
     struct PendingGarbage {
         DeviceOpWaitable waitable;
