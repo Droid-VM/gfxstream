@@ -20,6 +20,7 @@
 #include <string.h>
 #include <vulkan/vk_enum_string_helper.h>
 
+#include <algorithm>
 #include <iomanip>
 #include <ostream>
 #include <sstream>
@@ -65,6 +66,14 @@ using gfxstream::host::RepresentativeColorBufferMemoryTypeInfo;
 
 constexpr size_t kPageBits = 12;
 constexpr size_t kPageSize = 1u << kPageBits;
+
+// The instance API version to ask for, clamped to whatever the loader reports. This has to be at
+// least what the decoder advertises to the guest (kMaxSafeVersion, 1.3): vkGetDeviceProcAddr
+// returns null for a core entry point above the instance's version, so asking for less than the
+// guest is told it has leaves promoted-to-core entry points (vkQueueSubmit2, vkCmdPipelineBarrier2,
+// vkCmdBeginRendering, ...) unreachable whenever the guest uses the core spelling rather than
+// enabling the KHR extension -- which a guest at 1.3 is entitled to do.
+constexpr uint32_t kTargetInstanceVersion = VK_MAKE_VERSION(1, 3, 0);
 
 static std::optional<std::string> sMemoryLogPath = std::nullopt;
 
@@ -987,7 +996,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         if (VK_SUCCESS == res) {
             if (instanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
                 GFXSTREAM_DEBUG("global loader has vkEnumerateInstanceVersion returning >= 1.1.");
-                appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
+                appInfo.apiVersion = std::min(instanceVersion, kTargetInstanceVersion);
             }
         }
     }
@@ -1027,10 +1036,10 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             }
         }
 
-        if (appInfo.apiVersion < VK_MAKE_VERSION(1, 1, 0) &&
-            instanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        const uint32_t wantedVersion = std::min(instanceVersion, kTargetInstanceVersion);
+        if ((VK_SUCCESS == enumInstanceRes) && appInfo.apiVersion < wantedVersion) {
             GFXSTREAM_DEBUG("Found out that we can create a higher version instance.");
-            appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
+            appInfo.apiVersion = wantedVersion;
 
             // vkDestroyInstance is an instance-level command -> use the instance dispatch (ivk),
             // not the global dispatch (gvk) whose vkDestroyInstance is NULL under DroidVM's custom
@@ -1038,15 +1047,31 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             ivk->vkDestroyInstance(emulation->mInstance, nullptr);
 
             res = gvk->vkCreateInstance(&instCi, nullptr, &emulation->mInstance);
+            if (res != VK_SUCCESS && appInfo.apiVersion > VK_MAKE_VERSION(1, 1, 0)) {
+                // The clamp above keeps the request within what the loader reported, so this
+                // should not happen -- but a driver that refuses the higher version must not
+                // cost us the renderer entirely. Drop back to the version this code has always
+                // asked for and try once more.
+                GFXSTREAM_WARNING(
+                    "Failed to create a Vulkan %d.%d instance (%s); retrying at 1.1.",
+                    VK_VERSION_MAJOR(appInfo.apiVersion), VK_VERSION_MINOR(appInfo.apiVersion),
+                    string_VkResult(res));
+                appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
+                res = gvk->vkCreateInstance(&instCi, nullptr, &emulation->mInstance);
+            }
             if (res != VK_SUCCESS) {
-                GFXSTREAM_ERROR("Failed to create Vulkan 1.1 instance. Error %s.", string_VkResult(res));
+                GFXSTREAM_ERROR("Failed to create Vulkan %d.%d instance. Error %s.",
+                                VK_VERSION_MAJOR(appInfo.apiVersion),
+                                VK_VERSION_MINOR(appInfo.apiVersion), string_VkResult(res));
                 return nullptr;
             }
 
             init_vulkan_dispatch_from_instance(gvk, emulation->mInstance, emulation->mIvk);
             fillMissingDispatchAliases(emulation->mIvk);
 
-            GFXSTREAM_DEBUG("Created Vulkan 1.1 instance on second try.");
+            GFXSTREAM_DEBUG("Created Vulkan %d.%d instance on second try.",
+                            VK_VERSION_MAJOR(appInfo.apiVersion),
+                            VK_VERSION_MINOR(appInfo.apiVersion));
 
             if (!vulkan_dispatch_check_instance_VK_VERSION_1_1(ivk)) {
                 GFXSTREAM_ERROR("Warning: Vulkan 1.1 APIs missing from instance (2nd try)");

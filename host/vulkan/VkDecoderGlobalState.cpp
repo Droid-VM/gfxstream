@@ -1113,6 +1113,15 @@ class VkDecoderGlobalState::Impl {
             const_cast<VkApplicationInfo*>(createInfoFiltered.pApplicationInfo)->apiVersion =
                 apiVersion;
             appInfo = *createInfoFiltered.pApplicationInfo;
+        } else {
+            // Omitting VkApplicationInfo means Vulkan 1.0 by spec, and the host driver then gates
+            // off every promoted-to-core entry point on any device made from this instance --
+            // including vkQueueSubmit2, which this renderer submits with itself on the present
+            // path. A guest is entitled to pass no application info, so synthesize one rather
+            // than silently dropping the version computed just above.
+            appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+            appInfo.apiVersion = apiVersion;
+            createInfoFiltered.pApplicationInfo = &appInfo;
         }
 
         vk_struct_chain_filter<VkDebugReportCallbackCreateInfoEXT>(&createInfoFiltered);
@@ -2472,6 +2481,28 @@ class VkDecoderGlobalState::Impl {
         VulkanDispatch* dispatch = dispatch_VkDevice(boxedDevice);
         init_vulkan_dispatch_from_device(vk, *pDevice, dispatch);
         fillMissingDispatchAliases(dispatch);
+
+        if (!dispatch->vkQueueSubmit2 && !dispatch->vkQueueSubmit2KHR) {
+            // Report what the driver actually says, so "no sync2" can be attributed to the
+            // physical device, the instance version we negotiated, or the extension list the
+            // guest asked for -- instead of guessed at.
+            VkPhysicalDeviceProperties hostProps = {};
+            vk->vkGetPhysicalDeviceProperties(physicalDevice, &hostProps);
+            std::string guestExts;
+            for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
+                guestExts += pCreateInfo->ppEnabledExtensionNames[i];
+                guestExts += " ";
+            }
+            GFXSTREAM_WARNING(
+                "no sync2 dispatch entry: host physdev api=%u.%u.%u, gdpa=%p, direct lookup "
+                "core=%p khr=%p, guest device extensions=[%s]",
+                VK_VERSION_MAJOR(hostProps.apiVersion), VK_VERSION_MINOR(hostProps.apiVersion),
+                VK_VERSION_PATCH(hostProps.apiVersion),
+                reinterpret_cast<void*>(vk->vkGetDeviceProcAddr),
+                reinterpret_cast<void*>(vk->vkGetDeviceProcAddr(*pDevice, "vkQueueSubmit2")),
+                reinterpret_cast<void*>(vk->vkGetDeviceProcAddr(*pDevice, "vkQueueSubmit2KHR")),
+                guestExts.c_str());
+        }
         if (m_vkEmulation->debugUtilsEnabled()) {
             deviceInfo.debugUtilsHelper = DebugUtilsHelper::withUtilsEnabled(*pDevice, dispatch);
         }
