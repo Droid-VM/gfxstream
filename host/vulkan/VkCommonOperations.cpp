@@ -1011,6 +1011,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     // Create instance level dispatch.
     emulation->mIvk = new VulkanDispatch();
     init_vulkan_dispatch_from_instance(gvk, emulation->mInstance, emulation->mIvk);
+    fillMissingDispatchAliases(emulation->mIvk);
 
     auto ivk = emulation->mIvk;
     if (!vulkan_dispatch_check_instance_VK_VERSION_1_0(ivk)) {
@@ -1043,6 +1044,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             }
 
             init_vulkan_dispatch_from_instance(gvk, emulation->mInstance, emulation->mIvk);
+            fillMissingDispatchAliases(emulation->mIvk);
 
             GFXSTREAM_DEBUG("Created Vulkan 1.1 instance on second try.");
 
@@ -1563,6 +1565,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     // device created; populate dispatch table
     emulation->mDvk = new VulkanDispatch();
     init_vulkan_dispatch_from_device(ivk, emulation->mDevice, emulation->mDvk);
+    fillMissingDispatchAliases(emulation->mDvk);
 
     auto dvk = emulation->mDvk;
 

@@ -1171,6 +1171,7 @@ class VkDecoderGlobalState::Impl {
         // Box it up
         VkInstance boxed = new_boxed_VkInstance(*pInstance, nullptr, true /* own dispatch */);
         init_vulkan_dispatch_from_instance(m_vk, *pInstance, dispatch_VkInstance(boxed));
+        fillMissingDispatchAliases(dispatch_VkInstance(boxed));
         info.boxed = boxed;
 
         std::string_view engineName = appInfo.pEngineName ? appInfo.pEngineName : "";
@@ -2470,6 +2471,7 @@ class VkDecoderGlobalState::Impl {
 
         VulkanDispatch* dispatch = dispatch_VkDevice(boxedDevice);
         init_vulkan_dispatch_from_device(vk, *pDevice, dispatch);
+        fillMissingDispatchAliases(dispatch);
         if (m_vkEmulation->debugUtilsEnabled()) {
             deviceInfo.debugUtilsHelper = DebugUtilsHelper::withUtilsEnabled(*pDevice, dispatch);
         }
@@ -7898,7 +7900,17 @@ class VkDecoderGlobalState::Impl {
 
     VkResult dispatchVkQueueSubmit(VulkanDispatch* vk, VkQueue unboxed_queue, uint32_t submitCount,
                                    const VkSubmitInfo2* pSubmits, VkFence fence) {
-        VkResult res = vk->vkQueueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
+        // vkQueueSubmit2 is Vulkan 1.3 core: a dispatch table built against a lower device API
+        // version leaves it null, and calling it jumps to 0 -- a guest submit would then kill the
+        // whole VMM. Prefer the core entry, fall back to the KHR alias (same VkSubmitInfo2), and
+        // fail the submit if the host has neither.
+        auto queueSubmit2 = vk->vkQueueSubmit2 ? vk->vkQueueSubmit2 : vk->vkQueueSubmit2KHR;
+        if (!queueSubmit2) {
+            GFXSTREAM_ERROR("host driver exposes neither vkQueueSubmit2 nor vkQueueSubmit2KHR");
+            return VK_ERROR_DEVICE_LOST;
+        }
+
+        VkResult res = queueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
         if (res != VK_SUCCESS) {
             return res;
         }
@@ -10283,6 +10295,20 @@ class VkDecoderGlobalState::Impl {
             return;
         }
 
+        // The host driver may expose this as the 1.1 core entry, as the KHR alias, or (turnip
+        // built for Android, reached through a 1.0 instance) as neither. Calling an unresolved
+        // dispatch entry jumps to 0 and takes the whole VMM down with a guest-triggered SIGSEGV,
+        // so pick whichever exists and report "no handle types" when none does.
+        auto getExternalFenceProperties = vk->vkGetPhysicalDeviceExternalFenceProperties
+                                              ? vk->vkGetPhysicalDeviceExternalFenceProperties
+                                              : vk->vkGetPhysicalDeviceExternalFencePropertiesKHR;
+        if (!getExternalFenceProperties) {
+            GFXSTREAM_WARNING(
+                "vkGetPhysicalDeviceExternalFenceProperties is unavailable; reporting no "
+                "external fence handle types");
+            return;
+        }
+
         VkExternalFenceHandleTypeFlagBits handleTypes[] = {
             VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_WIN32_BIT_KHR,
             VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_FD_BIT,
@@ -10297,8 +10323,7 @@ class VkDecoderGlobalState::Impl {
             VkPhysicalDeviceExternalFenceInfo externalFenceInfo = {
                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_FENCE_INFO, nullptr, handleType};
 
-            vk->vkGetPhysicalDeviceExternalFenceProperties(physicalDevice, &externalFenceInfo,
-                                                           &externalFenceProps);
+            getExternalFenceProperties(physicalDevice, &externalFenceInfo, &externalFenceProps);
 
             if ((externalFenceProps.externalFenceFeatures &
                  (VK_EXTERNAL_FENCE_FEATURE_IMPORTABLE_BIT)) == 0) {
@@ -10384,6 +10409,18 @@ class VkDecoderGlobalState::Impl {
             return;
         }
 
+        // Same unresolved-entry hazard as getSupportedFenceHandleTypes().
+        auto getExternalSemaphoreProperties =
+            vk->vkGetPhysicalDeviceExternalSemaphoreProperties
+                ? vk->vkGetPhysicalDeviceExternalSemaphoreProperties
+                : vk->vkGetPhysicalDeviceExternalSemaphorePropertiesKHR;
+        if (!getExternalSemaphoreProperties) {
+            GFXSTREAM_WARNING(
+                "vkGetPhysicalDeviceExternalSemaphoreProperties is unavailable; reporting no "
+                "external semaphore handle types");
+            return;
+        }
+
         VkExternalSemaphoreHandleTypeFlagBits handleTypes[] = {
             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT_KHR,
             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
@@ -10398,8 +10435,8 @@ class VkDecoderGlobalState::Impl {
             VkPhysicalDeviceExternalSemaphoreInfo externalSemaphoreInfo = {
                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO, nullptr, handleType};
 
-            vk->vkGetPhysicalDeviceExternalSemaphoreProperties(
-                physicalDevice, &externalSemaphoreInfo, &externalSemaphoreProps);
+            getExternalSemaphoreProperties(physicalDevice, &externalSemaphoreInfo,
+                                           &externalSemaphoreProps);
 
             if ((externalSemaphoreProps.externalSemaphoreFeatures &
                  (VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT)) == 0) {
