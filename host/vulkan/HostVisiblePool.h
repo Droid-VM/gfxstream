@@ -154,7 +154,11 @@ class HostVisiblePool {
 
     void free(const std::vector<HostVisiblePoolChunk>& chunks) {
         std::lock_guard<std::mutex> lk(mMu);
-        for (const auto& c : chunks) insertAndCoalesce(c.offset, c.size);
+        for (const auto& c : chunks) {
+            fprintf(stderr, "GFXPOOL: free offset=0x%llx size=%llu\n",
+                    (unsigned long long)c.offset, (unsigned long long)c.size);
+            insertAndCoalesce(c.offset, c.size);
+        }
     }
 
    private:

@@ -6768,9 +6768,11 @@ class VkDecoderGlobalState::Impl {
                                 vk_append_struct(&structChainIter, &importFdInfo);
                                 poolOffset = (int64_t)chunks[0].offset;
                                 fprintf(stderr,
-                                        "GFXPOOL: alloc size=%llu -> pool offset=0x%llx (no SHARE)\n",
+                                        "GFXPOOL: alloc size=%llu -> pool offset=0x%llx blobId=%llu "
+                                        "(no SHARE)\n",
                                         (unsigned long long)localAllocInfo.allocationSize,
-                                        (unsigned long long)chunks[0].offset);
+                                        (unsigned long long)chunks[0].offset,
+                                        (unsigned long long)(createBlobInfoPtr ? createBlobInfoPtr->blobId : 0));
                             } else {
                                 if (dmabuf.has_value()) close(dmabuf.value());
                                 hvPool->free(chunks);
@@ -7103,6 +7105,15 @@ class VkDecoderGlobalState::Impl {
                 pool->free({{(uint64_t)memoryInfo.poolOffset, memoryInfo.size}});
             }
             memoryInfo.poolOffset = -1;
+
+            // A blob descriptor registered for this memory but never picked up by a
+            // RESOURCE_CREATE_BLOB outlives the memory otherwise, and blob ids are recycled by
+            // the guest: the next resource on the same id would inherit this (now returned) pool
+            // offset and be mapped to a slice that belongs to somebody else.
+            if (memoryInfo.blobId && memoryInfo.blobCtxId) {
+                ExternalObjectManager::get()->removeBlobDescriptorInfo(*memoryInfo.blobCtxId,
+                                                                      memoryInfo.blobId);
+            }
         }
 
         deviceDispatch->vkFreeMemory(device, memory, pAllocator);
@@ -7496,6 +7507,14 @@ class VkDecoderGlobalState::Impl {
         if (info->poolOffset >= 0) {
             auto* pool = HostVisiblePool::get();
             int dupFd = pool ? dup(pool->memfd()) : -1;
+            // Which (context, blobId) this pool slice is filed under: three swapchain images
+            // reporting one offset means either the allocator handed the same slice out twice or
+            // several blob ids resolved to one allocation.
+            fprintf(stderr, "GFXPOOL: register ctx=%u blobId=%llu poolOffset=0x%llx size=%llu\n",
+                    virtioGpuContextId, (unsigned long long)hostBlobId,
+                    (unsigned long long)info->poolOffset, (unsigned long long)info->size);
+            info->blobId = hostBlobId;
+            info->blobCtxId = virtioGpuContextId;
 #if defined(__ANDROID__)
             ExternalObjectManager::get()->addBlobDescriptorInfo(
                 virtioGpuContextId, hostBlobId, (int64_t)dupFd, STREAM_HANDLE_TYPE_MEM_POOL,
