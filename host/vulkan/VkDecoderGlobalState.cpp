@@ -7871,6 +7871,87 @@ class VkDecoderGlobalState::Impl {
         return true;
     }
 
+    // Translate a VkSubmitInfo2 batch onto the Vulkan 1.0 vkQueueSubmit entry point, for hosts
+    // that expose neither vkQueueSubmit2 nor vkQueueSubmit2KHR. Everything VkSubmitInfo2 carries
+    // has a 1.0/1.2 equivalent: the semaphore payload values move into
+    // VkTimelineSemaphoreSubmitInfo, and each wait stage mask widens to ALL_COMMANDS (a superset
+    // of any VkPipelineStageFlags2 value, including the bits above 32 that have no 1.0 spelling,
+    // so the wait is never weaker than the guest asked for).
+    static VkResult submitViaLegacyQueueSubmit(VulkanDispatch* vk, VkQueue queue,
+                                               uint32_t submitCount, const VkSubmitInfo2* pSubmits,
+                                               VkFence fence) {
+        if (!vk->vkQueueSubmit) {
+            GFXSTREAM_ERROR("host driver exposes no vkQueueSubmit entry point");
+            return VK_ERROR_DEVICE_LOST;
+        }
+
+        static std::once_flag sWarnOnce;
+        std::call_once(sWarnOnce, [] {
+            GFXSTREAM_WARNING(
+                "host exposes neither vkQueueSubmit2 nor vkQueueSubmit2KHR; translating sync2 "
+                "submissions down to vkQueueSubmit");
+        });
+
+        std::vector<VkSubmitInfo> submits(submitCount);
+        std::vector<VkTimelineSemaphoreSubmitInfo> timelines(submitCount);
+        std::vector<std::vector<VkSemaphore>> waitSems(submitCount);
+        std::vector<std::vector<VkSemaphore>> signalSems(submitCount);
+        std::vector<std::vector<VkPipelineStageFlags>> waitStages(submitCount);
+        std::vector<std::vector<uint64_t>> waitValues(submitCount);
+        std::vector<std::vector<uint64_t>> signalValues(submitCount);
+        std::vector<std::vector<VkCommandBuffer>> cmdBufs(submitCount);
+
+        for (uint32_t i = 0; i < submitCount; i++) {
+            const VkSubmitInfo2& s = pSubmits[i];
+            bool timelineValues = false;
+
+            for (uint32_t j = 0; j < s.waitSemaphoreInfoCount; j++) {
+                const VkSemaphoreSubmitInfo& w = s.pWaitSemaphoreInfos[j];
+                waitSems[i].push_back(w.semaphore);
+                waitStages[i].push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+                waitValues[i].push_back(w.value);
+                timelineValues |= (w.value != 0);
+            }
+            for (uint32_t j = 0; j < s.commandBufferInfoCount; j++) {
+                cmdBufs[i].push_back(s.pCommandBufferInfos[j].commandBuffer);
+            }
+            for (uint32_t j = 0; j < s.signalSemaphoreInfoCount; j++) {
+                const VkSemaphoreSubmitInfo& sig = s.pSignalSemaphoreInfos[j];
+                signalSems[i].push_back(sig.semaphore);
+                signalValues[i].push_back(sig.value);
+                timelineValues |= (sig.value != 0);
+            }
+
+            submits[i] = VkSubmitInfo{
+                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                .pNext = nullptr,
+                .waitSemaphoreCount = static_cast<uint32_t>(waitSems[i].size()),
+                .pWaitSemaphores = waitSems[i].data(),
+                .pWaitDstStageMask = waitStages[i].data(),
+                .commandBufferCount = static_cast<uint32_t>(cmdBufs[i].size()),
+                .pCommandBuffers = cmdBufs[i].data(),
+                .signalSemaphoreCount = static_cast<uint32_t>(signalSems[i].size()),
+                .pSignalSemaphores = signalSems[i].data(),
+            };
+
+            // Only chain the timeline values when some semaphore actually carries one: a binary
+            // semaphore batch must stay valid on hosts without timeline semaphore support.
+            if (timelineValues) {
+                timelines[i] = VkTimelineSemaphoreSubmitInfo{
+                    .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+                    .pNext = nullptr,
+                    .waitSemaphoreValueCount = static_cast<uint32_t>(waitValues[i].size()),
+                    .pWaitSemaphoreValues = waitValues[i].data(),
+                    .signalSemaphoreValueCount = static_cast<uint32_t>(signalValues[i].size()),
+                    .pSignalSemaphoreValues = signalValues[i].data(),
+                };
+                submits[i].pNext = &timelines[i];
+            }
+        }
+
+        return vk->vkQueueSubmit(queue, submitCount, submits.data(), fence);
+    }
+
     VkResult dispatchVkQueueSubmit(VulkanDispatch* vk, VkQueue unboxed_queue, uint32_t submitCount,
                                    const VkSubmitInfo* pSubmits, VkFence fence) {
         VkResult res = vk->vkQueueSubmit(unboxed_queue, submitCount, pSubmits, fence);
@@ -7902,15 +7983,17 @@ class VkDecoderGlobalState::Impl {
                                    const VkSubmitInfo2* pSubmits, VkFence fence) {
         // vkQueueSubmit2 is Vulkan 1.3 core: a dispatch table built against a lower device API
         // version leaves it null, and calling it jumps to 0 -- a guest submit would then kill the
-        // whole VMM. Prefer the core entry, fall back to the KHR alias (same VkSubmitInfo2), and
-        // fail the submit if the host has neither.
+        // whole VMM. Prefer the core entry, then the KHR alias (same VkSubmitInfo2), and when the
+        // host has neither, translate the batch down to plain vkQueueSubmit rather than failing:
+        // the guest WSI present path submits in sync2 form on every frame, so failing here would
+        // make presenting impossible on such a host.
         auto queueSubmit2 = vk->vkQueueSubmit2 ? vk->vkQueueSubmit2 : vk->vkQueueSubmit2KHR;
-        if (!queueSubmit2) {
-            GFXSTREAM_ERROR("host driver exposes neither vkQueueSubmit2 nor vkQueueSubmit2KHR");
-            return VK_ERROR_DEVICE_LOST;
+        VkResult res;
+        if (queueSubmit2) {
+            res = queueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
+        } else {
+            res = submitViaLegacyQueueSubmit(vk, unboxed_queue, submitCount, pSubmits, fence);
         }
-
-        VkResult res = queueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
         if (res != VK_SUCCESS) {
             return res;
         }

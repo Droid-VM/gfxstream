@@ -182,9 +182,20 @@ void DeviceOpTracker::AddPendingDeviceOp(std::function<DeviceOpStatus()> pollFun
 DeviceOpBuilder::DeviceOpBuilder(DeviceOpTracker& tracker) : mTracker(tracker) {}
 
 DeviceOpBuilder::~DeviceOpBuilder() {
-    if (!mSubmittedFence) {
-        GFXSTREAM_FATAL("Invalid usage: failed to call OnQueueSubmittedWithFence().");
+    if (mSubmittedFence) {
+        return;
     }
+    // A queue submission can fail for reasons the guest controls (a lost device, a host driver
+    // that refuses the submission, a missing dispatch entry point). The caller then returns the
+    // error without ever submitting, which is a legitimate path -- aborting here would let any
+    // guest take the whole VMM down, and with a protected VM that costs the device a reboot.
+    // Reclaim the fence we created for the op and let the error propagate normally.
+    if (mCreatedFence.has_value() && *mCreatedFence != VK_NULL_HANDLE) {
+        mTracker.mDeviceDispatch->vkDestroyFence(mTracker.mDevice, *mCreatedFence, nullptr);
+    }
+    GFXSTREAM_WARNING(
+        "Queue submission abandoned before OnQueueSubmittedWithFence(); the submit failed and its "
+        "tracking fence was reclaimed.");
 }
 
 VkFence DeviceOpBuilder::CreateFenceForOp() {
