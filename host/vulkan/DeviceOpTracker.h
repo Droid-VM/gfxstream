@@ -21,6 +21,7 @@
 #include <deque>
 #include <functional>
 #include <future>
+#include <memory>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
@@ -68,6 +69,17 @@ class DeviceOpTracker {
     // objects.
     void PollAndProcessGarbage();
 
+    // Completes the tracked operations submitted with these fences, for a caller that has already
+    // established the fences are signalled. Asks the driver nothing.
+    //
+    // This exists because a waitable's promise could previously only be fulfilled from inside a
+    // sweep, so a caller that knew perfectly well the work was done still had to pay for a walk of
+    // the whole queue -- hundreds of microseconds per entry, since vkGetFenceStatus is expensive on
+    // this driver -- to have that fact recorded. Measured on Minecraft, that was 3.7ms per
+    // vkResetFences and about a quarter of all host dispatch, spent re-discovering completions the
+    // caller had confirmed 5us earlier.
+    void CompleteOpsForSignalledFences(const VkFence* fences, uint32_t fenceCount);
+
     void OnDestroyDevice();
 
    private:
@@ -76,15 +88,22 @@ class DeviceOpTracker {
 
     friend class DeviceOpBuilder;
 
-    using OpPollingFunction = std::function<DeviceOpStatus()>;
-
-    void AddPendingDeviceOp(OpPollingFunction pollFunction);
-    struct PollFunction {
-        OpPollingFunction func;
+    // A pending operation is a fence plus what to do when it signals, rather than an opaque
+    // polling closure. Keeping the fence visible is what lets a sweep ask about every queued
+    // operation in one driver call instead of one call each -- see PollAndProcessGarbage().
+    struct PendingOp {
+        VkFence fence;  // VK_NULL_HANDLE for an operation that is complete on arrival
+        std::shared_ptr<std::promise<void>> promise;
+        bool destroyFenceOnCompletion;
         std::chrono::time_point<std::chrono::system_clock> timepoint;
     };
+    void AddPendingDeviceOp(VkFence fence, std::shared_ptr<std::promise<void>> promise,
+                            bool destroyFenceOnCompletion);
+    // Completes op (fulfilling its promise, destroying its fence if owned) if its fence has
+    // signalled. Returns whether it is still pending.
+    DeviceOpStatus PollOne(const PendingOp& op, bool assumeSignalled);
     std::mutex mPollFunctionsMutex;
-    std::deque<PollFunction> mPollFunctions GUARDED_BY(mPollFunctionsMutex);
+    std::deque<PendingOp> mPollFunctions GUARDED_BY(mPollFunctionsMutex);
 
     // Reclaiming completed operations means asking the driver whether they are done, and
     // vkGetFenceStatus is not the cheap non-blocking read its name suggests: on this device's

@@ -166,7 +166,7 @@ void DeviceOpTracker::PollAndProcessGarbage() {
     // -- needs this same lock: holding it across the driver calls would just move the stall from
     // the submit path onto the lock. Only this thread consumes from the front, so putting the
     // still-pending ones back is safe.
-    std::deque<PollFunction> examining;
+    std::deque<PendingOp> examining;
     {
         std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
         examining.swap(mPollFunctions);
@@ -175,12 +175,19 @@ void DeviceOpTracker::PollAndProcessGarbage() {
 
     const auto now = std::chrono::system_clock::now();
     const auto expiry = now - kAutoDeleteTimeThreshold;
+
+    // Batching the query was tried and is a dead end: one zero-timeout vkWaitForFences over the
+    // whole queue measured 4.7ms against ~3.6ms for the individual calls it replaced, because
+    // kgsl's wait_many is a loop over per-fence IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID for
+    // waitAll -- same ioctls, one more layer. The way to make a sweep cheap is not to need it;
+    // see CompleteOpsForSignalledFences().
+    //
     // Stop at the first operation still in flight: entries are in submission order, so the ones
     // behind it are almost certainly pending too, and every extra probe costs a driver call.
     auto firstInFlightIt = examining.begin();
     for (; firstInFlightIt != examining.end(); ++firstInFlightIt) {
         ++profPolled;
-        if (firstInFlightIt->func() != DeviceOpStatus::kPending) {
+        if (PollOne(*firstInFlightIt, /* assumeSignalled */ false) != DeviceOpStatus::kPending) {
             continue;
         }
         // An operation that never completes must not wedge everything queued behind it.
@@ -215,7 +222,7 @@ void DeviceOpTracker::PollAndProcessGarbage() {
         const auto loggingCutoff = now - kSizeLoggingTimeThreshold;
         size_t numOldFuncs =
             std::count_if(mPollFunctions.begin(), mPollFunctions.end(),
-                          [loggingCutoff](const PollFunction& pollingFunc) {
+                          [loggingCutoff](const PendingOp& pollingFunc) {
                               return (pollingFunc.timepoint < loggingCutoff);
                           });
         if (numOldFuncs > kSizeLoggingThreshold) {
@@ -313,13 +320,61 @@ void DeviceOpTracker::OnDestroyDevice() {
     }
 }
 
-void DeviceOpTracker::AddPendingDeviceOp(std::function<DeviceOpStatus()> pollFunction) {
+DeviceOpStatus DeviceOpTracker::PollOne(const PendingOp& op, bool assumeSignalled) {
+    if (op.fence == VK_NULL_HANDLE) {
+        if (op.promise) op.promise->set_value();
+        return DeviceOpStatus::kDone;
+    }
+    VkResult result = VK_SUCCESS;
+    if (!assumeSignalled) {
+        result = mDeviceDispatch->vkGetFenceStatus(mDevice, op.fence);
+        if (result == VK_NOT_READY) {
+            return DeviceOpStatus::kPending;
+        }
+    }
+    if (op.destroyFenceOnCompletion) {
+        mDeviceDispatch->vkDestroyFence(mDevice, op.fence, nullptr);
+    }
+    if (op.promise) op.promise->set_value();
+    return result == VK_SUCCESS ? DeviceOpStatus::kDone : DeviceOpStatus::kFailure;
+}
+
+void DeviceOpTracker::CompleteOpsForSignalledFences(const VkFence* fences, uint32_t fenceCount) {
+    if (!fenceCount) return;
+
+    std::deque<PendingOp> completed;
+    {
+        std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
+        // Entries are in submission order and the queue is short (single digits in practice), so a
+        // linear scan is cheaper than any index would be -- and unlike a sweep, it touches no
+        // driver state at all.
+        for (auto it = mPollFunctions.begin(); it != mPollFunctions.end();) {
+            const bool matches =
+                it->fence != VK_NULL_HANDLE &&
+                std::find(fences, fences + fenceCount, it->fence) != fences + fenceCount;
+            if (matches) {
+                completed.push_back(std::move(*it));
+                it = mPollFunctions.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // Fulfil off the lock: a promise's continuation runs on whoever fulfils it, and holding the
+    // queue lock across that would put arbitrary work under it.
+    for (const PendingOp& op : completed) {
+        PollOne(op, /* assumeSignalled */ true);
+    }
+}
+
+void DeviceOpTracker::AddPendingDeviceOp(VkFence fence,
+                                         std::shared_ptr<std::promise<void>> promise,
+                                         bool destroyFenceOnCompletion) {
     StartPollThreadIfNeeded();
     std::lock_guard<std::mutex> lock(mPollFunctionsMutex);
-    mPollFunctions.push_back(PollFunction{
-        .func = std::move(pollFunction),
-        .timepoint = std::chrono::system_clock::now(),
-    });
+    mPollFunctions.push_back(PendingOp{fence, std::move(promise), destroyFenceOnCompletion,
+                                       std::chrono::system_clock::now()});
 }
 
 DeviceOpBuilder::DeviceOpBuilder(DeviceOpTracker& tracker) : mTracker(tracker) {}
@@ -372,25 +427,7 @@ DeviceOpWaitable DeviceOpBuilder::OnQueueSubmittedWithFence(VkFence fence) {
     std::shared_ptr<std::promise<void>> promise = std::make_shared<std::promise<void>>();
     DeviceOpWaitable future = promise->get_future().share();
 
-    mTracker.AddPendingDeviceOp([device = mTracker.mDevice,
-                                 deviceDispatch = mTracker.mDeviceDispatch, fence,
-                                 promise = std::move(promise), destroyFenceOnCompletion] {
-        if (fence == VK_NULL_HANDLE) {
-            return DeviceOpStatus::kDone;
-        }
-
-        VkResult result = deviceDispatch->vkGetFenceStatus(device, fence);
-        if (result == VK_NOT_READY) {
-            return DeviceOpStatus::kPending;
-        }
-
-        if (destroyFenceOnCompletion) {
-            deviceDispatch->vkDestroyFence(device, fence, nullptr);
-        }
-        promise->set_value();
-
-        return result == VK_SUCCESS ? DeviceOpStatus::kDone : DeviceOpStatus::kFailure;
-    });
+    mTracker.AddPendingDeviceOp(fence, std::move(promise), destroyFenceOnCompletion);
 
     return future;
 }
