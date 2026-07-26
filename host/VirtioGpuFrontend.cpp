@@ -30,6 +30,7 @@
 #include "VkCommonOperations.h"
 #include "gfxstream/host/address_space_operations.h"
 // TODO: remove after moving save/load interface to ops.
+#include "gfxstream/host/address_space_device.h"
 #include "gfxstream/host/address_space_graphics.h"
 #include "gfxstream/host/file_stream.h"
 #include "gfxstream/host/Tracing.h"
@@ -593,7 +594,9 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
 
             capset->protocolVersion = 1;
             capset->ringSize = 12288;
-            capset->bufferSize = 1048576;
+            // Must match the size RingStream is configured with: the guest allocates the ring
+            // blob from this, and a mismatch has the host reading past the end of it.
+            capset->bufferSize = gfxstream::host::kAsgWriteBufferSize;
 
             auto* fb = gfxstream::FrameBuffer::getFB();
             if (fb->hasEmulationVk()) {
@@ -691,7 +694,9 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
 
             capset->protocolVersion = 1;
             capset->ringSize = 12288;
-            capset->bufferSize = 1048576;
+            // Must match the size RingStream is configured with: the guest allocates the ring
+            // blob from this, and a mismatch has the host reading past the end of it.
+            capset->bufferSize = gfxstream::host::kAsgWriteBufferSize;
             capset->blobAlignment = mPageSize;
             break;
         }
@@ -701,7 +706,9 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
 
             capset->protocolVersion = 1;
             capset->ringSize = 12288;
-            capset->bufferSize = 1048576;
+            // Must match the size RingStream is configured with: the guest allocates the ring
+            // blob from this, and a mismatch has the host reading past the end of it.
+            capset->bufferSize = gfxstream::host::kAsgWriteBufferSize;
             capset->blobAlignment = mPageSize;
             break;
         }

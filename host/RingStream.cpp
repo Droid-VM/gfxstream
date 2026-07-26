@@ -16,6 +16,7 @@
 
 #include <assert.h>
 #include <memory.h>
+#include <stdlib.h>
 
 #include "gfxstream/host/dma_device.h"
 #include "gfxstream/common/logging.h"
@@ -137,7 +138,23 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
     uint32_t ringAvailable = 0;
     uint32_t ringLargeXferAvailable = 0;
 
-    const uint32_t maxSpins = 30;
+    // How long the consumer spins on an empty ring before parking itself. Once parked, the only
+    // thing that brings it back is a ping from the guest -- a virtio round trip -- so this sets
+    // the handoff latency for whatever the guest sends next. Measured with Minecraft (identical
+    // clock, no thermal throttling, same scene), as guest submits per second:
+    //     30 -> 266    300 -> 400    3000 -> 533    30000 -> 400
+    // and the guest's render thread went from 61% of its time spinning in the transport down to
+    // 16%. Past a few thousand the consumer starts costing more in contention with the guest's
+    // vCPU threads than it saves in wakeups. Tunable so this can be re-measured per device.
+    static const uint32_t maxSpins = [] {
+        const char* env = getenv("GFXSTREAM_ASG_SPINS");
+        if (env) {
+            char* end = nullptr;
+            const unsigned long v = strtoul(env, &end, 10);
+            if (end != env) return static_cast<uint32_t>(v);
+        }
+        return 3000u;
+    }();
     uint32_t spins = 0;
     bool inLargeXfer = true;
 

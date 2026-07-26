@@ -22,6 +22,15 @@
 namespace gfxstream {
 namespace host {
 
+// The step is the flush granularity: the encoder fills one step, posts an (offset, size) record,
+// and moves to the next; buffer/step - 1 of those can be outstanding before the guest has to wait.
+// Both were measured against Minecraft (guest submits per second) and the stock values won, so
+// they are left alone -- recorded here so the next person does not repeat it:
+//   1 MiB / 256 KiB (3 in flight)  -> 533   <- stock
+//   4 MiB /   1 MiB (3 in flight)  -> 266   coarser flushes cost latency; this workload is
+//                                           latency-bound, not bandwidth-bound
+//   2 MiB / 256 KiB (7 in flight)  -> 400   deeper pipeline did not help either
+// What did help was not parking the host consumer so eagerly; see maxSpins in RingStream.cpp.
 constexpr const int kAsgWriteBufferSize = 1048576;
 constexpr const int kAsgWriteStepSize = 262144;
 constexpr const int kAsgDataRingSize = 524288;
