@@ -17,6 +17,9 @@
 #include <assert.h>
 #include <memory.h>
 #include <stdlib.h>
+#include <sys/prctl.h>
+
+#include <vector>
 
 #include "gfxstream/host/dma_device.h"
 #include "gfxstream/common/logging.h"
@@ -138,23 +141,68 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
     uint32_t ringAvailable = 0;
     uint32_t ringLargeXferAvailable = 0;
 
-    // How long the consumer spins on an empty ring before parking itself. Once parked, the only
-    // thing that brings it back is a ping from the guest -- a virtio round trip -- so this sets
-    // the handoff latency for whatever the guest sends next. Measured with Minecraft (identical
-    // clock, no thermal throttling, same scene), as guest submits per second:
-    //     30 -> 266    300 -> 400    3000 -> 533    30000 -> 400
-    // and the guest's render thread went from 61% of its time spinning in the transport down to
-    // 16%. Past a few thousand the consumer starts costing more in contention with the guest's
-    // vCPU threads than it saves in wakeups. Tunable so this can be re-measured per device.
-    static const uint32_t maxSpins = [] {
-        const char* env = getenv("GFXSTREAM_ASG_SPINS");
-        if (env) {
+    // What to do while the ring is empty. There are two costs, and a single flat spin count has to
+    // trade them against each other blind: parking needs a guest doorbell (a virtio round trip) to
+    // come back, while yield-spinning contends with the guest's vCPU threads for the same physical
+    // cores. Backing off in stages separates them -- yield-spin only as long as that is cheap, then
+    // keep watching with a 1 us sleep, which surrenders the core but still reacts in microseconds,
+    // and park only once the ring has been dry through the whole ladder.
+    //
+    // Measured with Minecraft, GPU pinned at 734 MHz, one fixed scene, as guest submits/second:
+    //     flat 3000                       508    (the previous default)
+    //     3000:0                          499    (this code, one stage -- the ladder is free)
+    //     500:0,5000:1,10000:10,30000:50  540
+    //     3000:0,20000:1,40000:10,80000:50 554
+    //     3000:0,50000:1                  558
+    //     3000:0,150000:1                 567    <- default
+    //     20000:0,150000:1                494    (worse than no ladder at all)
+    // Two things fall out. The sleeping stage is where all the gain is: parking is nearly always a
+    // loss, because the host consumer is ~99% idle anyway, so waiting cheaply costs nobody
+    // anything while a park has to be paid back with a VM exit. And spinning is the opposite --
+    // stretching the yield stage to 20000 lands below the flat baseline, since that is expensive
+    // waiting that takes cores the guest needs. 3000 is the same sweet spot the flat count found.
+    // Only 1 us matters as a sleep value; the 10 us and 50 us stages measured as noise and are
+    // gone, because by then parking is the honest answer.
+    //
+    // GFXSTREAM_ASG_SPIN_LEVELS overrides the stages, as ascending "iters:sleep_us" pairs; an
+    // empty-ring iteration past the last stage parks. A single stage reproduces the old flat
+    // behavior ("3000:0"), which is what made the ladder measurable apart from the stage values.
+    struct SpinLevel {
+        uint32_t upToIter;
+        uint32_t sleepUs;
+    };
+    static const std::vector<SpinLevel> spinLevels = [] {
+        std::vector<SpinLevel> levels;
+        const char* env = getenv("GFXSTREAM_ASG_SPIN_LEVELS");
+        const char* spec = env ? env : "3000:0,150000:1";
+        uint32_t prev = 0;
+        while (*spec) {
             char* end = nullptr;
-            const unsigned long v = strtoul(env, &end, 10);
-            if (end != env) return static_cast<uint32_t>(v);
+            const unsigned long iters = strtoul(spec, &end, 10);
+            if (end == spec || *end != ':') break;
+            spec = end + 1;
+            const unsigned long us = strtoul(spec, &end, 10);
+            if (end == spec) break;
+            spec = *end == ',' ? end + 1 : end;
+            if (iters > prev) {
+                levels.push_back(
+                    SpinLevel{static_cast<uint32_t>(iters), static_cast<uint32_t>(us)});
+                prev = static_cast<uint32_t>(iters);
+            }
         }
-        return 3000u;
+        if (levels.empty()) levels.push_back(SpinLevel{3000, 0});
+        return levels;
     }();
+    // The sleeping stages are only distinct from each other if a 1 us sleep is near 1 us: the
+    // default timer slack is 50 us, which collapses every stage below it into the same wait.
+    // Slack is per-thread, so each consumer thread sets its own once.
+    static thread_local const bool slackSet = [] {
+#ifdef PR_SET_TIMERSLACK
+        prctl(PR_SET_TIMERSLACK, 1000 /* ns */, 0, 0, 0);
+#endif
+        return true;
+    }();
+    (void)slackSet;
     uint32_t spins = 0;
     bool inLargeXfer = true;
 
@@ -232,12 +280,23 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                 inLargeXfer = false;
             }
 
-            if (++spins < maxSpins) {
-                ring_buffer_yield();
-                continue;
-            } else {
-                spins = 0;
+            ++spins;
+            uint32_t sleepUs = UINT32_MAX;  // past the last stage -> park
+            for (const SpinLevel& level : spinLevels) {
+                if (spins <= level.upToIter) {
+                    sleepUs = level.sleepUs;
+                    break;
+                }
             }
+            if (sleepUs != UINT32_MAX) {
+                if (sleepUs == 0) {
+                    ring_buffer_yield();
+                } else {
+                    gfxstream::base::sleepUs(sleepUs);
+                }
+                continue;
+            }
+            spins = 0;
 
             if (mShouldExit) {
                 return nullptr;
@@ -247,7 +306,9 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                 return nullptr;
             }
 
-            ++mUnavailableReadCount;
+            // The ladder ran dry, so park now instead of running it kMaxUnavailableReads more
+            // times: the stages already covered every latency worth spinning through.
+            mUnavailableReadCount = kMaxUnavailableReads;
             if (mUnavailableReadCount >= kMaxUnavailableReads) {
                 *(mContext.host_state) = ASG_HOST_STATE_NEED_NOTIFY;
 
