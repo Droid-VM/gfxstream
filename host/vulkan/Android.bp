@@ -84,6 +84,7 @@ cc_library_static {
         "SwapChainStateVk.cpp",
         "VkAndroidNativeBuffer.cpp",
         "VkCommonOperations.cpp",
+        "DecoderProfile.cpp",
         "VkDecoder.cpp",
         "VkDecoderGlobalState.cpp",
         "VkDecoderSnapshot.cpp",
