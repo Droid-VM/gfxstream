@@ -4161,15 +4161,45 @@ class VkDecoderGlobalState::Impl {
         // only fulfilled from inside it, and leaving it unfulfilled would strand that operation in
         // the queue once the fence below is reset out from under it -- but now it runs once, off
         // the lock, and every vkGetFenceStatus it makes is against an already-signalled fence.
+        // Which half of this wait actually costs anything decides what to do about it. If the
+        // fences are already signalled and the time goes into the sweep, the fix is to stop making
+        // completion depend on being swept; if the fences really are still in flight, the fix is to
+        // stop the guest having to wait for them here at all. Those are different changes, so
+        // measure before picking. GFXSTREAM_RESETFENCE_TRACE=1; reports every 5s.
+        static const bool kResetFenceTrace = [] {
+            const char* env = getenv("GFXSTREAM_RESETFENCE_TRACE");
+            return env && env[0] != '0';
+        }();
+        static std::atomic<uint64_t> sCalls{0}, sWithPending{0}, sWaitNs{0}, sSweepNs{0},
+            sAlreadySignalled{0};
+        static std::atomic<uint64_t> sLastReportNs{0};
+        const auto nowNs = [] {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+        };
+        if (kResetFenceTrace) sCalls.fetch_add(1, std::memory_order_relaxed);
+
         if (!pendingUses.empty()) {
+            if (kResetFenceTrace) sWithPending.fetch_add(1, std::memory_order_relaxed);
             if (!pendingUseFences.empty()) {
+                // A zero-timeout probe first, purely to record whether the wait below had anything
+                // to wait for. It is one extra driver call on a path that already makes several.
+                if (kResetFenceTrace) {
+                    if (vk->vkWaitForFences(device, (uint32_t)pendingUseFences.size(),
+                                            pendingUseFences.data(), VK_TRUE, 0) == VK_SUCCESS) {
+                        sAlreadySignalled.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
                 // Bounded: a fence that never signals is a lost host operation, and blocking here
                 // forever would take the render thread with it. The sweep below has its own
                 // expiry for the same case.
                 static constexpr uint64_t kFenceWaitTimeoutNs = 5ull * 1000 * 1000 * 1000;
+                const uint64_t waitT0 = kResetFenceTrace ? nowNs() : 0;
                 VkResult waitRes =
                     vk->vkWaitForFences(device, (uint32_t)pendingUseFences.size(),
                                         pendingUseFences.data(), VK_TRUE, kFenceWaitTimeoutNs);
+                if (kResetFenceTrace) sWaitNs.fetch_add(nowNs() - waitT0, std::memory_order_relaxed);
                 if (waitRes == VK_TIMEOUT) {
                     GFXSTREAM_WARNING(
                         "VkDevice:%p: host operations on %zu fence(s) did not complete within 5s; "
@@ -4177,7 +4207,31 @@ class VkDecoderGlobalState::Impl {
                         device, pendingUseFences.size());
                 }
             }
+            const uint64_t sweepT0 = kResetFenceTrace ? nowNs() : 0;
             tracker->PollAndProcessGarbage();
+            if (kResetFenceTrace) sSweepNs.fetch_add(nowNs() - sweepT0, std::memory_order_relaxed);
+        }
+
+        if (kResetFenceTrace) {
+            const uint64_t now = nowNs();
+            uint64_t last = sLastReportNs.load(std::memory_order_relaxed);
+            if (now - last > 5000000000ull &&
+                sLastReportNs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+                const uint64_t calls = sCalls.exchange(0, std::memory_order_relaxed);
+                const uint64_t pend = sWithPending.exchange(0, std::memory_order_relaxed);
+                const uint64_t sig = sAlreadySignalled.exchange(0, std::memory_order_relaxed);
+                const uint64_t waitNs = sWaitNs.exchange(0, std::memory_order_relaxed);
+                const uint64_t sweepNs = sSweepNs.exchange(0, std::memory_order_relaxed);
+                GFXSTREAM_WARNING(
+                    "RESETFENCETRACE: %llu calls, %llu had a pending use (%llu of those had the "
+                    "fence already signalled); wait %lluus total (%lluus each), sweep %lluus total "
+                    "(%lluus each)",
+                    (unsigned long long)calls, (unsigned long long)pend, (unsigned long long)sig,
+                    (unsigned long long)(waitNs / 1000),
+                    (unsigned long long)(pend ? waitNs / pend / 1000 : 0),
+                    (unsigned long long)(sweepNs / 1000),
+                    (unsigned long long)(pend ? sweepNs / pend / 1000 : 0));
+            }
         }
 
         if (!cleanedFences.empty()) {
