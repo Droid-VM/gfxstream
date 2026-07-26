@@ -21,8 +21,10 @@
 #include <deque>
 #include <functional>
 #include <future>
+#include <condition_variable>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <variant>
 
 #include "VulkanDispatch.h"
@@ -46,6 +48,7 @@ enum class DeviceOpStatus { kPending, kDone, kFailure };
 class DeviceOpTracker {
    public:
     DeviceOpTracker(VkDevice device, VulkanDispatch* deviceDispatch);
+    ~DeviceOpTracker();
 
     DeviceOpTracker(const DeviceOpTracker& rhs) = delete;
     DeviceOpTracker& operator=(const DeviceOpTracker& rhs) = delete;
@@ -65,13 +68,6 @@ class DeviceOpTracker {
     // objects.
     void PollAndProcessGarbage();
 
-    // Same, but does nothing if it already ran recently. Every poll asks the driver for the
-    // status of every operation still in flight, so calling it once per queue submit -- as the
-    // submit path does -- costs a driver round trip per in-flight op on every submit. Nothing
-    // waits on these waitables (they are only checked with the non-blocking IsDone()), so
-    // deferring a sweep only defers reclaiming objects that are already dead.
-    void PollAndProcessGarbageIfDue();
-
     void OnDestroyDevice();
 
    private:
@@ -90,8 +86,20 @@ class DeviceOpTracker {
     std::mutex mPollFunctionsMutex;
     std::deque<PollFunction> mPollFunctions GUARDED_BY(mPollFunctionsMutex);
 
-    // steady_clock nanoseconds of the last sweep, for PollAndProcessGarbageIfDue().
-    std::atomic<uint64_t> mLastPollNs{0};
+    // Reclaiming completed operations means asking the driver whether they are done, and
+    // vkGetFenceStatus is not the cheap non-blocking read its name suggests: on this device's
+    // driver a single call averages milliseconds. Doing that from a guest-facing call -- the
+    // submit path used to -- puts a multi-millisecond driver query in the middle of every
+    // submit, and the guest ends up spinning in the transport waiting for it. Sweep from a
+    // thread of our own instead, so the cost never lands on a path the guest is waiting on.
+    void StartPollThreadIfNeeded();
+    void StopPollThread();
+    std::once_flag mPollThreadOnce;
+    std::thread mPollThread;
+    std::mutex mPollThreadMutex;
+    std::condition_variable mPollThreadCv;
+    std::atomic<bool> mPollThreadStopping{false};
+
 
     struct PendingGarbage {
         DeviceOpWaitable waitable;

@@ -8433,11 +8433,8 @@ class VkDecoderGlobalState::Impl {
         if (!snapshotsEnabled()) {
             processDelayedRemovesForDevice(device);
         }
-        const uint64_t profBeforePollNs = profileSubmit ? SubmitStageProfile::NowNs() : 0;
-        deviceOpTracker->PollAndProcessGarbageIfDue();
-        if (profileSubmit) {
-            profPollNs = SubmitStageProfile::NowNs() - profBeforePollNs;
-        }
+        // No garbage sweep here: it enters the driver, and vkGetFenceStatus costs milliseconds
+        // on this device -- DeviceOpTracker sweeps from its own thread instead.
 
         if (snapshotsEnabled()) {
             for (uint32_t i = 0; i < submitCount; ++i) {

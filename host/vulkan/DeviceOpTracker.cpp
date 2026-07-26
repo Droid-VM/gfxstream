@@ -67,54 +67,157 @@ void DeviceOpTracker::AddPendingGarbage(DeviceOpWaitable waitable, VkSemaphore s
     }
 }
 
-void DeviceOpTracker::PollAndProcessGarbageIfDue() {
-    // Long enough that a submit-rate sweep becomes negligible, short enough that objects whose
-    // last use has completed are still reclaimed promptly. Overridable so the trade-off can be
-    // measured; 0 restores a sweep on every call.
-    static const uint64_t kMinIntervalNs = [] {
-        const char* env = getenv("GFXSTREAM_DEVICE_OP_POLL_US");
-        if (env) {
-            char* end = nullptr;
-            const unsigned long v = strtoul(env, &end, 10);
-            if (end != env) return static_cast<uint64_t>(v) * 1000ull;
-        }
-        return 1000000ull;  // 1 ms
-    }();
+DeviceOpTracker::~DeviceOpTracker() { StopPollThread(); }
 
-    const uint64_t now = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
-    uint64_t last = mLastPollNs.load(std::memory_order_relaxed);
-    if (kMinIntervalNs && now - last < kMinIntervalNs) {
-        return;
-    }
-    // Only the thread that wins the claim sweeps, so concurrent submits do not all pile into
-    // the same scan.
-    if (!mLastPollNs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
-        return;
-    }
-    PollAndProcessGarbage();
+void DeviceOpTracker::StartPollThreadIfNeeded() {
+    std::call_once(mPollThreadOnce, [this] {
+        mPollThread = std::thread([this] {
+            // Deliberately infrequent. A pass enters the driver, and on this device a fence
+            // status query serialises against queue submits -- polling often enough to matter
+            // for latency would just move the stall into vkQueueSubmit. All this reclaims is
+            // fences and semaphores whose last use already finished, so a lazy pass is fine.
+            static const auto kInterval = std::chrono::milliseconds([] {
+                const char* env = getenv("GFXSTREAM_DEVICE_OP_POLL_MS");
+                if (env) {
+                    char* end = nullptr;
+                    const unsigned long v = strtoul(env, &end, 10);
+                    if (end != env) return static_cast<long>(v);
+                }
+                return 500L;
+            }());
+            while (true) {
+                {
+                    std::unique_lock<std::mutex> lock(mPollThreadMutex);
+                    mPollThreadCv.wait_for(lock, kInterval,
+                                           [this] { return mPollThreadStopping.load(); });
+                    if (mPollThreadStopping.load()) {
+                        return;
+                    }
+                }
+                PollAndProcessGarbage();
+            }
+        });
+    });
 }
 
-void DeviceOpTracker::PollAndProcessGarbage() {
-    std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
-    mPollFunctions.erase(std::remove_if(mPollFunctions.begin(), mPollFunctions.end(),
-                                        [](const PollFunction& pollingFunc) {
-                                            DeviceOpStatus status = pollingFunc.func();
-                                            return status != DeviceOpStatus::kPending;
-                                        }),
-                         mPollFunctions.end());
+void DeviceOpTracker::StopPollThread() {
+    {
+        std::lock_guard<std::mutex> lock(mPollThreadMutex);
+        mPollThreadStopping = true;
+    }
+    mPollThreadCv.notify_all();
+    if (mPollThread.joinable()) {
+        mPollThread.join();
+    }
+}
 
+namespace {
+// Splits the halves of a sweep so their costs can be told apart: polling the operations still in
+// flight, and destroying the objects whose last use has completed. GFXSTREAM_SUBMIT_TRACE enables
+// it, same as the submit-stage profile.
+struct SweepProfile {
+    static bool Enabled() {
+        static const bool on = getenv("GFXSTREAM_SUBMIT_TRACE") != nullptr;
+        return on;
+    }
+    static uint64_t NowNs() {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    }
+    static void Record(uint64_t lockNs, uint64_t pollNs, size_t polled, size_t pollLeft,
+                       uint64_t garbageNs, size_t destroyed, size_t garbageLeft) {
+        static std::atomic<uint64_t> sPoll{0}, sGarbage{0}, sPolled{0}, sDestroyed{0}, sCount{0};
+        static std::atomic<uint64_t> sLock{0}, sPollMax{0};
+        sLock += lockNs;
+        if (polled) {
+            uint64_t per = pollNs / polled, prev = sPollMax.load();
+            while (per > prev && !sPollMax.compare_exchange_weak(prev, per)) {}
+        }
+        sPoll += pollNs;
+        sGarbage += garbageNs;
+        sPolled += polled;
+        sDestroyed += destroyed;
+        const uint64_t n = ++sCount;
+        constexpr uint64_t kEvery = 100;
+        if (n % kEvery) return;
+        GFXSTREAM_WARNING(
+            "SWEEPPROF n=%llu avg/sweep(us): lock-wait=%llu poll=%llu (worst single "
+            "vkGetFenceStatus=%llu) over %llu ops, %d queued | destroy=%llu over %llu objs, %d queued",
+            (unsigned long long)n, (unsigned long long)(sLock.exchange(0) / kEvery / 1000),
+            (unsigned long long)(sPoll.exchange(0) / kEvery / 1000),
+            (unsigned long long)(sPollMax.exchange(0) / 1000),
+            (unsigned long long)(sPolled.exchange(0) / kEvery), (int)pollLeft,
+            (unsigned long long)(sGarbage.exchange(0) / kEvery / 1000),
+            (unsigned long long)(sDestroyed.exchange(0) / kEvery), (int)garbageLeft);
+    }
+};
+}  // namespace
+
+void DeviceOpTracker::PollAndProcessGarbage() {
+    const bool prof = SweepProfile::Enabled();
+    const uint64_t profT0 = prof ? SweepProfile::NowNs() : 0;
+    size_t profPolled = 0;
+    uint64_t profPollNs = 0;
+    size_t profDestroyed = 0;
+
+    // Take the operations to examine out of the queue before touching the driver. Polling can
+    // take milliseconds per call here, and AddPendingDeviceOp() -- which every queue submit runs
+    // -- needs this same lock: holding it across the driver calls would just move the stall from
+    // the submit path onto the lock. Only this thread consumes from the front, so putting the
+    // still-pending ones back is safe.
+    std::deque<PollFunction> examining;
+    {
+        std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
+        examining.swap(mPollFunctions);
+    }
+    const uint64_t profLockedNs = prof ? SweepProfile::NowNs() : 0;
+
+    const auto now = std::chrono::system_clock::now();
+    const auto expiry = now - kAutoDeleteTimeThreshold;
+    // Stop at the first operation still in flight: entries are in submission order, so the ones
+    // behind it are almost certainly pending too, and every extra probe costs a driver call.
+    auto firstInFlightIt = examining.begin();
+    for (; firstInFlightIt != examining.end(); ++firstInFlightIt) {
+        ++profPolled;
+        if (firstInFlightIt->func() != DeviceOpStatus::kPending) {
+            continue;
+        }
+        // An operation that never completes must not wedge everything queued behind it.
+        if (firstInFlightIt->timepoint < expiry) {
+            GFXSTREAM_WARNING(
+                "VkDevice:%p had an operation pending for over %d seconds; dropping it so later "
+                "completions can be reclaimed.",
+                mDevice,
+                std::chrono::duration_cast<std::chrono::seconds>(kAutoDeleteTimeThreshold).count());
+            continue;
+        }
+        break;
+    }
+    examining.erase(examining.begin(), firstInFlightIt);
+    if (prof) profPollNs = SweepProfile::NowNs() - profLockedNs;
+
+    size_t stillQueued = 0;
+    {
+        std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
+        // Anything submitted while we were polling belongs after what we put back.
+        examining.insert(examining.end(), std::make_move_iterator(mPollFunctions.begin()),
+                         std::make_move_iterator(mPollFunctions.end()));
+        mPollFunctions.swap(examining);
+        stillQueued = mPollFunctions.size();
+    }
+
+    {
+        std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
     if (mPollFunctions.size() > kSizeLoggingThreshold) {
         // Only report old-enough objects to avoid reporting lots of pending waitables
         // when many requests have been done in a small amount of time.
-        const auto now = std::chrono::system_clock::now();
-        const auto old = now - kSizeLoggingTimeThreshold;
-        size_t numOldFuncs = std::count_if(
-            mPollFunctions.begin(), mPollFunctions.end(), [old](const PollFunction& pollingFunc) {
-                return (pollingFunc.timepoint < old);
-            });
+        const auto loggingCutoff = now - kSizeLoggingTimeThreshold;
+        size_t numOldFuncs =
+            std::count_if(mPollFunctions.begin(), mPollFunctions.end(),
+                          [loggingCutoff](const PollFunction& pollingFunc) {
+                              return (pollingFunc.timepoint < loggingCutoff);
+                          });
         if (numOldFuncs > kSizeLoggingThreshold) {
             //TODO(b/382028853): should be a warning
             GFXSTREAM_DEBUG(
@@ -123,9 +226,8 @@ void DeviceOpTracker::PollAndProcessGarbage() {
                 std::chrono::duration_cast<std::chrono::milliseconds>(kSizeLoggingTimeThreshold));
         }
     }
+    }
 
-    const auto now = std::chrono::system_clock::now();
-    const auto old = now - kAutoDeleteTimeThreshold;
     {
         std::lock_guard<std::mutex> pendingGarbageLock(mPendingGarbageMutex);
 
@@ -136,8 +238,8 @@ void DeviceOpTracker::PollAndProcessGarbage() {
         // of work performed here as it is expected that this function will be called
         // while processing other guest vulkan functions.
         auto firstPendingIt = std::find_if(mPendingGarbage.begin(), mPendingGarbage.end(),
-                                           [old](const PendingGarbage& pendingGarbage) {
-                                               if (pendingGarbage.timepoint < old) {
+                                           [expiry](const PendingGarbage& pendingGarbage) {
+                                               if (pendingGarbage.timepoint < expiry) {
                                                    return /*still pending=*/false;
                                                }
                                                return !IsDone(pendingGarbage.waitable);
@@ -146,7 +248,7 @@ void DeviceOpTracker::PollAndProcessGarbage() {
         for (auto it = mPendingGarbage.begin(); it != firstPendingIt; it++) {
             PendingGarbage& pendingGarbage = *it;
 
-            if (pendingGarbage.timepoint < old) {
+            if (pendingGarbage.timepoint < expiry) {
                 const auto difference = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - pendingGarbage.timepoint);
                 GFXSTREAM_WARNING(
@@ -167,6 +269,7 @@ void DeviceOpTracker::PollAndProcessGarbage() {
                     }
                 },
                 pendingGarbage.obj);
+            ++profDestroyed;
         }
 
         mPendingGarbage.erase(mPendingGarbage.begin(), firstPendingIt);
@@ -175,10 +278,18 @@ void DeviceOpTracker::PollAndProcessGarbage() {
             GFXSTREAM_WARNING("VkDevice:%p has %d pending garbage objects.", mDevice,
                               mPendingGarbage.size());
         }
+        if (prof) {
+            SweepProfile::Record(profLockedNs - profT0, profPollNs, profPolled, stillQueued,
+                                 SweepProfile::NowNs() - profLockedNs - profPollNs, profDestroyed,
+                                 mPendingGarbage.size());
+        }
     }
 }
 
 void DeviceOpTracker::OnDestroyDevice() {
+    // Stop sweeping before the device goes away: the poll functions dereference the device.
+    StopPollThread();
+
     mDeviceDispatch->vkDeviceWaitIdle(mDevice);
 
     PollAndProcessGarbage();
@@ -203,6 +314,7 @@ void DeviceOpTracker::OnDestroyDevice() {
 }
 
 void DeviceOpTracker::AddPendingDeviceOp(std::function<DeviceOpStatus()> pollFunction) {
+    StartPollThreadIfNeeded();
     std::lock_guard<std::mutex> lock(mPollFunctionsMutex);
     mPollFunctions.push_back(PollFunction{
         .func = std::move(pollFunction),
