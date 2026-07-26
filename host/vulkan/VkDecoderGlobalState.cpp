@@ -4093,6 +4093,11 @@ class VkDecoderGlobalState::Impl {
         std::vector<VkFence> externalFences;
 
         std::vector<DeviceOpWaitable> pendingUses;
+        // The fences those pending uses were submitted with. A fence only acquires a latestUse in
+        // on_vkAcquireImageANDROID, which submits with the guest's own fence, so waiting on these
+        // is waiting on exactly the host-side work that has to finish before the reset.
+        std::vector<VkFence> pendingUseFences;
+        std::shared_ptr<DeviceOpTracker> tracker;
 
         {
             std::lock_guard<std::mutex> lock(mMutex);
@@ -4111,6 +4116,7 @@ class VkDecoderGlobalState::Impl {
                 if (fenceInfo.latestUse) {
                     if (!IsDone(*fenceInfo.latestUse)) {
                         pendingUses.emplace_back(*fenceInfo.latestUse);
+                        pendingUseFences.push_back(fence);
                     }
                     fenceInfo.latestUse.reset();
                 }
@@ -4123,37 +4129,55 @@ class VkDecoderGlobalState::Impl {
                     fenceInfo.state = FenceInfo::State::kNotWaitable;
                 }
             }
-        }
 
-        // Ensure that any host operations that reference this fence have completed
-        // before reseting.
-        while (!pendingUses.empty()) {
-            {
-                std::lock_guard<std::mutex> lock(mMutex);
-
+            if (!pendingUses.empty()) {
                 auto deviceInfoIt = mDeviceInfo.find(device);
                 if (deviceInfoIt == mDeviceInfo.end()) {
                     GFXSTREAM_ERROR("Invalid VkDevice:%p!", device);
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
-                DeviceInfo& deviceInfo = deviceInfoIt->second;
-
-                if (!deviceInfo.deviceOpTracker) {
+                tracker = deviceInfoIt->second.deviceOpTracker;
+                if (!tracker) {
                     GFXSTREAM_ERROR("VkDevice:%p missing op tracker?", device);
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
-                deviceInfo.deviceOpTracker->PollAndProcessGarbage();
             }
+        }
 
-            pendingUses.erase(
-                std::remove_if(pendingUses.begin(),
-                               pendingUses.end(),
-                               [](const DeviceOpWaitable& waitable) {
-                                    return IsDone(waitable);
-                               }),
-                pendingUses.end());
-
-            std::this_thread::yield();
+        // Ensure that any host operations referencing these fences have completed before
+        // resetting them.
+        //
+        // This used to spin -- reacquiring mMutex and calling PollAndProcessGarbage() on every
+        // iteration -- and it was the single most expensive opcode the host decoded: 1078us on
+        // average, 24% of all host dispatch, on only 96 calls a second. Two reasons, both fixed
+        // here. A sweep walks the whole pending queue calling vkGetFenceStatus, which costs
+        // hundreds of microseconds each on this driver (measured: 2.4ms per sweep over 8 ops), so
+        // calling one per spin iteration to learn something the GPU already knew was the bulk of
+        // the cost. And it did that holding mMutex, which every other decoded call needs, so one
+        // guest thread resetting a fence stalled all of them.
+        //
+        // Wait on the fences directly instead: it blocks rather than spins, needs no lock, and
+        // asks the driver once. The sweep still has to run afterwards -- the waitable's promise is
+        // only fulfilled from inside it, and leaving it unfulfilled would strand that operation in
+        // the queue once the fence below is reset out from under it -- but now it runs once, off
+        // the lock, and every vkGetFenceStatus it makes is against an already-signalled fence.
+        if (!pendingUses.empty()) {
+            if (!pendingUseFences.empty()) {
+                // Bounded: a fence that never signals is a lost host operation, and blocking here
+                // forever would take the render thread with it. The sweep below has its own
+                // expiry for the same case.
+                static constexpr uint64_t kFenceWaitTimeoutNs = 5ull * 1000 * 1000 * 1000;
+                VkResult waitRes =
+                    vk->vkWaitForFences(device, (uint32_t)pendingUseFences.size(),
+                                        pendingUseFences.data(), VK_TRUE, kFenceWaitTimeoutNs);
+                if (waitRes == VK_TIMEOUT) {
+                    GFXSTREAM_WARNING(
+                        "VkDevice:%p: host operations on %zu fence(s) did not complete within 5s; "
+                        "resetting anyway.",
+                        device, pendingUseFences.size());
+                }
+            }
+            tracker->PollAndProcessGarbage();
         }
 
         if (!cleanedFences.empty()) {
