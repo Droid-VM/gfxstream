@@ -38,6 +38,9 @@ struct Profile {
     std::atomic<uint64_t> batchPackets{0};
     std::atomic<uint64_t> batchNanos{0};
     std::atomic<uint64_t> maxBatchPackets{0};
+    std::atomic<uint64_t> subBatches{0};
+    std::atomic<uint64_t> subBatchPackets{0};
+    std::atomic<uint64_t> subBatchNanos{0};
     std::atomic<uint64_t> ticks{0};
     std::mutex dumpMutex;
     std::chrono::steady_clock::time_point lastDump{std::chrono::steady_clock::now()};
@@ -105,6 +108,9 @@ void dump(Profile* p, double elapsed) {
     const uint64_t batchPackets = p->batchPackets.exchange(0, std::memory_order_relaxed);
     const uint64_t batchNanos = p->batchNanos.exchange(0, std::memory_order_relaxed);
     const uint64_t maxBatch = p->maxBatchPackets.exchange(0, std::memory_order_relaxed);
+    const uint64_t subBatches = p->subBatches.exchange(0, std::memory_order_relaxed);
+    const uint64_t subPackets = p->subBatchPackets.exchange(0, std::memory_order_relaxed);
+    const uint64_t subNanos = p->subBatchNanos.exchange(0, std::memory_order_relaxed);
     if (rows.empty()) return;
 
     // Rank by time, not by count: the interesting opcode is the one the guest waits on, and a rare
@@ -128,7 +134,8 @@ void dump(Profile* p, double elapsed) {
     GFXSTREAM_WARNING(
         "DECODERPROF over %.1fs: %llu opcodes/s in %llu distinct calls; host dispatch "
         "%llums/s (%.1f%% of one thread). batches %llu/s, avg %llu packets each, avg %lluus each, "
-        "largest %llu packets -- a synchronous call at the end of a batch waits for the rest.%s",
+        "largest %llu packets -- a synchronous call at the end of a batch waits for the rest. "
+        "cmdbuf replays %llu/s, avg %llu vkCmd each, avg %lluus each.%s",
         elapsed, static_cast<unsigned long long>(totalCount / elapsed),
         static_cast<unsigned long long>(rows.size()),
         static_cast<unsigned long long>(totalNanos / elapsed / 1000000),
@@ -136,7 +143,11 @@ void dump(Profile* p, double elapsed) {
         static_cast<unsigned long long>(batches / elapsed),
         static_cast<unsigned long long>(batches ? batchPackets / batches : 0),
         static_cast<unsigned long long>(batches ? batchNanos / batches / 1000 : 0),
-        static_cast<unsigned long long>(maxBatch), byTime.c_str());
+        static_cast<unsigned long long>(maxBatch),
+        static_cast<unsigned long long>(subBatches / elapsed),
+        static_cast<unsigned long long>(subBatches ? subPackets / subBatches : 0),
+        static_cast<unsigned long long>(subBatches ? subNanos / subBatches / 1000 : 0),
+        byTime.c_str());
 }
 
 void maybeDump(Profile* p) {
@@ -158,23 +169,58 @@ uint64_t decoderProfileNow() { return nowNanos(); }
 
 uint64_t decoderProfileBegin() { return profile() ? nowNanos() : 0; }
 
+// Nanoseconds attributed to opcodes decoded inside the call currently being timed on this thread.
+// subDecode() runs on the same thread as the flush that invoked it, so a plain thread_local is
+// enough -- no nesting deeper than one level exists.
+thread_local uint64_t tNestedNanos = 0;
+
+void record(Profile* p, uint32_t opcode, uint64_t dt) {
+    const int64_t slot = slotFor(opcode);
+    if (slot < 0) return;
+    Slot& s = p->slots[slot];
+    s.count.fetch_add(1, std::memory_order_relaxed);
+    s.nanos.fetch_add(dt, std::memory_order_relaxed);
+    uint64_t prevMax = s.maxNanos.load(std::memory_order_relaxed);
+    while (dt > prevMax &&
+           !s.maxNanos.compare_exchange_weak(prevMax, dt, std::memory_order_relaxed)) {
+    }
+}
+
+void decoderProfileEndInner(uint32_t opcode, uint64_t start) {
+    if (!start) return;
+    Profile* p = profile();
+    if (!p) return;
+    const uint64_t dt = nowNanos() - start;
+    record(p, opcode, dt);
+    // Accumulate for the enclosing call to subtract. Siblings add up here; they must not subtract
+    // from each other -- an earlier version did, and it zeroed out every vkCmd* after the first.
+    tNestedNanos += dt;
+    maybeDump(p);
+}
+
 void decoderProfileEnd(uint32_t opcode, uint64_t start) {
     if (!start) return;
     Profile* p = profile();
     if (!p) return;
 
-    const uint64_t dt = nowNanos() - start;
-    const int64_t slot = slotFor(opcode);
-    if (slot >= 0) {
-        Slot& s = p->slots[slot];
-        s.count.fetch_add(1, std::memory_order_relaxed);
-        s.nanos.fetch_add(dt, std::memory_order_relaxed);
-        uint64_t prevMax = s.maxNanos.load(std::memory_order_relaxed);
-        while (dt > prevMax &&
-               !s.maxNanos.compare_exchange_weak(prevMax, dt, std::memory_order_relaxed)) {
-        }
-    }
+    const uint64_t elapsed = nowNanos() - start;
+    // Self time: what is left after the calls this one contained.
+    const uint64_t dt = elapsed > tNestedNanos ? elapsed - tNestedNanos : 0;
+    tNestedNanos = 0;
+    record(p, opcode, dt);
     maybeDump(p);
+}
+
+// Clears the nesting accumulator. Call before starting a batch that is not nested inside another
+// timed call, so a previous batch's total cannot leak into this one's first opcode.
+void decoderProfileResetNesting() { tNestedNanos = 0; }
+
+void decoderProfileSubBatch(uint64_t packets, uint64_t nanos) {
+    Profile* p = profile();
+    if (!p || !packets) return;
+    p->subBatches.fetch_add(1, std::memory_order_relaxed);
+    p->subBatchPackets.fetch_add(packets, std::memory_order_relaxed);
+    p->subBatchNanos.fetch_add(nanos, std::memory_order_relaxed);
 }
 
 void decoderProfileBatch(uint64_t packets, uint64_t nanos) {

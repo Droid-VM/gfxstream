@@ -28,11 +28,30 @@ uint64_t decoderProfileNow();
 
 // Attributes the elapsed time to opcode. start==0 is ignored, so the disabled path costs one
 // compare.
+//
+// Nested calls are accounted to the innermost opcode only: vkQueueFlushCommandsGOOGLE's timing
+// spans the whole command-buffer replay, so without this its number would include every vkCmd*
+// inside it and the two would double-count -- one flush measured 427us against ~268us of vkCmd*
+// it contained. What is left after subtracting is the flush's own framing cost, which is the part
+// that could actually be reduced.
 void decoderProfileEnd(uint32_t opcode, uint64_t start);
+
+// For a call decoded inside another timed call (the vkCmd* inside a command-buffer replay).
+// Records its own time and adds it to what the enclosing call will subtract.
+void decoderProfileEndInner(uint32_t opcode, uint64_t start);
 
 // One call per decode() invocation: how many packets that buffer held and how long the whole batch
 // took. A synchronous opcode at the end of a 200-packet batch waited for the other 199.
 void decoderProfileBatch(uint64_t packets, uint64_t nanos);
+
+// Same, for one subDecode() call -- the command-buffer replay inside a
+// vkQueueFlushCommandsGOOGLE. Reported separately because the two say different things: a
+// top-level batch is what the guest sent in one go, a sub batch is how many vkCmd* one flush
+// carried.
+void decoderProfileSubBatch(uint64_t packets, uint64_t nanos);
+
+// Clears the per-thread nesting accumulator; call at the start of a top-level decode batch.
+void decoderProfileResetNesting();
 
 }  // namespace vk
 }  // namespace gfxstream

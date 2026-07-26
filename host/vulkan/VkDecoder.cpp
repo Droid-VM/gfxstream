@@ -127,6 +127,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
     auto& shouldExit = *context.shouldExit;
     if (len < 8) return 0;
     const uint64_t profileBatchStart = decoderProfileBegin();
+    decoderProfileResetNesting();
     uint64_t profilePackets = 0;
     unsigned char* ptr = (unsigned char*)buf;
     const unsigned char* const end = (const unsigned char*)buf + len;

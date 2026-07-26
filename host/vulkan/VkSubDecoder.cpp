@@ -44,8 +44,15 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
     unsigned char* ptr = (unsigned char*)pSubDecodeData;
     const unsigned char* const end = (const unsigned char*)buf + subDecodeDataSize;
     VkDecoderGlobalState* globalstate = VkDecoderGlobalState::get();
+    const uint64_t profileSubBatchStart = decoderProfileBegin();
+    uint64_t profileSubPackets = 0;
     while (end - ptr >= 8) {
         uint32_t opcode = *(uint32_t*)ptr;
+        // Generated file: keep the footprint minimal, the logic lives in DecoderProfile.cpp. These
+        // are the vkCmd* replayed into a command buffer, which never reach the top-level decoder --
+        // and they are the bulk of the wire, so leaving them unmeasured left 59% of host dispatch
+        // (vkQueueFlushCommandsGOOGLE) as one opaque number.
+        const uint64_t profileStart = decoderProfileBegin();
         uint32_t packetLen = *(uint32_t*)(ptr + 4);
 
         // packetLen should be at least 8 (op code and packet length) and should not be excessively
@@ -4392,12 +4399,17 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
                 GFXSTREAM_FATAL("Unrecognized opcode %" PRIu32, opcode);
             }
         }
+        decoderProfileEndInner(opcode, profileStart);
+        ++profileSubPackets;
         ++count;
         if (count % 1000 == 0) {
             pool->freeAll();
         };
         ptr += packetLen;
     }
+    decoderProfileSubBatch(
+        profileSubPackets,
+        profileSubBatchStart ? decoderProfileNow() - profileSubBatchStart : 0);
     pool->freeAll();
     return ptr - (unsigned char*)buf;
     ;
