@@ -53,5 +53,17 @@ void decoderProfileSubBatch(uint64_t packets, uint64_t nanos);
 // Clears the per-thread nesting accumulator; call at the start of a top-level decode batch.
 void decoderProfileResetNesting();
 
+// Time inside a command-buffer flush that is not the replayed commands themselves. That residue is
+// bimodal -- 88% of flushes spend under 25us on it, 12% spend 400-800us -- and the phases have
+// different fixes, so they are counted apart.
+enum class FlushPhase { kHandleLookup = 0, kPoolFree = 1, kCount = 2 };
+void decoderProfileFlushPhase(FlushPhase phase, uint64_t nanos);
+
+// Thread CPU clock, or 0 when profiling is off.
+uint64_t decoderProfileThreadCpuNow();
+
+// One flush's wall and CPU time, bucketed by whether it hit the slow mode.
+void decoderProfileFlushWallCpu(uint64_t wallNanos, uint64_t cpuNanos);
+
 }  // namespace vk
 }  // namespace gfxstream

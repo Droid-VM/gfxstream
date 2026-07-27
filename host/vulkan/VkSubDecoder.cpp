@@ -4403,14 +4403,24 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
         ++profileSubPackets;
         ++count;
         if (count % 1000 == 0) {
+            const uint64_t freeT0 = decoderProfileBegin();
             pool->freeAll();
+            if (freeT0) {
+                decoderProfileFlushPhase(FlushPhase::kPoolFree, decoderProfileNow() - freeT0);
+            }
         };
         ptr += packetLen;
     }
     decoderProfileSubBatch(
         profileSubPackets,
         profileSubBatchStart ? decoderProfileNow() - profileSubBatchStart : 0);
-    pool->freeAll();
+    {
+        const uint64_t freeT0 = decoderProfileBegin();
+        pool->freeAll();
+        if (freeT0) {
+            decoderProfileFlushPhase(FlushPhase::kPoolFree, decoderProfileNow() - freeT0);
+        }
+    }
     return ptr - (unsigned char*)buf;
     ;
 }

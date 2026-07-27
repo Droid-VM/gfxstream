@@ -9724,11 +9724,21 @@ class VkDecoderGlobalState::Impl {
                                        const void* pData, const VkDecoderContext& context) {
         (void)queue;
 
+        const uint64_t flushWallT0 = decoderProfileBegin();
+        const uint64_t flushCpuT0 = decoderProfileThreadCpuNow();
+        const uint64_t lookupT0 = flushWallT0;
         VkCommandBuffer commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
         VulkanDispatch* vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
         VulkanMemReadingStream* readStream = readstream_VkCommandBuffer(boxed_commandBuffer);
+        if (lookupT0) {
+            decoderProfileFlushPhase(FlushPhase::kHandleLookup, decoderProfileNow() - lookupT0);
+        }
         subDecode(readStream, vk, apiCallHandle, boxed_commandBuffer, commandBuffer, dataSize,
                   pData, context);
+        if (flushWallT0) {
+            decoderProfileFlushWallCpu(decoderProfileNow() - flushWallT0,
+                                       decoderProfileThreadCpuNow() - flushCpuT0);
+        }
     }
 
     void on_vkQueueFlushCommandsFromAuxMemoryGOOGLE(gfxstream::base::BumpPool* pool,
