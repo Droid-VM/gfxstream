@@ -180,11 +180,18 @@ void dump(Profile* p, double elapsed) {
     std::sort(rows.begin(), rows.end(),
               [](const Row& a, const Row& b) { return a.nanos > b.nanos; });
 
+    // One log line per opcode. Accumulating them into a single message truncates: logcat caps a
+    // single entry, and at 25 opcodes plus histograms only the first four survived -- which is
+    // exactly the deep part of the table this was widened to reach.
     std::string byTime;
-    const size_t shown = std::min<size_t>(rows.size(), 12);
+    // Deep enough to reach the structural calls -- render pass begin/end, queue submits, present
+    // -- not just the per-draw traffic that dominates by count. A fixed per-frame GPU cost was
+    // measured (~0.63ms, 37% of GPU time at renderDistance 12) and finding it needs the calls that
+    // happen a handful of times a frame, which sit far below the top twelve.
+    const size_t shown = std::min<size_t>(rows.size(), 25);
     for (size_t i = 0; i < shown; ++i) {
         const Row& r = rows[i];
-        byTime += "\n    ";
+        byTime.clear();  // one line, one log entry -- see above
         {
             const char* name = api_opcode_to_string(r.opcode);
             byTime += name ? name : "OP_null";
@@ -209,6 +216,7 @@ void dump(Profile* p, double elapsed) {
                       " <800:" + std::to_string(r.hist[5]) +
                       " 800+:" + std::to_string(r.hist[6]);
         }
+        GFXSTREAM_WARNING("DECODERPROF[%02zu] %s", i, byTime.c_str());
     }
 
     GFXSTREAM_WARNING(
@@ -218,7 +226,7 @@ void dump(Profile* p, double elapsed) {
         "cmdbuf replays %llu/s, avg %llu vkCmd each, avg %lluus each. flush residue: "
         "handle-lookup %lluus/s over %llu, pool-free %lluus/s over %llu. "
         "flush wall-vs-cpu: fast n=%llu wall=%lluus cpu=%lluus cmds=%llu | slow n=%llu "
-        "wall=%lluus cpu=%lluus cmds=%llu (per call).%s",
+        "wall=%lluus cpu=%lluus cmds=%llu (per call).",
         elapsed, static_cast<unsigned long long>(totalCount / elapsed),
         static_cast<unsigned long long>(rows.size()),
         static_cast<unsigned long long>(totalNanos / elapsed / 1000000),
@@ -241,8 +249,7 @@ void dump(Profile* p, double elapsed) {
         static_cast<unsigned long long>(sN),
         static_cast<unsigned long long>(sN ? sWall / sN / 1000 : 0),
         static_cast<unsigned long long>(sN ? sCpu / sN / 1000 : 0),
-        static_cast<unsigned long long>(sN ? sCmds / sN : 0),
-        byTime.c_str());
+        static_cast<unsigned long long>(sN ? sCmds / sN : 0));
 }
 
 void maybeDump(Profile* p) {
