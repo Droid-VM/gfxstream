@@ -4,6 +4,7 @@
 #include "DecoderProfile.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 #include <algorithm>
 #include <atomic>
@@ -23,8 +24,9 @@ namespace {
 // onward), so index by offset within whichever range the opcode falls in rather than allocating for
 // the gap between them.
 constexpr uint32_t kOldSpan = OP_vkLast_old - OP_vkFirst_old;
-constexpr uint32_t kNewSpan = 4096;  // the generated table is a few hundred entries; leave room
-constexpr uint32_t kSlots = kOldSpan + kNewSpan;
+constexpr uint32_t kNewSpan = 4096;   // dense prefix: the generated table's sequential opcodes
+constexpr uint32_t kHashSpan = 4096;  // fold hash-assigned opcodes (added commands) into here
+constexpr uint32_t kSlots = kOldSpan + kNewSpan + kHashSpan;
 
 // Where an opcode's time sits, not just its mean and worst. A mean of 78us can be 78us every time,
 // or 25us nine times out of ten and milliseconds on the tenth -- the guest feels those very
@@ -33,6 +35,10 @@ constexpr uint64_t kHistEdgesUs[6] = {25, 50, 100, 200, 400, 800};
 constexpr size_t kHistBuckets = 7;
 
 struct Slot {
+    // The opcode that landed here. Folded slots cannot be inverted from the index, and an opcode
+    // reported as OP_UNKNOWN_API_CALL is useless -- the two biggest entries in the first run after
+    // the fold was added were both unnamed.
+    std::atomic<uint32_t> opcode{0};
     std::atomic<uint64_t> count{0};
     std::atomic<uint64_t> nanos{0};
     std::atomic<uint64_t> maxNanos{0};
@@ -92,23 +98,38 @@ uint64_t nowNanos() {
 }
 
 // -1 when the opcode is outside both ranges (a corrupt packet, worth not indexing on).
+//
+// The new range is not densely packed: codegen assigns hash-derived values to commands added to
+// vk_gfxstream.xml (vkResetCommandPoolAsyncGOOGLE is 283932813, not OP_vkFirst+n), which is what
+// keeps existing opcodes from shifting when one is inserted. Indexing by offset therefore misses
+// them entirely -- the first such opcode this profiler met simply never appeared in its output,
+// and the only visible symptom was the distinct-call count dropping by one. Fold anything past the
+// dense prefix into the same table; a collision would merge two opcodes' numbers, which for a
+// diagnostic beats not seeing one at all.
 int64_t slotFor(uint32_t opcode) {
     if (opcode >= OP_vkFirst_old && opcode < OP_vkLast_old) {
         return opcode - OP_vkFirst_old;
     }
-    if (opcode >= OP_vkFirst && opcode - OP_vkFirst < kNewSpan) {
-        return kOldSpan + (opcode - OP_vkFirst);
+    if (opcode >= OP_vkFirst && opcode < OP_vkLast) {
+        const uint32_t off = opcode - OP_vkFirst;
+        return kOldSpan + (off < kNewSpan ? off : kNewSpan + (off % kHashSpan));
     }
     return -1;
 }
 
+// Only exact for the dense ranges; a folded slot cannot be inverted, so report the fold index and
+// let api_opcode_to_string() fail loudly rather than print a plausible wrong name.
 uint32_t opcodeForSlot(uint32_t slot) {
-    return slot < kOldSpan ? OP_vkFirst_old + slot : OP_vkFirst + (slot - kOldSpan);
+    if (slot < kOldSpan) return OP_vkFirst_old + slot;
+    const uint32_t off = slot - kOldSpan;
+    if (off < kNewSpan) return OP_vkFirst + off;
+    return OP_vkFirst + off;  // folded: not a real opcode, printed as unknown
 }
 
 void dump(Profile* p, double elapsed) {
     struct Row {
         uint32_t slot;
+        uint32_t opcode;
         uint64_t count;
         uint64_t nanos;
         uint64_t maxNanos;
@@ -122,7 +143,7 @@ void dump(Profile* p, double elapsed) {
         const uint64_t c = p->slots[i].count.exchange(0, std::memory_order_relaxed);
         const uint64_t n = p->slots[i].nanos.exchange(0, std::memory_order_relaxed);
         const uint64_t m = p->slots[i].maxNanos.exchange(0, std::memory_order_relaxed);
-        Row row{i, c, n, m, {}};
+        Row row{i, p->slots[i].opcode.load(std::memory_order_relaxed), c, n, m, {}};
         for (size_t b = 0; b < kHistBuckets; ++b) {
             row.hist[b] = p->slots[i].hist[b].exchange(0, std::memory_order_relaxed);
         }
@@ -164,7 +185,15 @@ void dump(Profile* p, double elapsed) {
     for (size_t i = 0; i < shown; ++i) {
         const Row& r = rows[i];
         byTime += "\n    ";
-        byTime += api_opcode_to_string(opcodeForSlot(r.slot));
+        {
+            const char* name = api_opcode_to_string(r.opcode);
+            byTime += name ? name : "OP_null";
+            // Commands added to vk_gfxstream.xml get hash-assigned opcodes the generated name
+            // table does not cover; print the number so the entry is still identifiable.
+            if (!name || !strcmp(name, "OP_UNKNOWN_API_CALL")) {
+                byTime += "(" + std::to_string(r.opcode) + ")";
+            }
+        }
         byTime += " " + std::to_string(static_cast<uint64_t>(r.nanos / elapsed / 1000000)) + "ms/s";
         byTime += " (" + std::to_string(static_cast<uint64_t>(100.0 * r.nanos / totalNanos)) + "% of";
         byTime += " dispatch, n=" + std::to_string(static_cast<uint64_t>(r.count / elapsed)) + "/s";
@@ -244,6 +273,7 @@ void record(Profile* p, uint32_t opcode, uint64_t dt) {
     const int64_t slot = slotFor(opcode);
     if (slot < 0) return;
     Slot& s = p->slots[slot];
+    s.opcode.store(opcode, std::memory_order_relaxed);
     s.count.fetch_add(1, std::memory_order_relaxed);
     s.nanos.fetch_add(dt, std::memory_order_relaxed);
     uint64_t prevMax = s.maxNanos.load(std::memory_order_relaxed);
