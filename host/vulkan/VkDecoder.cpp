@@ -6105,53 +6105,6 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
-            case OP_vkResetCommandPoolAsyncGOOGLE: {
-                // Same work as vkResetCommandPool, minus the reply. The guest was spending ~150ms
-                // a second blocked on that reply: the call runs 626 times a second, the host does
-                // it in 10us, and the rest was waiting for a turn -- 13% of the time behind a
-                // command-buffer replay carrying 4000+ commands, which takes 3ms. Nothing about
-                // the answer was worth that; it is VK_SUCCESS unless the device is out of memory,
-                // and out-of-memory is reported through the paths below either way.
-                GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
-                                      "VkDecoder vkResetCommandPoolAsyncGOOGLE");
-                VkDevice device;
-                VkCommandPool commandPool;
-                VkCommandPoolResetFlags flags;
-                uint64_t cgen_var_0;
-                memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
-                *readStreamPtrPtr += 1 * 8;
-                *(VkDevice*)&device = (VkDevice)(VkDevice)((VkDevice)(*&cgen_var_0));
-                auto vk = dispatch_VkDevice(device);
-                uint64_t cgen_var_1;
-                memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
-                *readStreamPtrPtr += 1 * 8;
-                *(VkCommandPool*)&commandPool =
-                    (VkCommandPool)unbox_VkCommandPool((VkCommandPool)(*&cgen_var_1));
-                memcpy((VkCommandPoolResetFlags*)&flags, *readStreamPtrPtr,
-                       sizeof(VkCommandPoolResetFlags));
-                *readStreamPtrPtr += sizeof(VkCommandPoolResetFlags);
-                if (m_logCalls) {
-                    GFXSTREAM_INFO(
-                        "stream %p: call vkResetCommandPoolAsyncGOOGLE 0x%llx 0x%llx 0x%llx ",
-                        ioStream, (unsigned long long)device, (unsigned long long)commandPool,
-                        (unsigned long long)flags);
-                }
-                VkResult vkResetCommandPoolAsync_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
-                if (CC_LIKELY(vk)) {
-                    vkResetCommandPoolAsync_VkResult_return = m_state->on_vkResetCommandPool(
-                        &m_pool, snapshotApiCallHandle, device, commandPool, flags);
-                }
-                if ((vkResetCommandPoolAsync_VkResult_return) == VK_ERROR_DEVICE_LOST)
-                    m_state->on_DeviceLost();
-                m_state->on_CheckOutOfMemory(vkResetCommandPoolAsync_VkResult_return, opcode,
-                                             context);
-                vkStream->unsetHandleMapping();
-                // No vkStream->write() and no commitWrite(): that is the whole point.
-                vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
-                break;
-            }
             case OP_vkResetCommandPool: {
                 GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
                                       "VkDecoder vkResetCommandPool");
