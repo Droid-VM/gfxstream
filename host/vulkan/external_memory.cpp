@@ -38,8 +38,6 @@ const char* ExternalMemory::to_string(const ExternalMemory::Mode mode) {
             return "QnxScreenBuffer";
         case Mode::HostAllocation:
             return "HostAllocation";
-        case Mode::DmaBuf:
-            return "DmaBuf";
     }
     return "Unhandled";
 }
@@ -53,17 +51,11 @@ std::optional<ExternalMemory::Mode> ExternalMemory::getMode(std::string modeStr)
     return std::nullopt;
 }
 
-bool ExternalMemory::modeSupported(
-    const ExternalMemory::Mode mode, const std::vector<VkExtensionProperties>& deviceExts,
-    const VkPhysicalDeviceMemoryProperties& memoryProps, std::string_view driverVendor,
-    VkPhysicalDevice physicalDevice,
-    PFN_vkGetPhysicalDeviceImageFormatProperties2KHR getImageFormatProperties2Func) {
+bool ExternalMemory::modeSupported(const ExternalMemory::Mode mode,
+                                   const std::vector<VkExtensionProperties>& deviceExts,
+                                   const VkPhysicalDeviceMemoryProperties& memoryProps) {
     std::vector<const char*> extRequired;
     getDeviceExtensionsForMode(mode, extRequired);
-
-    if (!vk_util::extensionsSupported(deviceExts, extRequired)) {
-        return false;
-    }
     if (mode == Mode::HostAllocation) {
         // TODO(b/469094646): Check this during the initial gpu selection
         // Host allocation mode is designed for software renderers and only supported
@@ -77,103 +69,12 @@ bool ExternalMemory::modeSupported(
         }
     }
 
-    if (mode == Mode::DmaBuf) {
-#if defined(__QNX__)
-        // TODO(aruby@qnx.com): Remove once dmabuf extension support has been flushed out on QNX
-        GFXSTREAM_INFO("External memory mode DmaBuf is not supported on QNX");
-        return false;
-#endif
-        if (physicalDevice == VK_NULL_HANDLE || getImageFormatProperties2Func == nullptr) {
-            // DmaBuf mode requires format support check, which needs valid device and function
-            GFXSTREAM_INFO("Cannot use external memory mode DmaBuf without valid device and function");
-            return false;
-        }
-
-        // Check if must-support image formats are supported, to avoid runtime crashes
-        // This check is only done for DmaBuf mode for now to avoid regressions.
-        const std::vector<VkFormat> kFormatsToCheck = {
-            VK_FORMAT_R8G8B8A8_UNORM,
-            VK_FORMAT_R8G8B8A8_SRGB,
-        };
-        for (const auto& format : kFormatsToCheck) {
-            VkPhysicalDeviceImageFormatInfo2 formatInfo2 = {
-                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
-                .pNext = nullptr,
-                .format = format,
-                .type = VK_IMAGE_TYPE_2D,
-                .tiling = VK_IMAGE_TILING_OPTIMAL,
-                .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                         VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
-                .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT,
-            };
-
-            VkPhysicalDeviceExternalImageFormatInfo extInfo = {
-                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
-                .pNext = nullptr,
-                .handleType = getHandleType(mode),
-            };
-
-            formatInfo2.pNext = &extInfo;
-
-            VkImageFormatProperties2 outProps2 = {
-                .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
-                .pNext = nullptr,
-            };
-
-            VkExternalImageFormatProperties outExternalProps = {
-                .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
-                .pNext = nullptr,
-            };
-
-            outProps2.pNext = &outExternalProps;
-
-            VkResult res = getImageFormatProperties2Func(physicalDevice, &formatInfo2, &outProps2);
-            if (res == VK_ERROR_FORMAT_NOT_SUPPORTED) {
-                GFXSTREAM_INFO(
-                    "%s: Mandatory format %s is not supported for external memory mode %s",
-                    __func__, string_VkFormat(format), to_string(mode));
-                return false;
-            } else if (res != VK_SUCCESS) {
-                GFXSTREAM_WARNING(
-                    "%s: vkGetPhysicalDeviceImageFormatProperties2 failed for mode %s: %s",
-                    __func__, to_string(mode), string_VkResult(res));
-                return false;
-            }
-
-            VkExternalMemoryFeatureFlags featureFlags =
-                outExternalProps.externalMemoryProperties.externalMemoryFeatures;
-            if (!(featureFlags & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) ||
-                !(featureFlags & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
-                GFXSTREAM_INFO(
-                    "%s: format %s does not support required export/import features for mode %s",
-                    __func__, string_VkFormat(format), to_string(mode));
-                return false;
-            }
-        }
-
-        // Lastly, check for some known problematic drivers
-        // This list should be removed once all issues are found through format support checks.
-        bool dmaBufBlockList = (driverVendor == "NVIDIA (Vendor 0x10de)");
-#ifdef CONFIG_AEMU
-        // TODO(b/400999642): dma_buf support should be checked with image format support
-        dmaBufBlockList |= (driverVendor == "radv (Vendor 0x1002)");
-#endif
-        if (dmaBufBlockList) {
-            GFXSTREAM_INFO("External memory mode DmaBuf is not supported on this device");
-            return false;
-        }
-    }
-
-    // All checks passed, the mode can be used.
-    return true;
+    return vk_util::extensionsSupported(deviceExts, extRequired);
 }
 
 ExternalMemory::Mode ExternalMemory::calculateMode(
     const std::vector<VkExtensionProperties>& deviceExts,
-    const VkPhysicalDeviceMemoryProperties& memoryProps, std::optional<std::string> modeStrOpt,
-    std::string_view driverVendor, VkPhysicalDevice physicalDevice,
-    PFN_vkGetPhysicalDeviceImageFormatProperties2KHR getImageFormatProperties2Func) {
+    const VkPhysicalDeviceMemoryProperties& memoryProps, std::optional<std::string> modeStrOpt) {
     if (modeStrOpt) {
         auto mode = getMode(*modeStrOpt);
         if (!mode) {
@@ -185,12 +86,11 @@ ExternalMemory::Mode ExternalMemory::calculateMode(
             return Mode::Unknown;
         }
 
-        if (!modeSupported(*mode, deviceExts, memoryProps, driverVendor, physicalDevice,
-                           getImageFormatProperties2Func)) {
+        if (!modeSupported(*mode, deviceExts, memoryProps)) {
             GFXSTREAM_ERROR(
                 "%s(): Vulkan driver does not support the memory mode provided by the "
                 "VulkanExternalMemoryMode string: %s",
-                __func__, modeStrOpt->c_str());
+                __func__, to_string(*mode));
 
             return Mode::NotSupported;
         }
@@ -218,15 +118,13 @@ ExternalMemory::Mode ExternalMemory::calculateMode(
         Mode::OpaqueFd,
     };
 #else
-    std::array<Mode, 2> supportedModes = {
-        Mode::DmaBuf,
+    std::array<Mode, 1> supportedModes = {
         Mode::OpaqueFd,
     };
 #endif
 
     for (auto mode : supportedModes) {
-        if (modeSupported(mode, deviceExts, memoryProps, driverVendor, physicalDevice,
-                          getImageFormatProperties2Func)) {
+        if (modeSupported(mode, deviceExts, memoryProps)) {
             // Supported modes are in-order of preference, return the first one supported
             return mode;
         }
@@ -240,8 +138,6 @@ VkExternalMemoryHandleTypeFlagBits ExternalMemory::getHandleType(const ExternalM
     switch (mode) {
         case Mode::OpaqueFd:
             return VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-        case Mode::DmaBuf:
-            return VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
         case Mode::OpaqueWin32:
             return VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
         case Mode::Metal:
@@ -271,12 +167,6 @@ void ExternalMemory::getDeviceExtensionsForMode(const ExternalMemory::Mode mode,
     switch (mode) {
         case Mode::OpaqueFd:
             outDeviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
-            break;
-        case Mode::DmaBuf:
-            // A dma-buf is a Linux kernel construct, commonly used with open-source DRM drivers.
-            // See https://docs.kernel.org/driver-api/dma-buf.html for details.
-            outDeviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
-            outDeviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
             break;
 #ifdef VK_USE_PLATFORM_WIN32_KHR
         case Mode::OpaqueWin32:

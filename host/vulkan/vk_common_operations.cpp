@@ -1084,12 +1084,36 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         ivk->vkEnumerateDeviceExtensionProperties(physicalDevices[i], nullptr,
                                                   &deviceExtensionCount, deviceExts.data());
 
+        deviceInfos[i].externalMemoryMode = ExternalMemory::calculateMode(
+            deviceExts, deviceInfos[i].memProps, features.VulkanExternalMemoryMode.getValue());
+
+        deviceInfos[i].supportsExternalMemoryImport = false;
+        deviceInfos[i].supportsExternalMemoryExport = false;
+        deviceInfos[i].glInteropSupported = 0;  // set later
+
 #if defined(__APPLE__)
         if (useMoltenVK && !vk_util::extensionsSupported(deviceExts, moltenVkDeviceExtNames)) {
             GFXSTREAM_ERROR("MoltenVK enabled but necessary device extensions are not supported.");
             return nullptr;
         }
 #endif
+
+        if (emulation->mInstanceSupportsExternalMemoryCapabilities &&
+            deviceInfos[i].externalMemoryMode != ExternalMemory::Mode::NotSupported) {
+            std::vector<const char*> externalMemoryDeviceExtNames;
+            ExternalMemory::getDeviceExtensionsForMode(
+                deviceInfos[i].externalMemoryMode, externalMemoryDeviceExtNames);
+
+            deviceInfos[i].supportsExternalMemoryExport =
+                deviceInfos[i].supportsExternalMemoryImport =
+                    vk_util::extensionsSupported(deviceExts, externalMemoryDeviceExtNames);
+
+            // External memory export not supported by VK_QNX_external_memory_screen_buffer
+            if (deviceInfos[i].externalMemoryMode == ExternalMemory::Mode::QnxScreenBuffer) {
+                deviceInfos[i].supportsExternalMemoryExport = false;
+            }
+
+        }
 
         if (emulation->mInstanceSupportsGetPhysicalDeviceProperties2) {
             deviceInfos[i].supportsDriverProperties =
@@ -1152,30 +1176,17 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             deviceInfos[i].driverInfo = driverProps.driverInfo;
         }
 
-        deviceInfos[i].externalMemoryMode = ExternalMemory::calculateMode(
-            deviceExts, deviceInfos[i].memProps, features.VulkanExternalMemoryMode.getValue(),
-            deviceInfos[i].driverVendor, physicalDevices[i],
-            emulation->mGetImageFormatProperties2Func);
-
-        deviceInfos[i].supportsExternalMemoryImport = false;
-        deviceInfos[i].supportsExternalMemoryExport = false;
-        deviceInfos[i].glInteropSupported = 0;  // set later
-
-        if (emulation->mInstanceSupportsExternalMemoryCapabilities &&
-            deviceInfos[i].externalMemoryMode != ExternalMemory::Mode::NotSupported) {
-            std::vector<const char*> externalMemoryDeviceExtNames;
-            ExternalMemory::getDeviceExtensionsForMode(deviceInfos[i].externalMemoryMode,
-                                                       externalMemoryDeviceExtNames);
-
-            deviceInfos[i].supportsExternalMemoryExport =
-                deviceInfos[i].supportsExternalMemoryImport =
-                    vk_util::extensionsSupported(deviceExts, externalMemoryDeviceExtNames);
-
-            // External memory export not supported by VK_QNX_external_memory_screen_buffer
-            if (deviceInfos[i].externalMemoryMode == ExternalMemory::Mode::QnxScreenBuffer) {
-                deviceInfos[i].supportsExternalMemoryExport = false;
-            }
-        }
+// TODO(aruby@qnx.com): Remove once dmabuf extension support has been flushed out on QNX
+#if !defined(__QNX__)
+        bool dmaBufBlockList = (deviceInfos[i].driverVendor == "NVIDIA (Vendor 0x10de)");
+#ifdef CONFIG_AEMU
+        // TODO(b/400999642): dma_buf support should be checked with image format support
+        dmaBufBlockList |= (deviceInfos[i].driverVendor == "radv (Vendor 0x1002)");
+#endif
+        deviceInfos[i].supportsDmaBuf =
+            vk_util::extensionSupported(deviceExts, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) &&
+            !dmaBufBlockList;
+#endif
 
         deviceInfos[i].hasSamplerYcbcrConversionExtension =
             vk_util::extensionSupported(deviceExts, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
@@ -1346,6 +1357,8 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                     emulation->mDeviceInfo.supportsExternalMemoryImport ? "true" : "false");
     GFXSTREAM_DEBUG("    supportsExternalMemoryExport = %s",
                     emulation->mDeviceInfo.supportsExternalMemoryExport ? "true" : "false");
+    GFXSTREAM_DEBUG("    supportsDmaBuf = %s",
+                    emulation->mDeviceInfo.supportsDmaBuf ? "true" : "false");
     GFXSTREAM_DEBUG("    supportsDriverProperties = %s",
                     emulation->mDeviceInfo.supportsDriverProperties ? "true" : "false");
     GFXSTREAM_DEBUG("    supportsExternalMemoryHostProps = %s",
@@ -1412,6 +1425,12 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             selectedDeviceExtensionNames.emplace(extension);
         }
     }
+
+#if defined(__linux__)
+    if (emulation->mDeviceInfo.supportsDmaBuf) {
+        selectedDeviceExtensionNames.emplace(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+    }
+#endif
 
     // We need to enable swapchain extensions to be able to use this device
     // to do VK_IMAGE_LAYOUT_PRESENT_SRC_KHR transition operations done
@@ -1826,6 +1845,8 @@ bool VkEmulation::supportsExternalMemoryImport() const {
     return mDeviceInfo.supportsExternalMemoryImport;
 }
 
+bool VkEmulation::supportsDmaBuf() const { return mDeviceInfo.supportsDmaBuf; }
+
 bool VkEmulation::supportsExternalMemoryHostProperties() const {
     return mDeviceInfo.supportsExternalMemoryHostProps;
 }
@@ -2155,6 +2176,10 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
         exportAi.handleTypes =
             static_cast<VkExternalMemoryHandleTypeFlags>(getDefaultExternalMemoryHandleType());
 
+        if (mDeviceInfo.supportsDmaBuf) {
+            exportAi.handleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+        }
+
         vk_append_struct(&allocInfoChain, &exportAi);
     }
 
@@ -2461,13 +2486,14 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
     bool validHandle = false;
 
     switch (mDeviceInfo.externalMemoryMode) {
-        case ExternalMemory::Mode::DmaBuf:
         case ExternalMemory::Mode::OpaqueFd: {
-            streamHandleType = (mDeviceInfo.externalMemoryMode == ExternalMemory::Mode::DmaBuf)
-                                   ? STREAM_HANDLE_TYPE_MEM_DMABUF
-                                   : STREAM_HANDLE_TYPE_MEM_OPAQUE_FD;
+            streamHandleType = STREAM_HANDLE_TYPE_MEM_OPAQUE_FD;
             VkExternalMemoryHandleTypeFlagBits vkHandleType =
-                ExternalMemory::getHandleType(mDeviceInfo.externalMemoryMode);
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+            if (mDeviceInfo.supportsDmaBuf) {
+                vkHandleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                streamHandleType = STREAM_HANDLE_TYPE_MEM_DMABUF;
+            }
 
             VkMemoryGetFdInfoKHR getFdInfo = {
                 VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
@@ -2654,7 +2680,6 @@ bool VkEmulation::importExternalMemory(VulkanDispatch* vk, VkDevice targetDevice
     const void* importInfoPtr = nullptr;
     switch (mDeviceInfo.externalMemoryMode) {
         case ExternalMemory::Mode::AndroidAHB:
-        case ExternalMemory::Mode::DmaBuf:
         case ExternalMemory::Mode::OpaqueFd: {
             auto dupHandle = dupExternalMemory(handleInfo);
             if (!dupHandle) {
@@ -2667,7 +2692,7 @@ bool VkEmulation::importExternalMemory(VulkanDispatch* vk, VkDevice targetDevice
             importInfoFd = {
                 VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
                 dedicatedAllocInfoPtr,
-                ExternalMemory::getHandleType(mDeviceInfo.externalMemoryMode),
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
                 static_cast<int>(dupHandle->handle),
             };
             importInfoPtr = &importInfoFd;
@@ -4848,8 +4873,7 @@ VkExternalMemoryHandleTypeFlags VkEmulation::transformExternalMemoryHandleTypeFl
 
     // If the host does not support dmabuf, replace guest Linux DMA_BUF bits with
     // the host's default external memory bits,
-    if (mDeviceInfo.externalMemoryMode != ExternalMemory::Mode::DmaBuf &&
-        (bits & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)) {
+    if (!mDeviceInfo.supportsDmaBuf && (bits & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)) {
         res &= ~VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
         res |= getDefaultExternalMemoryHandleType();
     }

@@ -145,6 +145,8 @@ class VkEmulation {
 
     bool supportsExternalMemoryImport() const;
 
+    bool supportsDmaBuf() const;
+
     bool supportsExternalMemoryHostProperties() const;
 
     bool isSwapchainEnabled() const;
@@ -482,6 +484,7 @@ class VkEmulation {
         bool hasComputeQueueFamily = false;
         bool supportsExternalMemoryImport = false;
         bool supportsExternalMemoryExport = false;
+        bool supportsDmaBuf = false;
         bool supportsDriverProperties = false;
         bool supportsExternalMemoryHostProps = false;
         bool supportsSwapchain = false;

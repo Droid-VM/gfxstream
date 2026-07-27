@@ -17,7 +17,6 @@
 
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace gfxstream {
@@ -36,30 +35,25 @@ class ExternalMemory {
         AndroidAHB,       // VK_ANDROID_external_memory_android_hardware_buffer
         QnxScreenBuffer,  // VK_QNX_external_memory_screen_buffer
         HostAllocation,   // VK_EXT_external_memory_host
-        DmaBuf,           // VK_EXT_external_memory_dma_buf
     };
 
-    static inline const auto kAllValidModes = {
-        Mode::OpaqueFd,   Mode::DmaBuf,          Mode::OpaqueWin32,   Mode::Metal,
-        Mode::AndroidAHB, Mode::QnxScreenBuffer, Mode::HostAllocation};
+    static inline const auto kAllValidModes = {Mode::OpaqueFd,        Mode::OpaqueWin32,
+                                               Mode::Metal,           Mode::AndroidAHB,
+                                               Mode::QnxScreenBuffer, Mode::HostAllocation};
 
     static const char* to_string(const Mode mode);
-    static Mode calculateMode(
-        const std::vector<VkExtensionProperties>& deviceExts,
-        const VkPhysicalDeviceMemoryProperties& memoryProps, std::optional<std::string> modeStrOpt,
-        std::string_view driverVendor, VkPhysicalDevice physicalDevice,
-        PFN_vkGetPhysicalDeviceImageFormatProperties2KHR getImageFormatProperties2Func);
+    static Mode calculateMode(const std::vector<VkExtensionProperties>& deviceExts,
+                              const VkPhysicalDeviceMemoryProperties& memoryProps,
+                              std::optional<std::string> modeStrOpt);
     static VkExternalMemoryHandleTypeFlagBits getHandleType(const Mode mode);
     static void getDeviceExtensionsForMode(const Mode mode,
                                            std::vector<const char*>& outDeviceExtensions);
 
    private:
     static std::optional<Mode> getMode(std::string modeStr);
-    static bool modeSupported(
-        const ExternalMemory::Mode mode, const std::vector<VkExtensionProperties>& deviceExts,
-        const VkPhysicalDeviceMemoryProperties& memoryProps, std::string_view driverVendor,
-        VkPhysicalDevice physicalDevice,
-        PFN_vkGetPhysicalDeviceImageFormatProperties2KHR getImageFormatProperties2Func);
+    static bool modeSupported(const ExternalMemory::Mode mode,
+                              const std::vector<VkExtensionProperties>& deviceExts,
+                              const VkPhysicalDeviceMemoryProperties& memoryProps);
 };
 
 }  // namespace vk
