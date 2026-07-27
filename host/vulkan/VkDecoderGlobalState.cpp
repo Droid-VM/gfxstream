@@ -4485,17 +4485,55 @@ class VkDecoderGlobalState::Impl {
             const char* env = getenv("GFXSTREAM_SEMWAIT_TRACE");
             return env && env[0] != '0';
         }();
+        // Does anything actually happen while this call blocks? If submissions are handed to the
+        // driver during the wait, then what it is waiting for is this proxy catching up, not the
+        // GPU -- the counter value it wants is already reached before it even starts.
+        const uint64_t submitsBefore = kSemTrace ? decoderSubmitsHandled() : 0;
+        const uint64_t waitStartNs = [&]() -> uint64_t {
+            if (!kSemTrace) return 0;
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+        }();
+
         if (kSemTrace && pWaitInfo && pWaitInfo->semaphoreCount > 0 && pWaitInfo->pValues) {
             static std::atomic<uint64_t> sGap[5];  // 0, 1, 2, 3, 4+
             static std::atomic<uint64_t> sCalls{0};
             static std::atomic<uint64_t> sLastNs{0};
-            uint64_t current = 0;
-            if (deviceDispatch->vkGetSemaphoreCounterValue &&
-                deviceDispatch->vkGetSemaphoreCounterValue(device, pWaitInfo->pSemaphores[0],
-                                                           &current) == VK_SUCCESS) {
-                const uint64_t want = pWaitInfo->pValues[0];
-                const uint64_t gap = want > current ? want - current : 0;
-                sGap[gap < 4 ? gap : 4].fetch_add(1, std::memory_order_relaxed);
+            // Every semaphore, not just the first: a wait is satisfied only when all of them are
+            // (absent VK_SEMAPHORE_WAIT_ANY), so checking one says nothing about the call.
+            uint64_t worstGap = 0;
+            bool readAny = false;
+            if (deviceDispatch->vkGetSemaphoreCounterValue) {
+                for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
+                    uint64_t current = 0;
+                    if (deviceDispatch->vkGetSemaphoreCounterValue(device, pWaitInfo->pSemaphores[i],
+                                                                   &current) != VK_SUCCESS) {
+                        continue;
+                    }
+                    readAny = true;
+                    const uint64_t want = pWaitInfo->pValues[i];
+                    const uint64_t gap = want > current ? want - current : 0;
+                    if (gap > worstGap) worstGap = gap;
+                }
+            }
+            if (readAny) {
+                sGap[worstGap < 4 ? worstGap : 4].fetch_add(1, std::memory_order_relaxed);
+            }
+            static std::atomic<uint64_t> sCount1{0}, sCountN{0}, sAny{0};
+            (pWaitInfo->semaphoreCount == 1 ? sCount1 : sCountN)
+                .fetch_add(1, std::memory_order_relaxed);
+            if (pWaitInfo->flags & VK_SEMAPHORE_WAIT_ANY_BIT) {
+                sAny.fetch_add(1, std::memory_order_relaxed);
+            }
+            static std::atomic<uint64_t> sShapeReport{0};
+            if ((sShapeReport.fetch_add(1, std::memory_order_relaxed) % 1024) == 0) {
+                GFXSTREAM_WARNING(
+                    "SEMWAITSHAPE: single-semaphore=%llu multi=%llu wait-any=%llu timeout=%llu",
+                    (unsigned long long)sCount1.exchange(0, std::memory_order_relaxed),
+                    (unsigned long long)sCountN.exchange(0, std::memory_order_relaxed),
+                    (unsigned long long)sAny.exchange(0, std::memory_order_relaxed),
+                    (unsigned long long)timeout);
             }
             if ((sCalls.fetch_add(1, std::memory_order_relaxed) % 512) == 0) {
                 struct timespec ts;
@@ -4515,7 +4553,37 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
-        return deviceDispatch->vkWaitSemaphores(device, pWaitInfo, timeout);
+        VkResult waitRes = deviceDispatch->vkWaitSemaphores(device, pWaitInfo, timeout);
+
+        if (kSemTrace) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            const uint64_t endNs = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+            const uint64_t elapsedUs = (endNs - waitStartNs) / 1000;
+            const uint64_t landed = decoderSubmitsHandled() - submitsBefore;
+            static std::atomic<uint64_t> sLandedNone{0}, sLandedSome{0};
+            static std::atomic<uint64_t> sNoneUs{0}, sSomeUs{0};
+            if (landed) {
+                sLandedSome.fetch_add(1, std::memory_order_relaxed);
+                sSomeUs.fetch_add(elapsedUs, std::memory_order_relaxed);
+            } else {
+                sLandedNone.fetch_add(1, std::memory_order_relaxed);
+                sNoneUs.fetch_add(elapsedUs, std::memory_order_relaxed);
+            }
+            static std::atomic<uint64_t> sReport{0};
+            if ((sReport.fetch_add(1, std::memory_order_relaxed) % 1024) == 0) {
+                const uint64_t n0 = sLandedNone.exchange(0, std::memory_order_relaxed);
+                const uint64_t n1 = sLandedSome.exchange(0, std::memory_order_relaxed);
+                const uint64_t u0 = sNoneUs.exchange(0, std::memory_order_relaxed);
+                const uint64_t u1 = sSomeUs.exchange(0, std::memory_order_relaxed);
+                GFXSTREAM_WARNING(
+                    "SEMWAITTRACE2: no-submit-landed n=%llu avg=%lluus | submit-landed n=%llu "
+                    "avg=%lluus",
+                    (unsigned long long)n0, (unsigned long long)(n0 ? u0 / n0 : 0),
+                    (unsigned long long)n1, (unsigned long long)(n1 ? u1 / n1 : 0));
+            }
+        }
+        return waitRes;
     }
 
     VkResult onSemaphoreSignalledOnSharedQueue(VulkanDispatch* deviceDispatch,

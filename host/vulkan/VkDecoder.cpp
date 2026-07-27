@@ -22230,6 +22230,8 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                   packet, packetLen, queue,
                                                                   submitCount, pSubmits, fence);
                 }
+                // Counted so vkWaitSemaphores can tell whether submissions land while it blocks.
+                decoderNoteSubmitHandled();
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);

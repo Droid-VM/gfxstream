@@ -341,6 +341,10 @@ void decoderProfileFlushWallCpu(uint64_t wallNanos, uint64_t cpuNanos) {
 
 uint64_t decoderProfileThreadCpuNow() { return profile() ? threadCpuNanos() : 0; }
 
+std::atomic<uint64_t> sSubmitsHandled{0};
+void decoderNoteSubmitHandled() { sSubmitsHandled.fetch_add(1, std::memory_order_relaxed); }
+uint64_t decoderSubmitsHandled() { return sSubmitsHandled.load(std::memory_order_relaxed); }
+
 void decoderProfileFlushPhase(FlushPhase phase, uint64_t nanos) {
     Profile* p = profile();
     if (!p) return;

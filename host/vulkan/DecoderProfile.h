@@ -65,5 +65,11 @@ uint64_t decoderProfileThreadCpuNow();
 // One flush's wall and CPU time, bucketed by whether it hit the slow mode.
 void decoderProfileFlushWallCpu(uint64_t wallNanos, uint64_t cpuNanos);
 
+// Counts queue submissions the host has finished handing to the driver. Independent of whether
+// profiling is enabled: vkWaitSemaphores reads it to find out whether submissions complete while
+// it is blocked, which is the difference between waiting on the GPU and waiting on this proxy.
+void decoderNoteSubmitHandled();
+uint64_t decoderSubmitsHandled();
+
 }  // namespace vk
 }  // namespace gfxstream
