@@ -4430,13 +4430,6 @@ class VkDecoderGlobalState::Impl {
             GFXSTREAM_ERROR("%s called after device destroy", __func__);
         }
 
-        {
-            // Handles get recycled, so a stale "already reached" entry would answer for whatever
-            // semaphore lands on this handle next.
-            std::lock_guard<std::mutex> lock(mSemaphoreReachedMutex);
-            mSemaphoreReached.erase(semaphore);
-        }
-
         if (deviceInfo.deviceOpTracker && semaphoreInfo.latestUse && !IsDone(*semaphoreInfo.latestUse)) {
             deviceInfo.deviceOpTracker->AddPendingGarbage(*semaphoreInfo.latestUse, semaphore);
             deviceInfo.deviceOpTracker->PollAndProcessGarbage();
@@ -4470,120 +4463,6 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::mutex> lock(mMutex);
         destroySemaphoreLocked(device, deviceDispatch, semaphore, pAllocator);
-    }
-
-    // Answer a timeline wait from what this semaphore is already known to have reached, when that
-    // is enough, instead of asking the driver.
-    //
-    // Every wait that arrives here is already satisfied -- 2049 of 2049 sampled, with timeout 0,
-    // so the guest is polling a timeline that has passed the value it asks about. Answering costs
-    // ~1.2ms all the same, and the split says none of it is the wait: vkWaitSemaphores is 3us,
-    // vkGetSemaphoreCounterValue is 1.2ms. Both funnel into vk_sync_timeline's garbage collection,
-    // which walks the pending time points and issues a KGSL WAITTIMESTAMP ioctl per point to reap
-    // the finished ones -- under a mutex the submit path also takes. Whichever entry point runs
-    // first pays for it.
-    //
-    // A high-water mark makes that collection happen once per newly-reached value rather than once
-    // per poll. A miss costs exactly what the old path cost (the counter read does the same
-    // collection) and additionally learns how far ahead the timeline actually is, so the polls
-    // that follow are free until the guest asks about something genuinely new.
-    VkResult waitSemaphoresCached(VkDevice device, VulkanDispatch* deviceDispatch,
-                                  const VkSemaphoreWaitInfo* pWaitInfo, uint64_t timeout) {
-        static const bool kEnabled = [] {
-            const char* env = getenv("GFXSTREAM_SEM_REACHED_CACHE");
-            return !env || env[0] != '0';
-        }();
-        static std::atomic<uint64_t> sHit{0}, sRefreshed{0}, sMiss{0}, sReport{0};
-
-        const bool waitAny = (pWaitInfo->flags & VK_SEMAPHORE_WAIT_ANY_BIT) != 0;
-        if (!kEnabled || !pWaitInfo || pWaitInfo->semaphoreCount == 0 || !pWaitInfo->pValues ||
-            !deviceDispatch->vkGetSemaphoreCounterValue) {
-            return deviceDispatch->vkWaitSemaphores(device, pWaitInfo, timeout);
-        }
-
-        // WAIT_ANY needs one satisfied semaphore; otherwise all of them.
-        auto satisfiedBy = [&](auto&& reached) {
-            for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
-                const bool ok = reached(i);
-                if (waitAny && ok) return true;
-                if (!waitAny && !ok) return false;
-            }
-            return !waitAny;
-        };
-
-        {
-            // Written out rather than run through satisfiedBy: the thread-safety analysis cannot
-            // see that the lambda body runs with the lock held.
-            std::lock_guard<std::mutex> lock(mSemaphoreReachedMutex);
-            bool satisfied = !waitAny;
-            for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
-                auto it = mSemaphoreReached.find(pWaitInfo->pSemaphores[i]);
-                const bool ok =
-                    it != mSemaphoreReached.end() && it->second >= pWaitInfo->pValues[i];
-                if (waitAny && ok) {
-                    satisfied = true;
-                    break;
-                }
-                if (!waitAny && !ok) {
-                    satisfied = false;
-                    break;
-                }
-            }
-            if (satisfied) {
-                sHit.fetch_add(1, std::memory_order_relaxed);
-                goto report;
-            }
-        }
-
-        {
-            // Not known to be reached yet. Read the counters -- this is the expensive collection,
-            // the same one the plain wait would have done -- and record how far each has actually
-            // got, which is generally past what is being asked for.
-            std::vector<uint64_t> current(pWaitInfo->semaphoreCount, 0);
-            std::vector<bool> known(pWaitInfo->semaphoreCount, false);
-            for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
-                if (deviceDispatch->vkGetSemaphoreCounterValue(device, pWaitInfo->pSemaphores[i],
-                                                               &current[i]) == VK_SUCCESS) {
-                    known[i] = true;
-                }
-            }
-            {
-                std::lock_guard<std::mutex> lock(mSemaphoreReachedMutex);
-                for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
-                    if (!known[i]) continue;
-                    uint64_t& high = mSemaphoreReached[pWaitInfo->pSemaphores[i]];
-                    high = std::max(high, current[i]);
-                }
-            }
-            if (satisfiedBy([&](uint32_t i) { return known[i] && current[i] >= pWaitInfo->pValues[i]; })) {
-                sRefreshed.fetch_add(1, std::memory_order_relaxed);
-                goto report;
-            }
-        }
-
-        {
-            // A real wait: something has not happened yet.
-            sMiss.fetch_add(1, std::memory_order_relaxed);
-            const VkResult res = deviceDispatch->vkWaitSemaphores(device, pWaitInfo, timeout);
-            if (res == VK_SUCCESS && !waitAny) {
-                // Only conclusive without WAIT_ANY: with it, success names no particular semaphore.
-                std::lock_guard<std::mutex> lock(mSemaphoreReachedMutex);
-                for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
-                    uint64_t& high = mSemaphoreReached[pWaitInfo->pSemaphores[i]];
-                    high = std::max(high, pWaitInfo->pValues[i]);
-                }
-            }
-            return res;
-        }
-
-    report:
-        if ((sReport.fetch_add(1, std::memory_order_relaxed) % 1024) == 1023) {
-            GFXSTREAM_WARNING("SEMCACHE: hit=%llu refreshed=%llu real-wait=%llu (per 1024)",
-                              (unsigned long long)sHit.exchange(0, std::memory_order_relaxed),
-                              (unsigned long long)sRefreshed.exchange(0, std::memory_order_relaxed),
-                              (unsigned long long)sMiss.exchange(0, std::memory_order_relaxed));
-        }
-        return VK_SUCCESS;
     }
 
     VkResult on_vkWaitSemaphores(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
@@ -4688,7 +4567,7 @@ class VkDecoderGlobalState::Impl {
             return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
         }();
 
-        VkResult waitRes = waitSemaphoresCached(device, deviceDispatch, pWaitInfo, timeout);
+        VkResult waitRes = deviceDispatch->vkWaitSemaphores(device, pWaitInfo, timeout);
 
         if (kSemTrace) {
             struct timespec ts;
@@ -11637,16 +11516,6 @@ class VkDecoderGlobalState::Impl {
     std::unordered_map<VkEvent, EventInfo> mEventInfo GUARDED_BY(mMutex);
     std::unordered_map<VkSemaphore, SemaphoreInfo> mSemaphoreInfo GUARDED_BY(mMutex);
     std::unordered_map<VkShaderModule, ShaderModuleInfo> mShaderModuleInfo GUARDED_BY(mMutex);
-
-    // Highest timeline value each semaphore is known to have reached.
-    //
-    // Timeline counters only ever increase, so "value V has been reached" is true forever once
-    // observed -- which makes this a cache with no invalidation problem beyond the semaphore's own
-    // lifetime (cleared in destroySemaphoreWithExclusiveInfo, the single choke point for that).
-    // Its own lock, not mMutex: the whole point is to answer without touching the global one.
-    std::mutex mSemaphoreReachedMutex;
-    std::unordered_map<VkSemaphore, uint64_t> mSemaphoreReached
-        GUARDED_BY(mSemaphoreReachedMutex);
 
 #ifdef _WIN32
     int mSemaphoreId = 1;
