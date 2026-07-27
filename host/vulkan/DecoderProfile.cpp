@@ -5,6 +5,10 @@
 
 #include <stdlib.h>
 #include <string.h>
+#ifdef __linux__
+#include <pthread.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -61,24 +65,74 @@ struct Profile {
     std::atomic<uint64_t> subBatches{0};
     std::atomic<uint64_t> subBatchPackets{0};
     std::atomic<uint64_t> subBatchNanos{0};
-    std::atomic<uint64_t> ticks{0};
-    std::mutex dumpMutex;
-    std::chrono::steady_clock::time_point lastDump{std::chrono::steady_clock::now()};
-    double dumpSec = 10.0;
+    // Which decoder thread this belongs to. gfxstream names each render thread after the guest
+    // process that owns its context, so this reads as "Xwayland", "gnome-shell", "Render thread".
+    std::string name;
 };
 
-Profile* profile() {
-    static Profile* p = [] {
+// One profile per decoder thread, not one for the whole host.
+//
+// A single shared table sums every context together, and on a desktop that is three unrelated
+// workloads at once: the game, Xwayland moving its output, and the compositor redrawing the screen
+// once per game frame. Per-thread CPU showed those as ~75% + ~50% + ~50%, so roughly half of what
+// the merged table attributed to "the game" was the desktop. Any per-frame figure derived from it
+// -- render passes per frame, draws per frame -- was wrong by that much.
+//
+// Threads register on first use and are never unregistered: a render thread that exits while the
+// dump is walking the list would otherwise have to be reference-counted, and the leak is bounded
+// by kMaxProfiles for a facility that is off unless GFXSTREAM_DECODER_PROFILE is set.
+// High enough that no thread doing real work lands in the overflow bucket. Bringing up a GNOME
+// session creates a render thread per context -- gnome-shell alone has nine -- so a cap of 24 put
+// Minecraft, started last, in with everything else and cost it its name.
+constexpr size_t kMaxProfiles = 96;
+std::mutex gProfilesMu;
+std::vector<Profile*> gProfiles;
+Profile* gOverflow = nullptr;  // everything past kMaxProfiles, lumped together
+std::atomic<uint64_t> gTicks{0};
+std::chrono::steady_clock::time_point gLastDump{std::chrono::steady_clock::now()};
+double gDumpSec = 10.0;
+
+bool profilingEnabled() {
+    static const bool on = [] {
         const char* env = getenv("GFXSTREAM_DECODER_PROFILE");
-        if (!env || env[0] == '0') return static_cast<Profile*>(nullptr);
-        auto* fresh = new Profile();
+        if (!env || env[0] == '0') return false;
         if (const char* sec = getenv("GFXSTREAM_DECODER_PROFILE_SEC")) {
             const double v = atof(sec);
-            if (v > 0.0) fresh->dumpSec = v;
+            if (v > 0.0) gDumpSec = v;
         }
+        return true;
+    }();
+    return on;
+}
+
+Profile* profile() {
+    if (!profilingEnabled()) return nullptr;
+    thread_local Profile* mine = [] {
+        std::lock_guard<std::mutex> lock(gProfilesMu);
+        if (gProfiles.size() >= kMaxProfiles) {
+            if (!gOverflow) {
+                gOverflow = new Profile();
+                gOverflow->name = "(overflow)";
+            }
+            return gOverflow;
+        }
+        auto* fresh = new Profile();
+        char nm[32] = {};
+#ifdef __linux__
+        pthread_getname_np(pthread_self(), nm, sizeof(nm));
+#endif
+        // Carry the tid: several render threads share a guest process name (six are called
+        // "Xwayland", nine "gnome-shell"), so the name alone cannot be joined against per-thread
+        // CPU -- and that join is the whole point, since a thread's CPU and its dispatch time
+        // differ by however long it spent spinning for the guest.
+        fresh->name = nm[0] ? nm : "?";
+#ifdef __linux__
+        fresh->name += "/" + std::to_string(gettid());
+#endif
+        gProfiles.push_back(fresh);
         return fresh;
     }();
-    return p;
+    return mine;
 }
 
 // CPU time consumed by the calling thread, as opposed to wall clock. The gap between the two is
@@ -173,7 +227,9 @@ void dump(Profile* p, double elapsed) {
         phaseNs[i] = p->flushPhaseNanos[i].exchange(0, std::memory_order_relaxed);
         phaseN[i] = p->flushPhaseCount[i].exchange(0, std::memory_order_relaxed);
     }
-    if (rows.empty()) return;
+    // Idle threads still hold a table; printing 25 zero rows for each of them buries the ones that
+    // matter. 1% of one thread is the floor for being worth a block.
+    if (rows.empty() || totalNanos < elapsed * 1e7) return;
 
     // Rank by time, not by count: the interesting opcode is the one the guest waits on, and a rare
     // call that blocks for milliseconds matters more than a frequent one that costs nanoseconds.
@@ -216,18 +272,18 @@ void dump(Profile* p, double elapsed) {
                       " <800:" + std::to_string(r.hist[5]) +
                       " 800+:" + std::to_string(r.hist[6]);
         }
-        GFXSTREAM_WARNING("DECODERPROF[%02zu] %s", i, byTime.c_str());
+        GFXSTREAM_WARNING("DECODERPROF[%s][%02zu] %s", p->name.c_str(), i, byTime.c_str());
     }
 
     GFXSTREAM_WARNING(
-        "DECODERPROF over %.1fs: %llu opcodes/s in %llu distinct calls; host dispatch "
+        "DECODERPROF[%s] over %.1fs: %llu opcodes/s in %llu distinct calls; host dispatch "
         "%llums/s (%.1f%% of one thread). batches %llu/s, avg %llu packets each, avg %lluus each, "
         "largest %llu packets -- a synchronous call at the end of a batch waits for the rest. "
         "cmdbuf replays %llu/s, avg %llu vkCmd each, avg %lluus each. flush residue: "
         "handle-lookup %lluus/s over %llu, pool-free %lluus/s over %llu. "
         "flush wall-vs-cpu: fast n=%llu wall=%lluus cpu=%lluus cmds=%llu | slow n=%llu "
         "wall=%lluus cpu=%lluus cmds=%llu (per call).",
-        elapsed, static_cast<unsigned long long>(totalCount / elapsed),
+        p->name.c_str(), elapsed, static_cast<unsigned long long>(totalCount / elapsed),
         static_cast<unsigned long long>(rows.size()),
         static_cast<unsigned long long>(totalNanos / elapsed / 1000000),
         100.0 * totalNanos / elapsed / 1e9,
@@ -252,17 +308,20 @@ void dump(Profile* p, double elapsed) {
         static_cast<unsigned long long>(sN ? sCmds / sN : 0));
 }
 
-void maybeDump(Profile* p) {
+void maybeDump(Profile*) {
     // Check the clock once every 4096 packets rather than on every one: at a few hundred thousand
     // opcodes a second, an extra steady_clock read per packet would be its own measurable cost.
-    if ((p->ticks.fetch_add(1, std::memory_order_relaxed) & 0xfff) != 0) return;
+    if ((gTicks.fetch_add(1, std::memory_order_relaxed) & 0xfff) != 0) return;
 
     const auto now = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lock(p->dumpMutex);
-    const double elapsed = std::chrono::duration<double>(now - p->lastDump).count();
-    if (elapsed < p->dumpSec) return;
-    p->lastDump = now;
-    dump(p, elapsed);
+    // Whichever thread trips the interval dumps every thread's table, so all of them cover the
+    // same window and can be compared against each other and against per-thread CPU.
+    std::lock_guard<std::mutex> lock(gProfilesMu);
+    const double elapsed = std::chrono::duration<double>(now - gLastDump).count();
+    if (elapsed < gDumpSec) return;
+    gLastDump = now;
+    for (Profile* other : gProfiles) dump(other, elapsed);
+    if (gOverflow) dump(gOverflow, elapsed);
 }
 
 }  // namespace

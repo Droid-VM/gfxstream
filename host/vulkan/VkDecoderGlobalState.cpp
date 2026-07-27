@@ -4481,6 +4481,13 @@ class VkDecoderGlobalState::Impl {
         // Frame time is 9ms with the GPU busy 3.6ms of it and neither side saturated, which is
         // what "no overlap" looks like from the outside. This distinguishes it from the
         // alternative (the pipeline is fine, the GPU work itself is simply too slow).
+        //
+        // Measured: 2049 of 2049 samples came back gap 0, every one, with timeout 0 -- the guest
+        // is polling a timeline that has already reached the value it asks for. So the ~1ms this
+        // call costs is not a wait at all. Whether that ~1ms can be skipped depends on which half
+        // of the call it lives in, which is why the counter read and the wait are timed apart:
+        // if reading the counter is cheap, answering from the counter alone is a straight win; if
+        // the counter read is what costs, the fix has to be somewhere else entirely.
         static const bool kSemTrace = [] {
             const char* env = getenv("GFXSTREAM_SEMWAIT_TRACE");
             return env && env[0] != '0';
@@ -4553,6 +4560,13 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
+        const uint64_t probeDoneNs = [&]() -> uint64_t {
+            if (!kSemTrace) return 0;
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+        }();
+
         VkResult waitRes = deviceDispatch->vkWaitSemaphores(device, pWaitInfo, timeout);
 
         if (kSemTrace) {
@@ -4560,6 +4574,19 @@ class VkDecoderGlobalState::Impl {
             clock_gettime(CLOCK_MONOTONIC, &ts);
             const uint64_t endNs = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
             const uint64_t elapsedUs = (endNs - waitStartNs) / 1000;
+            // Split the same interval two ways: reading the counters, then the wait itself.
+            static std::atomic<uint64_t> sProbeNs{0}, sWaitNs{0}, sSplitN{0};
+            sProbeNs.fetch_add(probeDoneNs - waitStartNs, std::memory_order_relaxed);
+            sWaitNs.fetch_add(endNs - probeDoneNs, std::memory_order_relaxed);
+            if ((sSplitN.fetch_add(1, std::memory_order_relaxed) % 1024) == 1023) {
+                const uint64_t n = 1024;
+                GFXSTREAM_WARNING(
+                    "SEMWAITSPLIT: vkGetSemaphoreCounterValue avg=%lluus | vkWaitSemaphores "
+                    "avg=%lluus (over %llu calls)",
+                    (unsigned long long)(sProbeNs.exchange(0, std::memory_order_relaxed) / n / 1000),
+                    (unsigned long long)(sWaitNs.exchange(0, std::memory_order_relaxed) / n / 1000),
+                    (unsigned long long)n);
+            }
             const uint64_t landed = decoderSubmitsHandled() - submitsBefore;
             static std::atomic<uint64_t> sLandedNone{0}, sLandedSome{0};
             static std::atomic<uint64_t> sNoneUs{0}, sSomeUs{0};
