@@ -7571,6 +7571,7 @@ class VkDecoderGlobalState::Impl {
                                    const VkSubmitInfo* pSubmits, VkFence fence) {
         VkResult res = vk->vkQueueSubmit(unboxed_queue, submitCount, pSubmits, fence);
         if (res != VK_SUCCESS) {
+            GFXSTREAM_VERBOSE("vkQueueSubmit failed with %s [%d]", string_VkResult(res), res);
             return res;
         }
 
@@ -7598,6 +7599,7 @@ class VkDecoderGlobalState::Impl {
                                    const VkSubmitInfo2* pSubmits, VkFence fence) {
         VkResult res = vk->vkQueueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
         if (res != VK_SUCCESS) {
+            GFXSTREAM_VERBOSE("vkQueueSubmit2 failed with %s [%d]", string_VkResult(res), res);
             return res;
         }
 

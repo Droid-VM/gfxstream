@@ -3243,15 +3243,9 @@ AsyncResult FrameBuffer::Impl::composeWithCallback(uint32_t bufferSize, void* bu
 }
 
 bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSaver) {
-    // Things we do not need to snapshot:
-    //     m_eglSurface
-    //     m_eglContext
-    //     m_pbufSurface
-    //     m_pbufContext
-    //     m_prevContext
-    //     m_prevReadSurf
-    //     m_prevDrawSurf
     AutoLock mutex(m_lock);
+
+    GFXSTREAM_DEBUG("snapshot save: save framebuffer");
 
     std::unique_ptr<RecursiveScopedContextBind> bind;
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -3281,6 +3275,7 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
     stream->putBe32(m_framebufferHeight);
     stream->putFloat(m_dpr);
     stream->putBe32(mDisplayActiveConfigId);
+    GFXSTREAM_DEBUG("snapshot save: saving %zu display configs", mDisplayConfigs.size());
     saveCollection(stream, mDisplayConfigs,
                    [](Stream* s, const std::map<int, DisplayConfig>::value_type& pair) {
                        s->putBe32(pair.first);
@@ -3300,6 +3295,7 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
         currentId = nextId;
     }
 
+    GFXSTREAM_DEBUG("snapshot save: saving %zu displays", displayIds.size());
     stream->putBe32(displayIds.size());
     for (uint32_t id : displayIds) {
         stream->putBe32(id);
@@ -3317,8 +3313,8 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
     // we skip reading from GPU (for non-texture objects) or force a restore in
     // previous eglPreSaveContext and eglSaveAllImages calls (for texture
     // objects).
-    // TODO: skip reading from GPU even for texture objects.
 #if GFXSTREAM_ENABLE_HOST_GLES
+    GFXSTREAM_DEBUG("snapshot save: save %zu contexts", m_contexts.size());
     saveCollection(
         stream, m_contexts,
         [](Stream* s, const EmulatedEglContextMap::value_type& pair) { pair.second->onSave(s); });
@@ -3330,6 +3326,7 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
 
     {
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
+        GFXSTREAM_DEBUG("snapshot save: save %zu color buffers", m_colorbuffers.size());
         stream->putByte(m_guestManagedColorBufferLifetime);
         saveCollection(stream, m_colorbuffers,
                        [now](Stream* s, const ColorBufferMap::value_type& pair) {
@@ -3341,6 +3338,7 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
     }
     stream->putBe32(m_lastPostedColorBuffer);
 #if GFXSTREAM_ENABLE_HOST_GLES
+    GFXSTREAM_DEBUG("snapshot save: save %zu windows", m_windows.size());
     saveCollection(stream, m_windows,
                    [](Stream* s, const EmulatedEglWindowSurfaceMap::value_type& pair) {
                        pair.second.first->onSave(s);
@@ -3369,6 +3367,7 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
 
     // Save Vulkan state
     if (m_features.VulkanSnapshots.enabled() && vk::VkDecoderGlobalState::get()) {
+        GFXSTREAM_DEBUG("snapshot save: save decoder global state");
         bool res = vk::VkDecoderGlobalState::get()->save(stream);
         if (!res) {
             return false;
@@ -3396,6 +3395,9 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
 
 bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureLoader) {
     AutoLock lock(m_lock);
+
+    GFXSTREAM_DEBUG("snapshot load: load framebuffer");
+
     // cleanups
     {
         sweepColorBuffersLocked();
@@ -3529,12 +3531,14 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
                        int dpiY = static_cast<int>(s->getBe32());
                        return {idx, {w, h, dpiX, dpiY}};
                    });
+    GFXSTREAM_DEBUG("snapshot load: loaded %zu display configs", mDisplayConfigs.size());
 
     uint32_t numDisplays = stream->getBe32();
     for (uint32_t i = 0; i < numDisplays; ++i) {
         uint32_t displayId = stream->getBe32();
         get_gfxstream_multi_display_operations().create_display(&displayId);
     }
+    GFXSTREAM_DEBUG("snapshot load: loaded %u displays", numDisplays);
 
     // TODO: resize the window
     //
@@ -3555,10 +3559,12 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
             return {contextHandle, std::move(context)};
         });
     assert(!gfxstream::base::find(m_contexts, 0));
+    GFXSTREAM_DEBUG("snapshot load: loaded %zu contexts", m_contexts.size());
 #endif
 
     auto now = gfxstream::base::getUnixTimeUs();
     {
+        GFXSTREAM_DEBUG("snapshot load: load color buffers");
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
         m_guestManagedColorBufferLifetime = stream->getByte();
         loadCollection(
@@ -3577,6 +3583,7 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
                 }
                 return {handle, ColorBufferRef{std::move(cb), refCount, opened, closedTs}};
             });
+        GFXSTREAM_DEBUG("snapshot load: %zu color buffers loaded", m_colorbuffers.size());
     }
     m_lastPostedColorBuffer = static_cast<HandleType>(stream->getBe32());
     GFXSTREAM_DEBUG("Got lasted posted color buffer from snapshot");
@@ -3594,6 +3601,7 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
                 HandleType colorBufferHandle = stream->getBe32();
                 return {handle, {std::move(window), colorBufferHandle}};
             });
+        GFXSTREAM_DEBUG("snapshot load: %zu windows loaded", m_windows.size());
 #endif
     }
 
@@ -3618,6 +3626,7 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
                 m_procOwnedResources.emplace(puid, std::move(processResources));
             }
         }
+        GFXSTREAM_DEBUG("snapshot load: loaded %zu process resources", resourceCount);
     }
 
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -3652,6 +3661,7 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
 
     // Restore Vulkan state
     if (m_features.VulkanSnapshots.enabled() && vk::VkDecoderGlobalState::get()) {
+        GFXSTREAM_DEBUG("snapshot load: load decoder global state");
         lock.unlock();
         GfxApiLogger gfxLogger;
         vk::VkDecoderGlobalState::get()->load(stream, gfxLogger);
@@ -3665,6 +3675,8 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
         EmulatedEglFenceSync::onLoad(stream);
     }
 #endif
+
+    GFXSTREAM_DEBUG("snapshot load: framebuffer loaded successfully");
 
     return true;
     // TODO: restore memory management
