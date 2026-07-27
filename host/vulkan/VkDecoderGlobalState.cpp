@@ -4471,6 +4471,50 @@ class VkDecoderGlobalState::Impl {
         auto device = unbox_VkDevice(boxed_device);
         auto deviceDispatch = dispatch_VkDevice(boxed_device);
 
+        // How far ahead of the GPU the guest is when it blocks here. This call is 50% of host
+        // dispatch at 1.3ms each, and it is honest waiting -- the question is whether the guest
+        // had anything better to do. The gap between the value being waited for and the
+        // semaphore's current value says which:
+        //   0  the wait was already satisfied and cost nothing
+        //   1  the guest is waiting for the work it just submitted -- no CPU/GPU overlap at all
+        //   2+ frames are in flight and the wait is the pipeline doing its job
+        // Frame time is 9ms with the GPU busy 3.6ms of it and neither side saturated, which is
+        // what "no overlap" looks like from the outside. This distinguishes it from the
+        // alternative (the pipeline is fine, the GPU work itself is simply too slow).
+        static const bool kSemTrace = [] {
+            const char* env = getenv("GFXSTREAM_SEMWAIT_TRACE");
+            return env && env[0] != '0';
+        }();
+        if (kSemTrace && pWaitInfo && pWaitInfo->semaphoreCount > 0 && pWaitInfo->pValues) {
+            static std::atomic<uint64_t> sGap[5];  // 0, 1, 2, 3, 4+
+            static std::atomic<uint64_t> sCalls{0};
+            static std::atomic<uint64_t> sLastNs{0};
+            uint64_t current = 0;
+            if (deviceDispatch->vkGetSemaphoreCounterValue &&
+                deviceDispatch->vkGetSemaphoreCounterValue(device, pWaitInfo->pSemaphores[0],
+                                                           &current) == VK_SUCCESS) {
+                const uint64_t want = pWaitInfo->pValues[0];
+                const uint64_t gap = want > current ? want - current : 0;
+                sGap[gap < 4 ? gap : 4].fetch_add(1, std::memory_order_relaxed);
+            }
+            if ((sCalls.fetch_add(1, std::memory_order_relaxed) % 512) == 0) {
+                struct timespec ts;
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+                const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+                uint64_t last = sLastNs.load(std::memory_order_relaxed);
+                if (now - last > 5000000000ull &&
+                    sLastNs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+                    GFXSTREAM_WARNING(
+                        "SEMWAITTRACE: gap-to-current 0:%llu 1:%llu 2:%llu 3:%llu 4+:%llu",
+                        (unsigned long long)sGap[0].exchange(0, std::memory_order_relaxed),
+                        (unsigned long long)sGap[1].exchange(0, std::memory_order_relaxed),
+                        (unsigned long long)sGap[2].exchange(0, std::memory_order_relaxed),
+                        (unsigned long long)sGap[3].exchange(0, std::memory_order_relaxed),
+                        (unsigned long long)sGap[4].exchange(0, std::memory_order_relaxed));
+                }
+            }
+        }
+
         return deviceDispatch->vkWaitSemaphores(device, pWaitInfo, timeout);
     }
 

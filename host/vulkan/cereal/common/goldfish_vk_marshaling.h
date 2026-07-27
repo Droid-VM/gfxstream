@@ -4323,6 +4323,13 @@ void unmarshal_VkCreateBlobGOOGLE(VulkanStream* vkStream, VkStructureType rootTy
 #define OP_vkBeginCommandBufferAsyncGOOGLE 20321
 #define OP_vkEndCommandBufferAsyncGOOGLE 20322
 #define OP_vkResetCommandBufferAsyncGOOGLE 20323
+// Added by hand rather than by re-running codegen: this fork's generated sources have diverged
+// from upstream (CamelCase filenames, no `namespace host`), so a regeneration rewrites 2000+
+// lines of unrelated churn. The value is the one codegen assigns -- it hashes new commands into
+// the OP_vkFirst range instead of appending, so adding a command does not shift any existing
+// opcode. Guest and host must agree on it; the guest side gets it from the same codegen at build
+// time via the xml.
+#define OP_vkResetCommandPoolAsyncGOOGLE 283932813
 #define OP_vkCommandBufferHostSyncGOOGLE 20324
 #define OP_vkCreateImageWithRequirementsGOOGLE 20325
 #define OP_vkCreateBufferWithRequirementsGOOGLE 20326
