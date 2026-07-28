@@ -475,6 +475,13 @@ Result<ScopedAHardwareBuffer> ScopedAHardwareBuffer::Allocate(Gralloc& gralloc, 
                 std::to_string(width));
         }
     }
+    if (format == GFXSTREAM_AHB_FORMAT_Y8Cb8Cr8_420) {
+        if ((width % 2) != 0) {
+            return gfxstream::unexpected(
+                "Failed to allocate Y8Cb8Cr8_420 AHB with non multiple of 2 width: " +
+                std::to_string(width));
+        }
+    }
 
     AHardwareBuffer* ahb = nullptr;
     int status = gralloc.allocate(width, height, format, -1, &ahb);

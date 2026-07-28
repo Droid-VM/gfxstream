@@ -15,6 +15,7 @@ GfxStreamRenderControlConnection::~GfxStreamRenderControlConnection() {
     // before process pipe closure is detected.
     if (mRcEnc) {
         (void)mRcEnc->rcGetRendererVersion(mRcEnc.get());
+        mRcEnc = nullptr;
     }
 }
 
