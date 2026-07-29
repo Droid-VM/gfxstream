@@ -106,6 +106,7 @@ class HostVisiblePool {
     // for the guest physical address.
     std::vector<HostVisiblePoolChunk> alloc(uint64_t size, uint64_t align) {
         if (!size) return {};
+        const uint64_t reqSize = size;
         const uint64_t a = align ? align : kMinAlign;
         size = roundUp(size, a);
 
@@ -117,6 +118,7 @@ class HostVisiblePool {
             uint64_t slack = base - it->first;
             if (it->second >= slack + size) {
                 carve(it, base, size);
+                logAllocLocked("alloc", reqSize, a, size, {{base, size}});
                 return {{base, size}};
             }
         }
@@ -142,6 +144,7 @@ class HostVisiblePool {
         }
         if (remaining) {
             // Not enough total space even fragmented -> OOM, leave pool intact.
+            logAllocLocked("alloc-OOM", reqSize, a, size, {});
             return {};
         }
         // Commit: carve every chosen chunk out of the free map.
@@ -149,26 +152,56 @@ class HostVisiblePool {
             auto it = findContaining(c.offset);
             carve(it, c.offset, c.size);
         }
+        logAllocLocked("alloc-split", reqSize, a, size, chunks);
         return chunks;
     }
 
     void free(const std::vector<HostVisiblePoolChunk>& chunks) {
         std::lock_guard<std::mutex> lk(mMu);
         for (const auto& c : chunks) {
-            fprintf(stderr, "GFXPOOL: free offset=0x%llx size=%llu\n",
-                    (unsigned long long)c.offset, (unsigned long long)c.size);
             insertAndCoalesce(c.offset, c.size);
         }
+        logAllocLocked("free", 0, 0, 0, chunks);
     }
 
    private:
     static constexpr uint64_t kMinAlign = 4096;
+
+    // One line per pool transaction. This is the only view of what the pool actually holds --
+    // it is what `gfx-host-mb` gets sized from, so it reports the request as it arrived
+    // (`req`) separately from what the pool charged for it (`chg`): a caller that pads its
+    // request is invisible in the used total otherwise. Per-blob, not per-frame; the ASG rings
+    // are created once per context, so this is a handful of lines for a whole session.
+    void logAllocLocked(const char* what, uint64_t reqSize, uint64_t align, uint64_t chargedSize,
+                        const std::vector<HostVisiblePoolChunk>& chunks) {
+        uint64_t freeBytes = 0, largest = 0;
+        for (const auto& e : mFree) {
+            freeBytes += e.second;
+            largest = std::max(largest, e.second);
+        }
+        const uint64_t used = mSize - freeBytes;
+        if (used > mHighWater) mHighWater = used;
+        char head[64] = {0};
+        if (!chunks.empty()) {
+            snprintf(head, sizeof(head), " off=0x%llx",
+                     (unsigned long long)chunks[0].offset);
+        }
+        fprintf(stderr,
+                "GFXPOOL: %s req=%lluKB chg=%lluKB align=%lluKB nchunks=%zu%s "
+                "used=%lluKB high=%lluKB free=%lluKB largest=%lluKB blocks=%zu\n",
+                what, (unsigned long long)(reqSize >> 10), (unsigned long long)(chargedSize >> 10),
+                (unsigned long long)(align >> 10), chunks.size(), head,
+                (unsigned long long)(used >> 10), (unsigned long long)(mHighWater >> 10),
+                (unsigned long long)(freeBytes >> 10), (unsigned long long)(largest >> 10),
+                mFree.size());
+    }
 
     static uint64_t roundUp(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
     static uint64_t alignDown(uint64_t v, uint64_t a) { return v & ~(a - 1); }
 
     // mFree: offset -> length, non-overlapping, coalesced.
     std::map<uint64_t, uint64_t> mFree;
+    uint64_t mHighWater = 0;
     std::mutex mMu;
     int mMemfd = -1;
     uint64_t mMemfdBase = 0;

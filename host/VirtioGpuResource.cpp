@@ -99,37 +99,54 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
 
     // Round the backing up to a 2MB multiple so the shmem can be collapsed into
     // whole order-9 folios (the memfd is created sealed, so it cannot be grown
-    // later with ftruncate). The recycle map is keyed by the rounded size, which
-    // matches blob->size() on Release.
+    // later with ftruncate). This is a requirement of the fresh-memfd path at the
+    // bottom of this function and of nothing else -- see the pool branch below.
     constexpr uint64_t kPmdSize2 = 2ULL * 1024 * 1024;
     const uint64_t roundedSize = (size + kPmdSize2 - 1) & ~(kPmdSize2 - 1);
 
-    auto it = pool.freeBySize.find(roundedSize);
-    if (it != pool.freeBySize.end() && !it->second.empty()) {
+    // The recycle map is keyed by blob->size(), which is what Release() sees, so each backing
+    // path has to look itself up under the size IT charges. Getting this wrong is not a missed
+    // optimisation: a pooled blob is moved into pool.pinned and its chunks are never returned to
+    // the allocator, so every recycle miss burns another slice of the pool permanently.
+    auto takeFree = [&pool](uint64_t sz) -> std::shared_ptr<RingBlob> {
+        auto it = pool.freeBySize.find(sz);
+        if (it == pool.freeBySize.end() || it->second.empty()) return nullptr;
         std::shared_ptr<RingBlob> blob = std::move(it->second.back());
         it->second.pop_back();
         return blob;  // same physical pages as before
-    }
+    };
 
     // DroidVM gfxstream PRE-ALLOC: back the ASG RingBlob from the boot-blessed GpuPool so it is
     // pool-resident (guest maps the pool GPA directly) with ZERO runtime SHARE — the last thing
     // that still needed /dev/gunyah_share. This makes pre-alloc fully self-sufficient on phones
     // where the gunyah_host_share module can't be installed. The pool is already folio-backed and
     // mlocked at boot, so no per-blob collapse/mlock is needed.
+    //
+    // Charge the pool only what the ring actually needs. The 2MB round above is there so a
+    // standalone memfd can be MADV_COLLAPSE'd into order-9 folios; a pool blob is never
+    // collapsed, mlocked or mmap'd per-blob, so none of that applies to it. The ASG blob asks
+    // for kAsgConsumerRingStorageSize + kAsgWriteBufferSize (1036KB), and rounding that to 2MB
+    // charged nearly twice what it used -- with one ring per guest context, that was the pool's
+    // entire footprint. `alignment` is the guest page size the caller already computed, which is
+    // also the real floor: the guest maps the blob with io_remap_pfn_range at page granularity.
     if (auto* hvPool = gfxstream::vk::HostVisiblePool::get()) {
-        auto chunks = hvPool->alloc(roundedSize, 2ULL * 1024 * 1024);
+        const uint64_t align = alignment ? alignment : 4096;
+        const uint64_t poolSize = (size + align - 1) & ~(align - 1);
+        if (auto reused = takeFree(poolSize)) return reused;
+
+        auto chunks = hvPool->alloc(poolSize, align);
         if (chunks.size() == 1) {
             // map-once: back the RingBlob with a pointer into the whole-pool mapping
             // (hvaForOffset = baseHva + offset), no per-blob mmap.
-            auto pooled = RingBlob::CreateFromPool(id, roundedSize,
+            auto pooled = RingBlob::CreateFromPool(id, poolSize,
                                                    hvPool->hvaForOffset(chunks[0].offset),
                                                    (int64_t)chunks[0].offset);
             if (pooled) {
                 std::shared_ptr<RingBlob> pblob = std::move(pooled);
-                if (void* addr = pblob->map()) std::memset(addr, 0, roundedSize);
+                if (void* addr = pblob->map()) std::memset(addr, 0, poolSize);
                 pool.pinned.push_back(pblob);
                 fprintf(stderr, "RINGBLOB-POOL: id=%u size=%llu -> pool offset=0x%llx (no SHARE)\n",
-                        id, (unsigned long long)roundedSize,
+                        id, (unsigned long long)poolSize,
                         (unsigned long long)chunks[0].offset);
                 return pblob;
             }
@@ -138,6 +155,8 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
             hvPool->free(chunks);  // fragmented: fall back to fresh memfd + runtime SHARE
         }
     }
+
+    if (auto reused = takeFree(roundedSize)) return reused;
 
     // Gunyah persistent-BAR (fixed_blob_mapping) path: the VMM maps each blob into the shared BAR
     // via add_fd_mapping(), which requires an exportable fd. AlignedMemory (CreateWithHostMemory) is
