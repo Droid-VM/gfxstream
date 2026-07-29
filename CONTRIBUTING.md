@@ -1,33 +1,32 @@
-# How to contribute
+# Contributing
 
-We'd love to accept your patches and contributions to this project.
+## Sign-off
 
-## Before you begin
+Every commit must carry a `Signed-off-by:` line certifying the
+[Developer Certificate of Origin 1.1](https://developercertificate.org/):
 
-### Sign our Contributor License Agreement
+    git commit -s
 
-Contributions to this project must be accompanied by a
-[Contributor License Agreement](https://cla.developers.google.com/about) (CLA).
-You (or your employer) retain the copyright to your contribution; this simply
-gives us permission to use and redistribute your contributions as part of the
-project.
+## What signing off means here
 
-If you or your current employer have already signed the Google CLA (even if it
-was for a different project), you probably don't need to do it again.
+The DCO asks you to certify that you have the right to submit your work under
+the license this project uses. For this project that license is the GNU GPL
+**plus the additional permissions in `ADDITIONAL-PERMISSIONS`**, so a
+contribution made under it carries those permissions too.
 
-Visit <https://cla.developers.google.com/> to see your current agreements or to
-sign a new one.
+That is deliberate, and it is why this project asks for a DCO rather than a
+CLA. The additional permissions let anyone relicense material from this project
+in order to get it accepted into the upstream project it belongs in. If
+contributions did not carry those permissions, every contribution would become
+a piece of the tree that could never be sent upstream, and the permission would
+quietly stop meaning anything as the project grew.
 
-### Review our community guidelines
+You keep your copyright. Nothing is assigned to anyone.
 
-This project follows
-[Google's Open Source Community Guidelines](https://opensource.google/conduct/).
+## Do not sign off on someone else's license
 
-## Contribution process
-
-### Code reviews
-
-All submissions, including submissions by project members, require review. We
-use GitHub pull requests for this purpose. Consult
-[GitHub Help](https://help.github.com/articles/about-pull-requests/) for more
-information on using pull requests.
+If you are contributing material you did not write -- code ported from another
+project, a header copied from a kernel, a function translated from elsewhere --
+say so in the file and keep that material under its own license. Do not put a
+project SPDX tag on it. Several files in these repositories are in exactly that
+position and are marked accordingly.

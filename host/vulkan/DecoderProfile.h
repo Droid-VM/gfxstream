@@ -1,5 +1,10 @@
-// Copyright 2026 Google LLC
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright DroidVM contributors
+// Additional permissions apply; see ADDITIONAL-PERMISSIONS in the repository root.
+//
+// This file previously carried "Copyright 2026 Google LLC". That was boilerplate copied
+// from a neighbouring file: it does not exist in any upstream gfxstream ref and its whole
+// history is DroidVM. Removed as a misattribution, not as a relicensing of Google work.
 
 #pragma once
 

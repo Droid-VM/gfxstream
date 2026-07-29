@@ -1,5 +1,7 @@
-// Copyright 2026 DroidVM
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright DroidVM contributors
+// Additional permissions apply; see ADDITIONAL-PERMISSIONS in the repository root.
+
 //
 // Host-visible blob backing bridge.
 //
