@@ -180,6 +180,12 @@ struct MemoryInfo {
     // -1 = not pool-resident (fresh memfd / runtime-SHARE path). Carried to the
     // blob export so crosvm reports the pool GPA to the guest (no runtime SHARE).
     int64_t poolOffset = -1;
+    // What the pool actually charged for that offset, which is the allocation size rounded up to
+    // the page size -- NOT `size`, which is the guest-requested figure and takes a different value
+    // again on the AHB dedicated-export path. Freeing anything but the charged size hands back a
+    // short extent: the tail is lost for the VM's lifetime, and because the returned extent is no
+    // longer adjacent to its neighbour it cannot coalesce either, so the free list fragments.
+    uint64_t poolSize = 0;
 
     std::shared_ptr<PrivateMemory> privateMemory;
     // virtio-gpu blobs

@@ -6983,6 +6983,7 @@ class VkDecoderGlobalState::Impl {
         // sub-allocated from the boot-blessed GpuPool (skips the fresh-memfd +
         // runtime-SHARE path). Reported to crosvm via the blob export.
         int64_t poolOffset = -1;
+        uint64_t poolSize = 0;
 
         if (emulateHostVisible) {
             if (createBlobInfoPtr && createBlobInfoPtr->blobMem == STREAM_BLOB_MEM_GUEST &&
@@ -7092,6 +7093,7 @@ class VkDecoderGlobalState::Impl {
                                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
                                 vk_append_struct(&structChainIter, &importFdInfo);
                                 poolOffset = (int64_t)chunks[0].offset;
+                                poolSize = chunks[0].size;
                                 fprintf(stderr,
                                         "GFXPOOL: alloc size=%llu -> pool offset=0x%llx blobId=%llu "
                                         "(no SHARE)\n",
@@ -7334,6 +7336,7 @@ class VkDecoderGlobalState::Impl {
         // never reach here, so the guest-visible usage figure stays leak-free.
         if (blobBackingCharged) sOutstandingFolioBytes.fetch_add(blobBackingCharged);
         memoryInfo.poolOffset = poolOffset;
+        memoryInfo.poolSize = poolSize;
 
         if (importCbInfoPtr) {
             memoryInfo.boundColorBuffer = importCbInfoPtr->colorBuffer;
@@ -7427,9 +7430,10 @@ class VkDecoderGlobalState::Impl {
         // DroidVM gfxstream pre-alloc: return the sub-allocation to the GpuPool.
         if (memoryInfo.poolOffset >= 0) {
             if (auto* pool = HostVisiblePool::get()) {
-                pool->free({{(uint64_t)memoryInfo.poolOffset, memoryInfo.size}});
+                pool->free({{(uint64_t)memoryInfo.poolOffset, memoryInfo.poolSize}});
             }
             memoryInfo.poolOffset = -1;
+            memoryInfo.poolSize = 0;
 
             // A blob descriptor registered for this memory but never picked up by a
             // RESOURCE_CREATE_BLOB outlives the memory otherwise, and blob ids are recycled by
