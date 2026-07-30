@@ -242,6 +242,7 @@ struct DeviceInfo {
     std::unique_ptr<GpuDecompressionPipelineManager> decompPipelines = nullptr;
     DeviceOpTrackerPtr deviceOpTracker = nullptr;
     std::optional<uint32_t> virtioGpuContextId;
+    uint32_t maxImageDimension2D = 0;  // Physical device limit cached for efficient validation
 
     bool needEmulatedDecompression(VkFormat format) {
         return (emulateTextureEtc2 && isEtc2(format)) ||
