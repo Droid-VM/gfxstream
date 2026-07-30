@@ -364,9 +364,15 @@ bool GLEScontext::vertexAttributesBufferBacked() {
     const auto& info = m_currVaoState.attribInfo_const();
     for (uint32_t i = 0; i  < kMaxVertexAttributes; ++i) {
         const auto& pointerInfo = info[i];
-        if (pointerInfo.isEnable() &&
-            !m_currVaoState.bufferBindings()[pointerInfo.getBindingIndex()].buffer) {
-            return false;
+        if (pointerInfo.isEnable()) {
+            const auto bufferBindingIndex = pointerInfo.getBindingIndex();
+            const auto& vaoBindings = m_currVaoState.bufferBindings();
+            if (bufferBindingIndex >= vaoBindings.size()) {
+                return false;
+            }
+            if (!vaoBindings[bufferBindingIndex].buffer) {
+                return false;
+            }
         }
     }
 
