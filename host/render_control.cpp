@@ -1363,7 +1363,10 @@ static int rcGetDisplayColorTransform(uint32_t displayId, mat4x4_ptr outColorTra
         return -1;
     }
 
-    if (outColorTransformSize != (16 * sizeof(float))) {
+    // Due to a bug in guest side codegenerator (codegen/generic-apigen/entry_point.cpp),
+    // the size for the color transform matrices are passed as 512, not 16 * sizeof(float).
+    // So, doing a less than check here to accommodate the wrong size.
+    if (outColorTransformSize < (16 * sizeof(float))) {
         GFXSTREAM_ERROR("Invalid color transform size: %" PRIu32, outColorTransformSize);
         return -1;
     }
@@ -1379,7 +1382,10 @@ static int rcSetDisplayColorTransform(uint32_t displayId, const mat4x4_ptr color
         return -1;
     }
 
-    if (colorTransformSize != (16 * sizeof(float))) {
+    // Due to a bug in guest side codegenerator (codegen/generic-apigen/entry_point.cpp),
+    // the size for the color transform matrices are passed as 512, not 16 * sizeof(float).
+    // So, doing a less than check here to accommodate the wrong size.
+    if (colorTransformSize < (16 * sizeof(float))) {
         GFXSTREAM_ERROR("Invalid color transform size: %" PRIu32, colorTransformSize);
         return -1;
     }
