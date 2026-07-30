@@ -34,6 +34,7 @@ extern "C" {
 #endif
 #include "render-utils/Renderer.h"
 #include "render-utils/RenderLib.h"
+#include "render_thread.h"
 #include "virtio_gpu_frontend.h"
 #include "vulkan/vk_utils.h"
 #include "vulkan/vulkan_dispatch.h"
@@ -582,6 +583,18 @@ VG_EXPORT int stream_renderer_resume() {
     return 0;
 }
 
+VG_EXPORT int stream_renderer_get_metrics(struct GfxstreamMetrics* metrics) {
+    GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY,
+                          "stream_renderer_get_metrics()");
+
+    if (!metrics) {
+        return -EINVAL;
+    }
+
+    metrics->render_thread_count = gfxstream::host::RenderThread::getActiveRenderThreadsCount();
+    return 0;
+}
+
 VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer_params,
                                    uint64_t num_params) {
     // Required parameters.
@@ -850,7 +863,11 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
         return -EINVAL;
     }
 
-    sFrontend()->init(renderer, renderer_cookie, features, fence_callback);
+    const int initRes = sFrontend()->init(renderer, renderer_cookie, features, fence_callback);
+    if (initRes < 0) {
+        GFXSTREAM_ERROR("Failed to initialize gfxstream frontend!");
+        return initRes;
+    }
 
     GFXSTREAM_INFO("Gfxstream initialized successfully!");
     return 0;
@@ -914,5 +931,9 @@ static_assert(offsetof(struct stream_renderer_param, key) == 0,
               "stream_renderer_param.key must be at offset 0");
 static_assert(offsetof(struct stream_renderer_param, value) == 8,
               "stream_renderer_param.value must be at offset 8");
+
+static_assert(sizeof(struct GfxstreamMetrics) == 4, "GfxstreamMetrics must be 4 bytes");
+static_assert(offsetof(struct GfxstreamMetrics, render_thread_count) == 0,
+              "GfxstreamMetrics.render_thread_count must be at offset 0");
 
 }  // extern "C"

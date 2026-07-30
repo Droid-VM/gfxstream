@@ -241,6 +241,27 @@ DeviceOpWaitable DeviceOpBuilder::OnQueueSubmittedWithFence(VkFence fence) {
     return future;
 }
 
+void DeviceOpBuilder::OnQueueSubmissionAborted(VkFence fence) {
+    if (mCreatedFence.has_value() && fence != mCreatedFence) {
+        GFXSTREAM_FATAL(
+            "Invalid usage: failed to call OnQueueSubmittedWithFence() with the fence "
+            "requested from CreateFenceForOp.");
+    }
+
+    mSubmittedFence = fence;
+
+    // Can be destroyed immediately as it's not used
+    const bool destroyFenceOnCompletion = mCreatedFence.has_value();
+    mTracker.AddPendingDeviceOp([device = mTracker.mDevice,
+                                 deviceDispatch = mTracker.mDeviceDispatch, fence,
+                                 destroyFenceOnCompletion] {
+        if (destroyFenceOnCompletion) {
+            deviceDispatch->vkDestroyFence(device, fence, nullptr);
+        }
+        return DeviceOpStatus::kDone;
+    });
+}
+
 }  // namespace vk
 }  // namespace host
 }  // namespace gfxstream
