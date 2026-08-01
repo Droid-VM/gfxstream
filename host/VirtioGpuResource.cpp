@@ -1190,7 +1190,24 @@ int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
         // pool RingBlob is ExternalMemory-backed and not fd-exportable in the shmem sense).
         if (memory->poolOffset() >= 0) {
             auto* hvPool = gfxstream::vk::HostVisiblePool::get();
-            outHandle->os_handle = hvPool ? (int64_t)dup(hvPool->memfd()) : -1;
+            // Returning 0 with os_handle -1 is never right: the caller has no way to tell it
+            // apart from a real handle except by checking for a negative fd, and crosvm's check
+            // turns it into InvalidRutabagaHandle -- an error that says nothing about the cause
+            // and leaves the display silently falling back to a copy of memory nothing wrote.
+            if (!hvPool) {
+                GFXSTREAM_ERROR(
+                    "failed to export blob for resource %u: pool-resident RingBlob at offset %lld "
+                    "but there is no host-visible pool",
+                    mId, (long long)memory->poolOffset());
+                return -EINVAL;
+            }
+            int poolFd = dup(hvPool->memfd());
+            if (poolFd < 0) {
+                GFXSTREAM_ERROR("failed to export blob for resource %u: dup of the pool memfd failed",
+                                mId);
+                return -EINVAL;
+            }
+            outHandle->os_handle = (int64_t)poolFd;
             outHandle->handle_type = STREAM_HANDLE_TYPE_MEM_POOL;
             outHandle->pool_offset = (uint64_t)memory->poolOffset();
             return 0;
@@ -1224,6 +1241,19 @@ int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
             auto rawDescriptorOpt = memory->descriptorInfo.descriptor.release();
             int rawDescriptor = rawDescriptorOpt ? static_cast<int>(*rawDescriptorOpt) : -1;
 #endif
+            // Same reason as the RingBlob case above: report the failure rather than a success
+            // carrying no handle. A pool-resident blob whose descriptor is not a live fd is a
+            // real condition -- guest-allocated memory reaches the host as pages, not as
+            // something dup() can copy -- and the caller has to be able to see it.
+            if (rawDescriptor < 0) {
+                GFXSTREAM_ERROR(
+                    "failed to export blob for resource %u: pool-resident at offset %lld but its "
+                    "descriptor (%d, type %u) is not exportable",
+                    mId, (long long)memory->poolOffset,
+                    static_cast<int>(memory->descriptorInfo.handle),
+                    memory->descriptorInfo.streamHandleType);
+                return -EINVAL;
+            }
             outHandle->os_handle = static_cast<int64_t>(rawDescriptor);
             outHandle->handle_type = STREAM_HANDLE_TYPE_MEM_POOL;
             outHandle->pool_offset = static_cast<uint64_t>(memory->poolOffset);
