@@ -225,6 +225,24 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                 return annotations;
                             })
                             .build();
+                    // Only shouldExit breaks this loop, so a guest client that dies mid-stream --
+                    // killed by a timeout, say, after writing a packet header but before the host
+                    // caught up -- leaves the seqno it is waiting for unreachable and the thread
+                    // spinning for the life of the process. Observed exactly that: a render thread
+                    // still named for a guest eglinfo that had exited minutes earlier, pegged at
+                    // 100% of a core, with the desktop starved behind it.
+                    //
+                    // Two separate defects, so two separate changes:
+                    //
+                    // The backoff below covers MSVC x86 and GCC i386/x86_64 only, which leaves
+                    // aarch64 -- every device this runs on -- executing a bare busy-wait. YIELD
+                    // is the ARM counterpart of PAUSE and is what belongs there.
+                    //
+                    // The spin count is diagnostic. It does not end the wait, because ending it
+                    // early would let the decoder run a packet out of order, which is worse than
+                    // hanging; it exists to make the hang say who is waiting on what, since the
+                    // health monitor's annotations only surface if a hang report is collected.
+                    uint64_t spins = 0;
                     while ((seqno - seqnoPtr->load(std::memory_order_seq_cst) != 1)) {
                         if (shouldExit.load(std::memory_order_relaxed)) {
                             GFXSTREAM_WARNING(
@@ -236,7 +254,17 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         _mm_pause();
 #elif (defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)))
                         __asm__ __volatile__("pause;");
+#elif (defined(__GNUC__) && defined(__aarch64__))
+                        __asm__ __volatile__("yield");
 #endif
+                        if ((++spins & 0xFFFFFFull) == 0) {
+                            GFXSTREAM_WARNING(
+                                "seqno loop stuck: want=%u have=%u opcode=%u process=%s "
+                                "thread=0x%x spins=%llu",
+                                seqno, seqnoPtr->load(std::memory_order_seq_cst), opcode,
+                                processName ? processName : "null", getCurrentThreadId(),
+                                (unsigned long long)spins);
+                        }
                     }
                     m_prevSeqno = seqno;
                 }
