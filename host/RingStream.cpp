@@ -31,16 +31,45 @@
 namespace gfxstream {
 namespace {
 
+// Attach to the ring the guest has already set up, rather than setting it up again.
+//
+// Both sides used to call asg_context_create on the same shared memory, and that call ends with
+// ring_buffer_init, which rewinds the ring's shared read and write counters. Nothing orders the
+// two calls against each other: the guest maps the blob, initialises the ring, and starts writing;
+// this side runs when the guest pings ASG_SET_VERSION. When that landed after the guest had
+// already committed its first bytes -- the four-byte clientFlags word that opens every connection
+// is usually the first -- the counters went back to zero underneath it, and from then on this side
+// read from a position the guest had never written. Every packet after that was framed from the
+// wrong offset: an opcode read as a length, a wait for a body of some twenty thousand bytes that
+// no one would ever send, and a guest thread parked forever on a reply, with an empty ring and no
+// error on either side. It presented as a desktop that came up whole, or as a bare wallpaper, or
+// not at all, from one boot to the next, on the same binaries.
+//
+// So: the ring struct is shared and the guest owns its initialisation. The views are per-side --
+// host and guest hold different pointers to the same bytes -- and this side owns its own, which
+// is what ring_buffer_init_view_only is for. buffer_size and flush_interval remain the host's to
+// publish, because the guest reads flush_interval to size its writes and cannot know it first.
 struct asg_context CreateContext(const AsgConsumerCreateInfo& info) {
-    struct asg_context context = asg_context_create(info.ring_storage, info.buffer, info.buffer_size);
+    struct asg_context context;
+
+    context.to_host = reinterpret_cast<struct ring_buffer*>(
+        info.ring_storage + offsetof(struct asg_ring_storage, to_host));
+    context.to_host_large_xfer.ring = reinterpret_cast<struct ring_buffer*>(
+        info.ring_storage + offsetof(struct asg_ring_storage, to_host_large_xfer));
+    context.from_host_large_xfer.ring = reinterpret_cast<struct ring_buffer*>(
+        info.ring_storage + offsetof(struct asg_ring_storage, from_host_large_xfer));
+
+    context.buffer = info.buffer;
+    context.host_state = reinterpret_cast<asg_host_state*>(&context.to_host->state);
+    context.ring_config = reinterpret_cast<asg_ring_config*>(context.to_host->config);
+
+    ring_buffer_init_view_only(&context.to_host_large_xfer.view, (uint8_t*)context.buffer,
+                               info.buffer_size);
+    ring_buffer_init_view_only(&context.from_host_large_xfer.view, (uint8_t*)context.buffer,
+                               info.buffer_size);
 
     context.ring_config->buffer_size = info.buffer_size;
     context.ring_config->flush_interval = info.buffer_flush_interval;
-    context.ring_config->host_consumed_pos = 0;
-    context.ring_config->guest_write_pos = 0;
-    context.ring_config->transfer_mode = 1;
-    context.ring_config->transfer_size = 0;
-    context.ring_config->in_error = 0;
 
     return context;
 }
