@@ -449,6 +449,27 @@ intptr_t RenderThread::main() {
 
             if (!processResources && tInfo->m_puid && tInfo->m_puid != INVALID_CONTEXT_ID) {
                 processResources = FrameBuffer::getFB()->getProcessResources(tInfo->m_puid);
+                // Decoding a sequenced Vulkan packet without these is not a degraded mode, it is
+                // a broken one. Every such packet carries a sequence number and the decoder both
+                // waits on and advances a counter that lives here; a thread that has no counter
+                // still consumes the numbers but cannot advance it, so the count falls permanently
+                // behind and any thread of the same process that does have one waits for a value
+                // that will never arrive.
+                //
+                // Seen on KDE: a host render thread spinning at 100% of a core for minutes,
+                // "seqno loop stuck: want=751 have=745 process=plasmashell", the guest's Qt Quick
+                // render thread parked in vkCreateFence inside its present, and a desktop that
+                // never draws. Before the decoder was taught not to dereference a null counter it
+                // took the VMM down here instead, which is why this never presented as a hang.
+                //
+                // VirtioGpuContext::Create already does this for contexts it knows about; the
+                // gap is an ASG consumer created without a context id, which leaves m_puid at
+                // zero. Creating it here is idempotent -- try_emplace on the same puid is a
+                // no-op -- so this only ever fills in one that is genuinely missing.
+                if (!processResources) {
+                    FrameBuffer::getFB()->createGraphicsProcessResources(tInfo->m_puid);
+                    processResources = FrameBuffer::getFB()->getProcessResources(tInfo->m_puid);
+                }
             }
 
             progress = false;
