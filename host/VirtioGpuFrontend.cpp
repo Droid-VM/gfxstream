@@ -831,11 +831,6 @@ int VirtioGpuFrontend::createBlob(uint32_t contextId, uint32_t resourceId,
 int VirtioGpuFrontend::resourceMap(uint32_t resourceId, void** hvaOut, uint64_t* sizeOut) {
     GFXSTREAM_DEBUG("resource: %u", resourceId);
 
-    if (mFeatures.ExternalBlob.enabled) {
-        GFXSTREAM_ERROR("Failed to map resource: external blob enabled.");
-        return -EINVAL;
-    }
-
     auto it = mResources.find(resourceId);
     if (it == mResources.end()) {
         if (hvaOut) *hvaOut = nullptr;
@@ -845,6 +840,11 @@ int VirtioGpuFrontend::resourceMap(uint32_t resourceId, void** hvaOut, uint64_t*
         return -EINVAL;
     }
 
+    // ExternalBlob mode used to refuse every host-pointer map on the theory that everything is
+    // descriptor-exported. Memory the driver declines to re-export -- an imported colorbuffer
+    // backing a dedicated image -- is registered as a host-address mapping instead, and mapping
+    // it here is the only way the guest ever sees it. Let the resource itself decide: Map() only
+    // succeeds for ring- and mapping-backed blobs, which are exactly the ones this is safe for.
     auto& resource = it->second;
     return resource.Map(hvaOut, sizeOut);
 }

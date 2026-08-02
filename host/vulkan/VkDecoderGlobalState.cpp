@@ -7022,6 +7022,20 @@ class VkDecoderGlobalState::Impl {
                         GFXSTREAM_ERROR("Failed vkAllocateMemory: missing raw descriptor (android).");
                         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                     }
+                    // A guest blob can back more than one VkDeviceMemory: a compositor binds its
+                    // GBM bo in one context and imports the same bo's fd in another. The manager
+                    // entry is consumed by the first allocation, so keep our own dup keyed by
+                    // (context, blobId) for every one after it.
+                    {
+                        std::lock_guard<std::mutex> lock(mGuestBlobFdsMutex);
+                        uint64_t key = createBlobInfoPtr->blobId;
+                        int keep = dup((int)rawDescriptor);
+                        if (keep >= 0) {
+                            auto it = mGuestBlobFds.find(key);
+                            if (it != mGuestBlobFds.end()) close(it->second);
+                            mGuestBlobFds[key] = keep;
+                        }
+                    }
 #else
                     auto rawDescriptorOpt =
                         (*descriptorInfoOpt).descriptorInfo.descriptor.release();
@@ -7033,8 +7047,26 @@ class VkDecoderGlobalState::Impl {
                     }
 #endif
                 } else {
+#if defined(__ANDROID__)
+                    // Second (or later) allocation against the same guest blob: the manager entry
+                    // is gone, but the retained dup is as good as the original.
+                    int retained = -1;
+                    {
+                        std::lock_guard<std::mutex> lock(mGuestBlobFdsMutex);
+                        uint64_t key = createBlobInfoPtr->blobId;
+                        auto it = mGuestBlobFds.find(key);
+                        if (it != mGuestBlobFds.end()) retained = dup(it->second);
+                    }
+                    if (retained >= 0) {
+                        rawDescriptor = (DescriptorType)retained;
+                    } else {
+                        GFXSTREAM_ERROR("Failed vkAllocateMemory: missing descriptor info.");
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
+#else
                     GFXSTREAM_ERROR("Failed vkAllocateMemory: missing descriptor info.");
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+#endif
                 }
 
                 if (!m_vkEmulation->supportsDmaBuf() || !deviceHasDmabufExt) {
@@ -7908,8 +7940,23 @@ class VkDecoderGlobalState::Impl {
 
             auto exportedMemoryOpt = exportMemoryHandle(deviceInfo, vk, device, memory);
             if (!exportedMemoryOpt) {
-                return VK_ERROR_OUT_OF_HOST_MEMORY;
-            }
+                // Memory that arrived here as an import -- a colorbuffer's dma-buf backing a
+                // dedicated image, say -- was not allocated with an export chain, and the driver
+                // refuses to re-export it. That is no reason to deny the guest a mapping: on this
+                // hardware every memory type is host-visible, so map it here and publish the host
+                // address the way the non-external-blob path does. The guest's HOST3D blob then
+                // resolves through the address mapping instead of a descriptor.
+                if (!info->needUnmap) {
+                    VkResult mapResult = vk->vkMapMemory(device, memory, 0, info->size, 0, &info->ptr);
+                    if (mapResult != VK_SUCCESS) {
+                        GFXSTREAM_ERROR(
+                            "vkGetBlobInternal: memory is neither exportable nor mappable (%d)",
+                            mapResult);
+                        return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    }
+                    info->needUnmap = true;
+                }
+            } else {
             auto& exportedMemory = *exportedMemoryOpt;
 #ifdef __ANDROID__
             auto& descriptor = exportedMemory.handle;
@@ -7920,6 +7967,7 @@ class VkDecoderGlobalState::Impl {
                 virtioGpuContextId, hostBlobId, std::move(descriptor),
                 exportedMemory.streamHandleType, info->caching,
                 std::optional<VulkanInfo>(vulkanInfo));
+            }
         } else if (!info->needUnmap) {
             VkResult mapResult = vk->vkMapMemory(device, memory, 0, info->size, 0, &info->ptr);
             if (mapResult != VK_SUCCESS) {
@@ -7961,7 +8009,19 @@ class VkDecoderGlobalState::Impl {
                                                  uint64_t* pSize, uint64_t* pHostmemId) {
         uint64_t hostBlobId = sNextHostBlobId++;
         *pHostmemId = hostBlobId;
-        return vkGetBlobInternal(boxed_device, memory, hostBlobId);
+        VkResult result = vkGetBlobInternal(boxed_device, memory, hostBlobId);
+        // The size out-parameter was never written, so the guest saw zero and built zero-size
+        // GEM objects from it. The guest has no size of its own on the export path -- this reply
+        // is the only place it can come from.
+        if (result == VK_SUCCESS) {
+            std::lock_guard<std::mutex> lock(mMutex);
+            auto* info = gfxstream::base::find(mMemoryInfo, memory);
+            if (info) {
+                *pSize = info->size;
+                *pAddress = 0;
+            }
+        }
+        return result;
     }
 
     VkResult on_vkFreeMemorySyncGOOGLE(gfxstream::base::BumpPool* pool,
@@ -11522,6 +11582,10 @@ class VkDecoderGlobalState::Impl {
     std::unordered_map<VkDescriptorUpdateTemplate, DescriptorUpdateTemplateInfo>
         mDescriptorUpdateTemplateInfo GUARDED_BY(mMutex);
     std::unordered_map<VkDeviceMemory, MemoryInfo> mMemoryInfo GUARDED_BY(mMutex);
+    // Retained dups of guest-blob dma-buf fds, keyed by (virtio context << 32 | blobId): consumed
+    // manager entries cannot serve a second allocation, these can.
+    std::mutex mGuestBlobFdsMutex;
+    std::unordered_map<uint64_t, int> mGuestBlobFds;
     std::unordered_map<VkFence, FenceInfo> mFenceInfo GUARDED_BY(mMutex);
     std::unordered_map<VkFramebuffer, FramebufferInfo> mFramebufferInfo GUARDED_BY(mMutex);
     std::unordered_map<VkImage, ImageInfo> mImageInfo GUARDED_BY(mMutex);

@@ -555,6 +555,17 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
                     contextId, createBlobArgs->blob_id);
             }
             if (!descriptorInfoOpt) {
+                // Memory the host could not re-export registers a host-address MAPPING instead of
+                // a descriptor (vkGetBlobInternal falls back to vkMapMemory + addMapping when the
+                // driver refuses to export imported memory). ExternalBlob mode used to reject
+                // those outright, which left such memory guest-mappable in no mode at all.
+                auto memoryMappingOpt =
+                    ExternalObjectManager::get()->removeMapping(contextId, createBlobArgs->blob_id);
+                if (memoryMappingOpt) {
+                    resource.mBlobMemory.emplace(std::move(*memoryMappingOpt));
+                    resource.mId = resourceId;
+                    return resource;
+                }
                 fprintf(stderr, "BLOBDIAG2: res=%u FAIL no-external-blob-descriptor\n", resourceId);
                 GFXSTREAM_ERROR("Failed to create blob: no external blob descriptor.");
                 return std::nullopt;
