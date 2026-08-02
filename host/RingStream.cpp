@@ -392,19 +392,6 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
         }
     }
 
-    // The first bytes this stream ever hands upward. The decoder has been seen starting four
-    // bytes into the first packet, and this says whether they were already gone when the ring
-    // layer produced them or were lost above it.
-    if (mReportedFirstRead < 3 && count > 0) {
-        ++mReportedFirstRead;
-        char hex[3 * 16 + 1];
-        size_t n = count < 16 ? count : 16;
-        for (size_t i = 0; i < n; ++i) snprintf(hex + 3 * i, 4, "%02x ", ((const uint8_t*)buf)[i]);
-        hex[3 * n] = 0;
-        GFXSTREAM_ERROR("RING-FIRSTREAD: read #%u count=%zu bytes=[%s]", mReportedFirstRead,
-                        count, hex);
-    }
-
     *inout_len = count;
     ++mXmits;
     mTotalRecv += count;
@@ -448,14 +435,6 @@ void RingStream::type1Read(
             return;
         }
         const char* src = mContext.buffer + xfersPtr[i].offset;
-        // What the guest actually asked to be transferred, for the first few transfers of a
-        // stream. A stream that starts mid-packet has either been given a short transfer or a
-        // late offset, and only these two numbers tell them apart.
-        if (mReportedXfers < 4) {
-            ++mReportedXfers;
-            GFXSTREAM_ERROR("RING-XFER: #%u offset=%u size=%u avail=%u", mReportedXfers,
-                            xfersPtr[i].offset, xfersPtr[i].size, available);
-        }
         memcpy(*current, src, xfersPtr[i].size);
         ring_buffer_advance_read(
                 mContext.to_host, sizeof(struct asg_type1_xfer), 1);

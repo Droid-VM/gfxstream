@@ -145,16 +145,6 @@ static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32
         name.c_str(), opcode, packetLen);
 }
 
-static void note_opcode_seen(const char* processName, uint32_t opcode) {
-    static std::mutex sMutex;
-    static std::set<std::pair<std::string, uint32_t>> sSeen;
-    const std::string name = processName ? processName : "null";
-    {
-        std::lock_guard<std::mutex> lock(sMutex);
-        if (!sSeen.emplace(name, opcode).second) return;
-    }
-    GFXSTREAM_WARNING("DECODE-SEEN: process=%s opcode=%u", name.c_str(), opcode);
-}
 
 size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                const ProcessResources* processResources,
@@ -236,7 +226,6 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         if (m_queueSubmitWithCommandsEnabled &&
             ((opcode >= OP_vkFirst && opcode < OP_vkLast) ||
              (opcode >= OP_vkFirst_old && opcode < OP_vkLast_old))) {
-            note_opcode_seen(processName, opcode);
             uint32_t seqno;
             memcpy(&seqno, *readStreamPtrPtr, sizeof(uint32_t));
             *readStreamPtrPtr += sizeof(uint32_t);

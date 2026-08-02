@@ -92,8 +92,6 @@ class RingStream final : public IOStream {
     uint32_t mPendingHave = 0;
     uint64_t mParkSpins = 0;
     uint64_t mReportedPartial = 0;
-    uint32_t mReportedFirstRead = 0;
-    uint32_t mReportedXfers = 0;
     bool mShouldExit = false;
     bool mShouldExitForSnapshot = false;
     bool mInSnapshotOperation = false;

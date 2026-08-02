@@ -269,6 +269,13 @@ void RenderThread::waitForExitSignal() {
     }
 }
 
+// The two opcode ranges the decoders use, plus the renderControl range below them. Anything
+// outside all three at a packet boundary means the stream is not where it thinks it is.
+static bool plausibleOpcode(uint32_t word) {
+    return (word >= 20000 && word < 30000) || (word >= 200000000 && word < 300000000) ||
+           (word >= 1000 && word < 20000);
+}
+
 intptr_t RenderThread::main() {
     if (mFinished.load(std::memory_order_relaxed)) {
         GFXSTREAM_ERROR("Error: fail loading a RenderThread @%p", this);
@@ -357,7 +364,6 @@ intptr_t RenderThread::main() {
     auto& metricsLogger = FrameBuffer::getFB()->getMetricsLogger();
 
     const ProcessResources* processResources = nullptr;
-    bool createdHere = false;
     bool anyProgress = false;
     while (true) {
         // Let's make sure we read enough data for at least some processing.
@@ -365,74 +371,43 @@ intptr_t RenderThread::main() {
         if (readBuf.validData() >= 8) {
             // We know that packet size is the second uint32_t from the start.
             std::memcpy(&packetSize, readBuf.buf() + 4, sizeof(uint32_t));
-            // Catch a misaligned stream at the moment it misaligns, which is the only moment it
-            // is still obvious. Once the header is read from the wrong offset, the length taken
-            // with it is some other field's value, and the thread goes on to wait for bytes that
-            // will never come -- by then it looks like a slow host, and the length is plausible
-            // enough that the existing bad-length check stays quiet.
-            {
-                uint32_t firstWord;
+            // Resynchronise once, on the first header of the stream. Every connection opens
+            // with a four-byte clientFlags word that the guest sends unconditionally and that
+            // nothing on this side reads; whether it reaches this decoder is a race with the ring
+            // being initialised when the consumer is created. Usually it is discarded and the
+            // stream starts on a packet boundary. When it is not, this decoder reads zero as an
+            // opcode and the next packet's opcode as a length, waits for a body of some twenty
+            // thousand bytes that will never come, and the guest thread that made the call waits
+            // for its reply forever -- with an empty ring and no error on either side. That is a
+            // desktop coming up whole, or as a bare wallpaper, or not at all, from one boot to the
+            // next.
+            //
+            // Only the first header of a stream is eligible, and only when the word that follows
+            // is itself a valid opcode, so a healthy stream can never take this path -- and past
+            // that first header this costs nothing at all.
+            if (!mResyncChecked && readBuf.validData() >= 12) {
+                mResyncChecked = true;
+                uint32_t firstWord, second;
                 std::memcpy(&firstWord, readBuf.buf(), sizeof(uint32_t));
-                const bool plausible = (firstWord >= 20000 && firstWord < 30000) ||
-                                       (firstWord >= 200000000 && firstWord < 300000000) ||
-                                       (firstWord >= 1000 && firstWord < 20000);
-                // Resynchronise once, on the first header of the stream. Every connection opens
-                // with a four-byte clientFlags word that the guest sends unconditionally and
-                // nothing here reads; whether it reaches this decoder is a race with the ring
-                // being initialised when the consumer is created. Usually it is discarded and the
-                // stream starts on a packet boundary. When it is not, this decoder reads zero as
-                // an opcode and the next packet's opcode as a length, waits for a body of some
-                // twenty thousand bytes that will never come, and the guest thread that made the
-                // call waits for its reply forever -- with an empty ring and no error on either
-                // side. That is the KDE desktop coming up whole, or as a bare wallpaper, or not
-                // at all, from one boot to the next.
-                //
-                // Only the first header of a stream is eligible, and only when the word that
-                // follows is itself a valid opcode, so a healthy stream can never take this path.
-                if (!mResyncChecked && readBuf.validData() >= 12) {
-                    mResyncChecked = true;
-                    if (!plausible) {
-                        uint32_t second;
-                        std::memcpy(&second, readBuf.buf() + 4, sizeof(uint32_t));
-                        const bool secondPlausible =
-                            (second >= 20000 && second < 30000) ||
-                            (second >= 200000000 && second < 300000000) ||
-                            (second >= 1000 && second < 20000);
-                        if (secondPlausible) {
-                            GFXSTREAM_ERROR(
-                                "STREAM-RESYNC: process=%s dropped a %u-word prefix; the stream "
-                                "began four bytes before its first packet",
-                                tInfo->m_processName ? tInfo->m_processName->c_str() : "null",
-                                firstWord);
-                            readBuf.consume(sizeof(uint32_t));
-                            anyProgress = true;
-                            continue;
-                        }
+                std::memcpy(&second, readBuf.buf() + 4, sizeof(uint32_t));
+                if (!plausibleOpcode(firstWord)) {
+                    const char* who =
+                        tInfo->m_processName ? tInfo->m_processName->c_str() : "null";
+                    if (plausibleOpcode(second)) {
+                        GFXSTREAM_WARNING(
+                            "STREAM-RESYNC: process=%s dropped a leading %u; the stream began "
+                            "four bytes before its first packet",
+                            who, firstWord);
+                        readBuf.consume(sizeof(uint32_t));
+                        anyProgress = true;
+                        continue;
                     }
-                }
-                if (!mReportedFirstWord) {
-                    // Every stream opens with a four-byte clientFlags word that nothing on this
-                    // side reads. Whether it reaches the decoder decides the fate of the stream,
-                    // and it evidently does not always, so count both outcomes rather than guess.
-                    mReportedFirstWord = true;
-                    GFXSTREAM_ERROR("STREAM-FIRSTWORD: process=%s word=%u len=%u",
-                                    tInfo->m_processName ? tInfo->m_processName->c_str() : "null",
-                                    firstWord, packetSize);
-                }
-                if (!plausible && !mReportedMisalign) {
-                    mReportedMisalign = true;
-                    const uint8_t* b = (const uint8_t*)readBuf.buf();
-                    const size_t n = std::min<size_t>(readBuf.validData(), 32);
-                    std::string hex;
-                    for (size_t i = 0; i < n; ++i) {
-                        char tmp[4];
-                        snprintf(tmp, sizeof(tmp), "%02x ", b[i]);
-                        hex += tmp;
-                    }
+                    // Not the four-byte case, so nothing here can repair it; say so rather than
+                    // let it present as a host that never answers.
                     GFXSTREAM_ERROR(
-                        "STREAM-MISALIGN: process=%s first word=%u len=%u valid=%zu bytes=[%s]",
-                        tInfo->m_processName ? tInfo->m_processName->c_str() : "null", firstWord,
-                        packetSize, readBuf.validData(), hex.c_str());
+                        "STREAM-MISALIGN: process=%s opens with %u (len %u), which is not an "
+                        "opcode, and the word after it is not one either",
+                        who, firstWord, packetSize);
                 }
             }
             if (!packetSize) {
@@ -554,16 +529,7 @@ intptr_t RenderThread::main() {
                 if (!processResources) {
                     FrameBuffer::getFB()->createGraphicsProcessResources(tInfo->m_puid);
                     processResources = FrameBuffer::getFB()->getProcessResources(tInfo->m_puid);
-                    createdHere = true;
                 }
-                // Which counter this thread ended up on. The sequence numbers are minted by one
-                // per-process counter in the guest, so a counter serving two guest processes can
-                // never satisfy either of them, and that is invisible unless the pairing is said
-                // out loud. One line per render thread, so it stays bounded.
-                GFXSTREAM_ERROR("PROCRES: puid=%llu process=%s counter=%p created=%d",
-                                (unsigned long long)tInfo->m_puid,
-                                tInfo->m_processName ? tInfo->m_processName->c_str() : "null",
-                                (const void*)processResources, createdHere ? 1 : 0);
             }
 
             progress = false;
