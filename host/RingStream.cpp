@@ -324,11 +324,38 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                     // of a packet whose tail the guest never sent. Only the second is a bug and the
                     // two look identical from outside, so say which one this is. The spin count
                     // rate limits it: an idle client says nothing, a stuck one repeats one line.
-                    if (++mParkSpins % 8192 == 0 && mPendingWant > mPendingHave) {
+                    // The wait below blocks on a message channel, so nothing in this loop runs
+                    // again until the guest rings. Anything worth saying has to be said here.
+                    //
+                    // Parking with bytes already in the ring is the lost-doorbell failure and
+                    // cannot happen in a healthy stream: the guest only skips the doorbell when
+                    // this thread claims it is still consuming, and by now it has said otherwise.
+                    // The guest end of it is a thread waiting forever for a reply to a command it
+                    // did send, with its own ring reading empty -- which is what it looks like from
+                    // over there whether the command arrived or not.
+                    const uint32_t availBeforePark =
+                        ring_buffer_available_read(mContext.to_host, 0);
+                    if (availBeforePark > 0) {
+                        ++mParkSpins;
                         GFXSTREAM_ERROR(
-                            "parked waiting for packet tail: opcode=%u want=%u have=%u spins=%llu",
-                            mPendingOpcode, mPendingWant, mPendingHave,
+                            "PARK-WITH-DATA: %u bytes in the ring, pending packet opcode=%u "
+                            "want=%u have=%u, occurrence %llu",
+                            availBeforePark, mPendingOpcode, mPendingWant, mPendingHave,
                             (unsigned long long)mParkSpins);
+                    } else if (mPendingWant > mPendingHave) {
+                        // The other half of the same question: an empty ring but a decoder still
+                        // short of a packet it has already started. That is a guest that wrote a
+                        // header and stopped, and it looks the same from the guest as a reply that
+                        // never came. Once per distinct packet, since the wait that follows can be
+                        // re-entered many times for one of them.
+                        const uint64_t key = ((uint64_t)mPendingOpcode << 32) | mPendingWant;
+                        if (key != mReportedPartial) {
+                            mReportedPartial = key;
+                            GFXSTREAM_ERROR(
+                                "PARK-WITH-PARTIAL: empty ring but holding %u of %u bytes of "
+                                "opcode=%u",
+                                mPendingHave, mPendingWant, mPendingOpcode);
+                        }
                     }
                     const AsgOnUnavailableReadStatus status = mCallbacks.onUnavailableRead();
                     switch (status) {
@@ -363,6 +390,19 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
             }
             continue;
         }
+    }
+
+    // The first bytes this stream ever hands upward. The decoder has been seen starting four
+    // bytes into the first packet, and this says whether they were already gone when the ring
+    // layer produced them or were lost above it.
+    if (mReportedFirstRead < 3 && count > 0) {
+        ++mReportedFirstRead;
+        char hex[3 * 16 + 1];
+        size_t n = count < 16 ? count : 16;
+        for (size_t i = 0; i < n; ++i) snprintf(hex + 3 * i, 4, "%02x ", ((const uint8_t*)buf)[i]);
+        hex[3 * n] = 0;
+        GFXSTREAM_ERROR("RING-FIRSTREAD: read #%u count=%zu bytes=[%s]", mReportedFirstRead,
+                        count, hex);
     }
 
     *inout_len = count;
@@ -408,6 +448,14 @@ void RingStream::type1Read(
             return;
         }
         const char* src = mContext.buffer + xfersPtr[i].offset;
+        // What the guest actually asked to be transferred, for the first few transfers of a
+        // stream. A stream that starts mid-packet has either been given a short transfer or a
+        // late offset, and only these two numbers tell them apart.
+        if (mReportedXfers < 4) {
+            ++mReportedXfers;
+            GFXSTREAM_ERROR("RING-XFER: #%u offset=%u size=%u avail=%u", mReportedXfers,
+                            xfersPtr[i].offset, xfersPtr[i].size, available);
+        }
         memcpy(*current, src, xfersPtr[i].size);
         ring_buffer_advance_read(
                 mContext.to_host, sizeof(struct asg_type1_xfer), 1);

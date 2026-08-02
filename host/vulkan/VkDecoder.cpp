@@ -36,6 +36,8 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#include <chrono>
+#include <thread>
 #include <optional>
 #include <set>
 #include <string>
@@ -127,6 +129,22 @@ size_t VkDecoder::decode(void* buf, size_t bufsize, IOStream* stream,
 // never arrived, or it arrived and the reply did not -- and nothing in the logs distinguished them.
 // One line per distinct pair is bounded, a few hundred at most, and answers it directly: take the
 // opcode the guest is waiting on from its backtrace and look for it here.
+// An opcode with no case falls to default:, which returns without advancing past the packet and
+// without advancing the sequence counter. The render thread then re-reads the same bytes forever
+// and every thread of that process waiting on a later sequence number waits forever with it, so a
+// single unknown opcode silently wedges the whole stream. Nothing said so before this.
+static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32_t packetLen) {
+    static std::mutex sMutex;
+    static std::set<std::pair<std::string, uint32_t>> sSeen;
+    const std::string name = processName ? processName : "null";
+    std::lock_guard<std::mutex> lock(sMutex);
+    if (!sSeen.insert({name, opcode}).second) return;
+    GFXSTREAM_ERROR(
+        "DECODE-UNKNOWN: process=%s opcode=%u packetLen=%u -- no case for this opcode, the stream "
+        "stalls here permanently",
+        name.c_str(), opcode, packetLen);
+}
+
 static void note_opcode_seen(const char* processName, uint32_t opcode) {
     static std::mutex sMutex;
     static std::set<std::pair<std::string, uint32_t>> sSeen;
@@ -279,13 +297,40 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
 #elif (defined(__GNUC__) && defined(__aarch64__))
                         __asm__ __volatile__("yield");
 #endif
-                        if ((++spins & 0xFFFFFFull) == 0) {
+                        // The value being waited for is produced by another render thread of the
+                        // same guest process, so spinning past the point where the wait is short
+                        // takes the core that thread needs to produce it. On a phone with four
+                        // guest CPUs and a render thread per guest process, a KDE session has
+                        // enough waiters to starve its own producers: measured 1.4e11 spins on a
+                        // single wait, several threads at once, a desktop that renders in minutes
+                        // or not at all. GNOME never showed it because it has a fraction of the
+                        // processes.
+                        //
+                        // Keep the pure spin for the common case, where the value is one or two
+                        // packets away and arrives within microseconds, then step aside. Sleeping
+                        // costs nothing here: by this point the wait has already cost far more
+                        // than a wakeup ever will.
+                        if (spins > 4096) {
+                            if (spins < 65536) {
+                                std::this_thread::yield();
+                            } else {
+                                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                            }
+                        }
+                        // Powers of two, not a fixed stride: a thread that never gets unstuck
+                        // otherwise emits thousands of lines a second and flushes the startup
+                        // records -- the ones naming who owns which counter -- out of the ring
+                        // buffer before they can be read. This caps a stuck thread at ~60 lines
+                        // for its whole life while still reporting promptly.
+                        ++spins;
+                        if ((spins & (spins - 1)) == 0) {
                             GFXSTREAM_WARNING(
                                 "seqno loop stuck: want=%u have=%u opcode=%u process=%s "
-                                "thread=0x%x spins=%llu",
+                                "counter=%p thread=0x%x spins=%llu",
                                 seqno, seqnoPtr->load(std::memory_order_seq_cst), opcode,
-                                processName ? processName : "null", getCurrentThreadId(),
-                                (unsigned long long)spins);
+                                processName ? processName : "null",
+                                (const void*)processResources,
+                                getCurrentThreadId(), (unsigned long long)spins);
                         }
                     }
                     m_prevSeqno = seqno;
@@ -23157,6 +23202,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             }
 #endif
             default: {
+                note_unknown_opcode(processName, opcode, packetLen);
                 if (m_snapshotsEnabled) {
                     m_state->snapshot()->destroyApiCallInfoIfUnused(snapshotApiCallHandle);
                 }

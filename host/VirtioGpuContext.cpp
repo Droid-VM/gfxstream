@@ -32,6 +32,8 @@ std::optional<VirtioGpuContext> VirtioGpuContext::Create(RendererPtr renderer,
     context.mHostPipe = std::make_shared<VirtioGpuPipe>(renderer, contextId);
 
     renderer->onGuestGraphicsProcessCreate(contextId);
+    GFXSTREAM_ERROR("CTX: create id=%u name=%s capset=%u", contextId, contextName.c_str(),
+                    capsetId);
 
     return context;
 }
@@ -43,6 +45,7 @@ int VirtioGpuContext::Destroy(const address_space_device_control_ops& asgOps) {
         asgOps.destroy_handle(handle);
     }
 
+    GFXSTREAM_ERROR("CTX: destroy id=%u name=%s", mId, mName.c_str());
     mRenderer->cleanupProcGLObjects(mId);
 
     return 0;
