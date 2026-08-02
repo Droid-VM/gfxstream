@@ -30,6 +30,14 @@ namespace gfxstream {
 // the "to host" ring buffer.
 class RingStream final : public IOStream {
   public:
+    // What the decoder is blocked waiting for, if anything. Set by RenderThread before a read it
+    // expects to block in; the parked path is the only place that can report it, because a decoder
+    // waiting for the tail of a packet never returns to its own loop to notice it is stuck.
+    void setPendingRead(uint32_t opcode, uint32_t want, uint32_t have) {
+        mPendingOpcode = opcode;
+        mPendingWant = want;
+        mPendingHave = have;
+    }
     RingStream(const AsgConsumerCreateInfo& info, size_t bufsize);
     ~RingStream();
 
@@ -79,6 +87,10 @@ class RingStream final : public IOStream {
     size_t mXmits = 0;
     size_t mTotalRecv = 0;
     bool mBenchmarkEnabled = false;
+    uint32_t mPendingOpcode = 0;
+    uint32_t mPendingWant = 0;
+    uint32_t mPendingHave = 0;
+    uint64_t mParkSpins = 0;
     bool mShouldExit = false;
     bool mShouldExitForSnapshot = false;
     bool mInSnapshotOperation = false;

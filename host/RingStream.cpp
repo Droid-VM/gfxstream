@@ -320,6 +320,16 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                     // RENDERING -- so leaving a stale CAN_CONSUME here tells it the host is busy
                     // and no doorbell is needed, while the host waits for exactly that doorbell.
                     *(mContext.host_state) = ASG_HOST_STATE_NEED_NOTIFY;
+                    // A park that never ends is either an idle client or a decoder holding the head
+                    // of a packet whose tail the guest never sent. Only the second is a bug and the
+                    // two look identical from outside, so say which one this is. The spin count
+                    // rate limits it: an idle client says nothing, a stuck one repeats one line.
+                    if (++mParkSpins % 8192 == 0 && mPendingWant > mPendingHave) {
+                        GFXSTREAM_ERROR(
+                            "parked waiting for packet tail: opcode=%u want=%u have=%u spins=%llu",
+                            mPendingOpcode, mPendingWant, mPendingHave,
+                            (unsigned long long)mParkSpins);
+                    }
                     const AsgOnUnavailableReadStatus status = mCallbacks.onUnavailableRead();
                     switch (status) {
                         case AsgOnUnavailableReadStatus::kContinue: {

@@ -376,6 +376,14 @@ intptr_t RenderThread::main() {
         }
         int stat = 0;
         if (packetSize > readBuf.validData()) {
+            // Hand the wait to the stream before entering it. Everything below this line is
+            // unreachable while it blocks, so this is the only chance to record what it is for.
+            if (mRingStream && readBuf.validData() >= 8) {
+                uint32_t pendingOpcode;
+                std::memcpy(&pendingOpcode, readBuf.buf(), sizeof(uint32_t));
+                mRingStream->setPendingRead(pendingOpcode, packetSize,
+                                            static_cast<uint32_t>(readBuf.validData()));
+            }
             stat = readBuf.getData(ioStream, packetSize);
             if (stat <= 0) {
                 if (saveSnapshot(snapshotObjects)) {
