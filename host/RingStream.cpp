@@ -314,10 +314,21 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
 
                 bool sleeping = false;
                 do {
+                    // Whatever this loop does next, it is parked until the guest rings: say so
+                    // every time round. The state word is the only thing the guest has to decide
+                    // whether to ring at all -- it pings when this is neither CAN_CONSUME nor
+                    // RENDERING -- so leaving a stale CAN_CONSUME here tells it the host is busy
+                    // and no doorbell is needed, while the host waits for exactly that doorbell.
+                    *(mContext.host_state) = ASG_HOST_STATE_NEED_NOTIFY;
                     const AsgOnUnavailableReadStatus status = mCallbacks.onUnavailableRead();
                     switch (status) {
                         case AsgOnUnavailableReadStatus::kContinue: {
                             *(mContext.host_state) = ASG_HOST_STATE_CAN_CONSUME;
+                            // And stop sleeping. Without this the loop keeps calling
+                            // onUnavailableRead forever once any call has returned kSleep: a
+                            // later kContinue means "go read again", but sleeping stays set, so
+                            // the read never happens and the state is left saying CAN_CONSUME.
+                            sleeping = false;
                             break;
                         }
                         case AsgOnUnavailableReadStatus::kExit: {
