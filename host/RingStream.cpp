@@ -364,6 +364,16 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                     // over there whether the command arrived or not.
                     const uint32_t availBeforePark =
                         ring_buffer_available_read(mContext.to_host, 0);
+                    // Where this stream got to. A guest thread waiting forever for a reply is the
+                    // same picture from over there whether its command was never decoded or was
+                    // decoded and answered into the void; this is the number that separates them.
+                    // A thread that parks once and stays there never reaches a periodic
+                    // limit, so always report the first few.
+                    if (++mParkReports <= 3 || (mParkReports & 0xFF) == 0) {
+                        GFXSTREAM_WARNING(
+                            "PARK-STATE: decoded %llu packets, last opcode=%u, ring has %u bytes",
+                            (unsigned long long)mDecodedCount, mLastDecoded, availBeforePark);
+                    }
                     if (availBeforePark > 0) {
                         ++mParkSpins;
                         GFXSTREAM_ERROR(
@@ -464,6 +474,15 @@ void RingStream::type1Read(
             return;
         }
         const char* src = mContext.buffer + xfersPtr[i].offset;
+        if (mReportedXfers < 3) {
+            ++mReportedXfers;
+            char hex[3 * 12 + 1];
+            uint32_t n = xfersPtr[i].size < 12 ? xfersPtr[i].size : 12;
+            for (uint32_t k = 0; k < n; ++k) snprintf(hex + 3 * k, 4, "%02x ", (uint8_t)src[k]);
+            hex[3 * n] = 0;
+            GFXSTREAM_ERROR("HOST-XFER #%u: offset=%u size=%u bytes=[%s]", mReportedXfers,
+                            xfersPtr[i].offset, xfersPtr[i].size, hex);
+        }
         memcpy(*current, src, xfersPtr[i].size);
         ring_buffer_advance_read(
                 mContext.to_host, sizeof(struct asg_type1_xfer), 1);

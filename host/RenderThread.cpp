@@ -334,16 +334,20 @@ intptr_t RenderThread::main() {
         // Not loading from a snapshot: continue regular startup, read
         // the |flags|.
         uint32_t flags = 0;
-        while (ioStream->read(&flags, sizeof(flags)) != sizeof(flags)) {
+        size_t got;
+        while ((got = ioStream->read(&flags, sizeof(flags))) != sizeof(flags)) {
             // Stream read may fail because of a pending snapshot.
             if (!saveSnapshot(snapshotObjects)) {
-                // A render thread that leaves this loop stops replying, and every guest thread waiting on a
-    // synchronous call it was serving waits forever with a drained ring and no error anywhere.
-    // That is indistinguishable from a slow host unless the exit itself is announced.
-    GFXSTREAM_ERROR("RTEXIT: render thread for process=%s ctx=%u is leaving its decode loop",
-                    tInfo->m_processName ? tInfo->m_processName->c_str() : "null", mContextId);
-
-    setFinished();
+                // Giving up here means this thread never decodes anything and never replies, so
+                // every guest thread that ever asks it a synchronous question waits forever --
+                // with a drained ring and no error on either side. Say so, and say what the read
+                // returned, because the guest cannot tell this apart from a host that is merely
+                // slow.
+                GFXSTREAM_ERROR(
+                    "RTEXIT-EARLY: ctx=%u gave up on the opening handshake: read returned %zu of "
+                    "%zu bytes; this thread will never answer",
+                    mContextId, got, sizeof(flags));
+                setFinished();
                 tInfo.reset();
                 waitForExitSignal();
                 GFXSTREAM_DEBUG("Exited a RenderThread @%p early", this);
@@ -365,12 +369,14 @@ intptr_t RenderThread::main() {
 
     const ProcessResources* processResources = nullptr;
     bool anyProgress = false;
+    uint32_t headerOpcode = 0;
     while (true) {
         // Let's make sure we read enough data for at least some processing.
         uint32_t packetSize;
         if (readBuf.validData() >= 8) {
             // We know that packet size is the second uint32_t from the start.
             std::memcpy(&packetSize, readBuf.buf() + 4, sizeof(uint32_t));
+            std::memcpy(&headerOpcode, readBuf.buf(), sizeof(uint32_t));
             // Resynchronise once, on the first header of the stream. Every connection opens
             // with a four-byte clientFlags word that the guest sends unconditionally and that
             // nothing on this side reads; whether it reaches this decoder is a race with the ring
@@ -560,6 +566,7 @@ intptr_t RenderThread::main() {
                             "Processed some Vulkan packets without process resources created. "
                             "That's problematic.");
                     }
+                    if (mRingStream) mRingStream->noteDecoded(headerOpcode);
                     readBuf.consume(last);
                     progress = true;
                 }

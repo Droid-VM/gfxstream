@@ -32,6 +32,9 @@ std::optional<VirtioGpuContext> VirtioGpuContext::Create(RendererPtr renderer,
     context.mHostPipe = std::make_shared<VirtioGpuPipe>(renderer, contextId);
 
     renderer->onGuestGraphicsProcessCreate(contextId);
+    // Which guest process a context belongs to. Once per context, and the only way to put a name
+    // to a render thread that fails before it learns one.
+    GFXSTREAM_WARNING("CTX: id=%u name=%s", contextId, contextName.c_str());
 
     return context;
 }

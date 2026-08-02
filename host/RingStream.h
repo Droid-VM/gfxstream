@@ -33,6 +33,14 @@ class RingStream final : public IOStream {
     // What the decoder is blocked waiting for, if anything. Set by RenderThread before a read it
     // expects to block in; the parked path is the only place that can report it, because a decoder
     // waiting for the tail of a packet never returns to its own loop to notice it is stuck.
+    // The last packet this stream's decoder finished, and how many it has finished. Two stores
+    // on the decode path and the only way to tell a command that never arrived from one that was
+    // handled without a reply.
+    void noteDecoded(uint32_t opcode) {
+        mLastDecoded = opcode;
+        ++mDecodedCount;
+    }
+
     void setPendingRead(uint32_t opcode, uint32_t want, uint32_t have) {
         mPendingOpcode = opcode;
         mPendingWant = want;
@@ -92,6 +100,10 @@ class RingStream final : public IOStream {
     uint32_t mPendingHave = 0;
     uint64_t mParkSpins = 0;
     uint64_t mReportedPartial = 0;
+    uint32_t mReportedXfers = 0;
+    uint32_t mLastDecoded = 0;
+    uint64_t mDecodedCount = 0;
+    uint64_t mParkReports = 0;
     bool mShouldExit = false;
     bool mShouldExitForSnapshot = false;
     bool mInSnapshotOperation = false;

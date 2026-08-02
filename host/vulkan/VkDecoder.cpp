@@ -23192,6 +23192,13 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
 #endif
             default: {
                 note_unknown_opcode(processName, opcode, packetLen);
+                // Returning here without consuming the packet leaves the caller to read one more
+                // byte and decode the same bytes again, forever, at a hundred percent of a core --
+                // and because this path never advances the sequence counter, every other thread of
+                // the same guest process then waits on a number that will never arrive. One
+                // undecodable packet took the whole process down and said nothing while doing it.
+                // Ending the stream is not a repair, but it is a failure the guest can observe.
+                shouldExit.store(true, std::memory_order_relaxed);
                 if (m_snapshotsEnabled) {
                     m_state->snapshot()->destroyApiCallInfoIfUnused(snapshotApiCallHandle);
                 }
