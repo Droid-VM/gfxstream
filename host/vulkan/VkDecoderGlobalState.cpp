@@ -263,6 +263,15 @@ struct SubmitStageProfile {
     }
 };
 
+// Per-image tracing. It is what identified the zink scanout path and is worth keeping, but it
+// writes to an unbuffered stderr on every image creation and every memory bind -- a write(2) each,
+// on the host's Vulkan hot path, three and a half thousand lines out of four thousand in one
+// desktop session. Off unless asked for.
+static bool zcTraceEnabled() {
+    static const bool on = getenv("GFXSTREAM_ZC_TRACE") != nullptr;
+    return on;
+}
+
 class VkDecoderGlobalState::Impl {
    public:
     Impl(VkEmulation* emulation)
@@ -3182,7 +3191,7 @@ class VkDecoderGlobalState::Impl {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
-        {
+        if (zcTraceEnabled()) {
             bool hasExtMem = vk_find_struct<VkExternalMemoryImageCreateInfo>(pCreateInfo) != nullptr;
             bool hasModList = false, hasModExplicit = false;
             for (const VkBaseInStructure* s = (const VkBaseInStructure*)pCreateInfo->pNext; s;
@@ -3287,7 +3296,7 @@ class VkDecoderGlobalState::Impl {
              pCreateInfo->tiling == VK_IMAGE_TILING_OPTIMAL) &&
             !nativeBufferANDROID) {
             const auto* extMem = vk_find_struct<VkExternalMemoryImageCreateInfo>(pCreateInfo);
-            if (extMem) {
+            if (extMem && zcTraceEnabled()) {
                 fprintf(stderr, "ZC-CREATEIMG: extMem handleTypes=0x%x tiling=%d\n",
                         (unsigned)extMem->handleTypes, (int)pCreateInfo->tiling);
             }
@@ -3351,10 +3360,12 @@ class VkDecoderGlobalState::Impl {
                 zcModCreateInfo.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
                 zcModCreateInfo.pNext = &zcExtMem;
                 pCreateInfo = &zcModCreateInfo;
-                fprintf(stderr,
-                        "ZC-CREATEIMG: converted guest image to DRM_MODIFIER LINEAR (dmabuf-only) "
-                        "rowPitch=%llu\n",
-                        (unsigned long long)zcPlaneLayout.rowPitch);
+                if (zcTraceEnabled()) {
+                    fprintf(stderr,
+                            "ZC-CREATEIMG: converted guest image to DRM_MODIFIER LINEAR "
+                            "(dmabuf-only) rowPitch=%llu\n",
+                            (unsigned long long)zcPlaneLayout.rowPitch);
+                }
             }
         }
 
@@ -3573,10 +3584,14 @@ class VkDecoderGlobalState::Impl {
         auto vk = dispatch_VkDevice(boxed_device);
 
         VALIDATE_REQUIRED_HANDLE(memory);
-        fprintf(stderr, "ZC-BIND: before vkBindImageMemory image=%p memory=%p offset=%llu\n",
-                (void*)image, (void*)memory, (unsigned long long)memoryOffset);
+        if (zcTraceEnabled()) {
+            fprintf(stderr, "ZC-BIND: before vkBindImageMemory image=%p memory=%p offset=%llu\n",
+                    (void*)image, (void*)memory, (unsigned long long)memoryOffset);
+        }
         VkResult result = vk->vkBindImageMemory(device, image, memory, memoryOffset);
-        fprintf(stderr, "ZC-BIND: after vkBindImageMemory res=%d\n", (int)result);
+        if (zcTraceEnabled()) {
+            fprintf(stderr, "ZC-BIND: after vkBindImageMemory res=%d\n", (int)result);
+        }
         if (result != VK_SUCCESS) {
             return result;
         }
