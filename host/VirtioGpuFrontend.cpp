@@ -185,26 +185,28 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
     //
     // Reset here rather than on destroy: the counter is shared by every render thread of a live
     // process, and clearing it when one context closes killed a running kwin.
-    // Create it here rather than waiting for the first render thread to do it lazily: at this
-    // point there is nothing to reset yet, which is why an earlier version of this logged nothing
-    // at all. Creating is idempotent, so this either makes the counter that was missing or leaves
-    // the stale one in place for the store below. The object itself is never freed here -- live
-    // render threads hold raw pointers to it, and dropping it under them is what took the VM down
-    // when this was attempted on the destroy side.
-    FrameBuffer::getFB()->createGraphicsProcessResources(contextId);
-    if (const ProcessResources* resources = FrameBuffer::getFB()->getProcessResources(contextId)) {
-        if (std::atomic<uint32_t>* counter = resources->getSequenceNumberPtr()) {
-            const uint32_t stale = counter->exchange(0, std::memory_order_seq_cst);
-            fprintf(stderr, "SEQNO-RESET: context %u had count %u\n", contextId, stale);
-        } else {
-            fprintf(stderr, "SEQNO-RESET: context %u has resources but no counter\n", contextId);
-        }
-    } else {
-        // Unconditional, because "nothing printed" had two explanations and only one of them is
-        // a bug: a counter that was already zero needs no reset, a counter that cannot be found
-        // means the reset is aimed at the wrong key.
-        fprintf(stderr, "SEQNO-RESET: no process resources for context %u\n", contextId);
+    // Give this context a sequence counter of its own.
+    //
+    // The counter is keyed on the context id, and ids are recycled -- context 4 goes to one
+    // kwin_wayland and then to its replacement. Zeroing the existing one is not enough: the
+    // previous occupant's packets are still in flight and get decoded after the new context
+    // exists, driving the shared counter to thousands while the new process starts numbering from
+    // one. Its first packet then waits for a value that went by long ago, its main thread blocks
+    // on its first Vulkan call, it stops serving Wayland, and plasmashell sits in
+    // wl_display_roundtrip_queue until systemd gives up on the session. Measured as
+    // "want=30 have=19372 process=kwin_wayland" against a counter that was zero when this context
+    // was created.
+    //
+    // So hand the old object to the stragglers and start the new occupant on a fresh one. The old
+    // one is deliberately kept alive rather than freed: render threads hold raw pointers into it,
+    // and freeing it under them is what took the VM down when this was attempted from the destroy
+    // side. One small object per context re-creation, a few dozen over a session.
+    if (auto stale = FrameBuffer::getFB()->removeGraphicsProcessResources(contextId)) {
+        fprintf(stderr, "SEQNO-FORK: context %u re-created; retiring its old counter\n", contextId);
+        mRetiredProcessResources.push_back(std::move(stale));
     }
+    FrameBuffer::getFB()->createGraphicsProcessResources(contextId);
+
     return 0;
 }
 

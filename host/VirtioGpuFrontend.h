@@ -33,6 +33,7 @@ extern "C" {
 #include "VirtioGpuResource.h"
 #include "VirtioGpuTimelines.h"
 #include "gfxstream/host/Features.h"
+#include "gfxstream/host/ProcessResources.h"
 #include "render-utils/Renderer.h"
 
 namespace gfxstream {
@@ -154,6 +155,10 @@ class VirtioGpuFrontend {
     //
     // LINT.IfChange(virtio_gpu_frontend)
     std::unordered_map<VirtioGpuContextId, VirtioGpuContext> mContexts;
+    // Sequence counters belonging to context ids that have since been handed to a new occupant.
+    // Kept alive rather than freed: the previous occupant's render threads still hold raw
+    // pointers into them, and dropping one under a live thread takes the VM down.
+    std::vector<std::unique_ptr<ProcessResources>> mRetiredProcessResources;
     std::unordered_map<VirtioGpuResourceId, VirtioGpuResource> mResources;
     std::unordered_map<uint64_t, std::shared_ptr<SyncDescriptorInfo>> mSyncMap;
     // When we wait for gpu or wait for gpu vulkan, the next (and subsequent)
