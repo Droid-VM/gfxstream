@@ -430,10 +430,15 @@ intptr_t RenderThread::main() {
                     // packet boundary.
                     ++mResyncCount;
                     if (mResyncCount <= 3 || (mResyncCount % 64) == 0) {
+                        // The opcode that was decoded immediately before this: a stray word at
+                        // a packet boundary is most likely the tail of the packet in front of it,
+                        // left behind because the guest and the host disagree about that packet's
+                        // length. Naming it is how that disagreement gets found.
                         fprintf(stderr,
                                 "STREAM-RESYNC: process=%s dropped a leading %u before opcode %u "
-                                "(occurrence %llu)\n",
+                                "(after opcode %u, occurrence %llu)\n",
                                 who, headerOpcode, packetSize,
+                                mRingStream ? mRingStream->lastDecoded() : 0,
                                 (unsigned long long)mResyncCount);
                     }
                     readBuf.consume(sizeof(uint32_t));

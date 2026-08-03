@@ -303,17 +303,33 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         const uint32_t have = seqnoPtr->load(std::memory_order_seq_cst);
                         const int32_t delta = static_cast<int32_t>(seqno - have);
                         if (delta == 1) break;
-                        if (delta <= 0) {
-                            // The counter is already at or past this packet's slot: nothing to
-                            // wait for, and nothing to repair.
-                            break;
-                        }
+                        // Waiting is the mechanism; only a proven stall justifies touching the
+                        // counter. Letting a packet through the moment the counter looks wrong --
+                        // which an earlier version did whenever the counter was ahead -- removes
+                        // ordering entirely for that process, and ordering is the only reason
+                        // this counter exists. Both repairs below therefore happen after seconds
+                        // of nothing moving, never on sight.
                         if (spins > 65536 && std::chrono::steady_clock::now() > seqnoDeadline) {
-                            fprintf(stderr,
-                                    "SEQNO-REPAIR: counter stuck at %u, packet needs %u "
-                                    "(opcode=%u process=%s) -- an increment was lost; advancing "
-                                    "the counter rather than waiting forever\n",
-                                    have, seqno, opcode, processName ? processName : "null");
+                            if (delta > 1) {
+                                fprintf(stderr,
+                                        "SEQNO-REPAIR: counter stuck at %u, packet needs %u "
+                                        "(opcode=%u process=%s) -- an increment was lost; "
+                                        "advancing the counter rather than waiting forever\n",
+                                        have, seqno, opcode, processName ? processName : "null");
+                            } else {
+                                // The counter is ahead of this packet. The counter is keyed by
+                                // guest process id but sequence numbers restart at zero in every
+                                // new guest process, so this is a process that has taken over a
+                                // puid its predecessor left high. Rebase onto the new numbering --
+                                // after the stall, never on sight, because doing it immediately
+                                // rewinds a counter a live process is already past and takes the
+                                // VM down with it.
+                                fprintf(stderr,
+                                        "SEQNO-REBASE: counter at %u is ahead of packet %u "
+                                        "(opcode=%u process=%s) -- new process on a reused id; "
+                                        "rebasing onto its numbering\n",
+                                        have, seqno, opcode, processName ? processName : "null");
+                            }
                             seqnoPtr->store(seqno - 1, std::memory_order_seq_cst);
                             break;
                         }

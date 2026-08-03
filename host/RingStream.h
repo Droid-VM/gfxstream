@@ -102,6 +102,11 @@ class RingStream final : public IOStream {
     uint64_t mReportedPartial = 0;
     uint32_t mReportedXfers = 0;
     uint32_t mLastDecoded = 0;
+
+   public:
+    uint32_t lastDecoded() const { return mLastDecoded; }
+
+   private:
     uint64_t mDecodedCount = 0;
     uint64_t mParkReports = 0;
     bool mShouldExit = false;
