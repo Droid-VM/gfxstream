@@ -436,11 +436,19 @@ intptr_t RenderThread::main() {
         if (packetSize > readBuf.validData()) {
             // Hand the wait to the stream before entering it. Everything below this line is
             // unreachable while it blocks, so this is the only chance to record what it is for.
-            if (mRingStream && readBuf.validData() >= 8) {
-                uint32_t pendingOpcode;
-                std::memcpy(&pendingOpcode, readBuf.buf(), sizeof(uint32_t));
-                mRingStream->setPendingRead(pendingOpcode, packetSize,
-                                            static_cast<uint32_t>(readBuf.validData()));
+            if (mRingStream) {
+                // Always, including the case below eight bytes. Leaving the previous packet's
+                // values in place made every park after a completed packet look like a decoder
+                // stranded mid-packet -- the report fired on a healthy stream waiting for its
+                // next header, which is the most ordinary thing a stream does.
+                if (readBuf.validData() >= 8) {
+                    uint32_t pendingOpcode;
+                    std::memcpy(&pendingOpcode, readBuf.buf(), sizeof(uint32_t));
+                    mRingStream->setPendingRead(pendingOpcode, packetSize,
+                                                static_cast<uint32_t>(readBuf.validData()));
+                } else {
+                    mRingStream->setPendingRead(0, 0, 0);
+                }
             }
             stat = readBuf.getData(ioStream, packetSize);
             if (stat <= 0) {
