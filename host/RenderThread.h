@@ -118,6 +118,9 @@ class RenderThread : public gfxstream::base::Thread {
     bool mResyncChecked = false;
     bool mDecodeStallReported = false;
     bool mResynced = false;
+    bool mMisalignReported = false;
+    uint64_t mResyncCount = 0;
+    bool mVkDeclineReported = false;
     uint32_t mCapsetId = 0;
     // If we need to reload process resources.
     // This happens in snapshot testing where we don't snapshot render threads.

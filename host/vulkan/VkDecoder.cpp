@@ -139,10 +139,12 @@ static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32
     const std::string name = processName ? processName : "null";
     std::lock_guard<std::mutex> lock(sMutex);
     if (!sSeen.insert({name, opcode}).second) return;
-    GFXSTREAM_ERROR(
-        "DECODE-UNKNOWN: process=%s opcode=%u packetLen=%u -- no case for this opcode, the stream "
-        "stalls here permanently",
-        name.c_str(), opcode, packetLen);
+    // fprintf, not GFXSTREAM_ERROR: crosvm sets the gfxstream log level so that neither warnings
+    // nor errors are emitted, and a diagnostic nobody can read is the same as no diagnostic.
+    fprintf(stderr,
+            "DECODE-UNKNOWN: process=%s opcode=%u packetLen=%u -- no case for this opcode, the "
+            "stream stalls here permanently\n",
+            name.c_str(), opcode, packetLen);
 }
 
 

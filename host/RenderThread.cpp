@@ -404,41 +404,47 @@ intptr_t RenderThread::main() {
             // Only the first header of a stream is eligible, and only when the word that follows
             // is itself a valid opcode, so a healthy stream can never take this path -- and past
             // that first header this costs nothing at all.
-            if (!mResyncChecked && readBuf.validData() >= 8) {
-                // headerOpcode and packetSize are the two words this decoder is about to trust.
-                // Eight bytes is all it takes to tell whether they are a header or a header
-                // shifted by the four-byte clientFlags word: asking for twelve meant the check
-                // could not run until after the decision to block on packetSize had already been
-                // made, and a decoder that commits to a 20013-byte body never returns to the top
-                // of this loop to be rescued. Latch only once a plausible header has been seen,
-                // so a stream that opens with a short read still gets checked on the next pass.
+            if (readBuf.validData() >= 8) {
+                // Every packet boundary, not just the first. A stream can pick up a stray
+                // four-byte clientFlags word at any point -- the guest writes one per stream it
+                // opens, and a decoder that is handed one mid-stream reads it as an opcode and
+                // the real opcode as a length, then waits for a twenty-thousand-byte body that
+                // will never come. Latching this check to the first header meant eleven such
+                // stalls in one boot went unrepaired, which is a KDE session that never draws.
+                //
+                // Safe to run at every boundary: a healthy header always begins with a valid
+                // opcode, so the repair below cannot trigger on one. Zero in particular is never
+                // an opcode.
                 const char* who = tInfo->m_processName ? tInfo->m_processName->c_str() : "null";
                 if (plausibleOpcode(headerOpcode)) {
-                    mResyncChecked = true;
-                    fprintf(stderr,
-                            "STREAM-FIRST: process=%s opcode=%u len=%u valid=%u ring=%d\n", who,
-                            headerOpcode, packetSize, (unsigned)readBuf.validData(),
-                            mRingStream ? 1 : 0);
+                    if (!mResyncChecked) {
+                        mResyncChecked = true;
+                        fprintf(stderr,
+                                "STREAM-FIRST: process=%s opcode=%u len=%u valid=%u ring=%d\n",
+                                who, headerOpcode, packetSize, (unsigned)readBuf.validData(),
+                                mRingStream ? 1 : 0);
+                    }
                 } else if (plausibleOpcode(packetSize)) {
-                    // The stream began four bytes before its first packet: what is being read as
-                    // an opcode is the clientFlags word, and what is being read as a length is the
-                    // real opcode. Drop the four bytes and the stream is back on a packet
-                    // boundary; leave them and the guest thread that made the call waits for a
-                    // reply forever, with an empty ring and no error on either side.
-                    mResyncChecked = true;
-                    fprintf(stderr,
-                            "STREAM-RESYNC: process=%s dropped a leading %u; the stream began "
-                            "four bytes before its first packet\n",
-                            who, headerOpcode);
+                    // What is being read as an opcode is the stray word; what is being read as a
+                    // length is the real opcode. Drop four bytes and the stream is back on a
+                    // packet boundary.
+                    ++mResyncCount;
+                    if (mResyncCount <= 3 || (mResyncCount % 64) == 0) {
+                        fprintf(stderr,
+                                "STREAM-RESYNC: process=%s dropped a leading %u before opcode %u "
+                                "(occurrence %llu)\n",
+                                who, headerOpcode, packetSize,
+                                (unsigned long long)mResyncCount);
+                    }
                     readBuf.consume(sizeof(uint32_t));
                     mResynced = true;
                     anyProgress = true;
                     continue;
-                } else if (readBuf.validData() >= 12) {
-                    // Neither word is an opcode and there is enough data that more will not
-                    // help. Nothing here can repair that, but say so rather than let it present
-                    // as a host that never answers.
-                    mResyncChecked = true;
+                } else if (readBuf.validData() >= 12 && !mMisalignReported) {
+                    // Neither word is an opcode and more data will not help. Nothing here can
+                    // repair that, but say so rather than let it present as a host that never
+                    // answers.
+                    mMisalignReported = true;
                     fprintf(stderr,
                             "STREAM-MISALIGN: process=%s opens with %u (len %u), which is not an "
                             "opcode, and the word after it is not one either\n",
@@ -611,6 +617,17 @@ intptr_t RenderThread::main() {
                 };
                 last = tInfo->m_vkInfo->m_vkDec.decode(readBuf.buf(), readBuf.validData(), ioStream,
                                                       processResources, context);
+                // A complete packet the Vulkan decoder declined. Everything downstream of this
+                // reads as "the host never answered", so name it here with the two things that
+                // decide whether the decoder could have run at all.
+                if (last == 0 && readBuf.validData() >= packetSize && packetSize >= 8 &&
+                    !mVkDeclineReported) {
+                    mVkDeclineReported = true;
+                    fprintf(stderr,
+                            "VKDEC-DECLINED: opcode=%u len=%u valid=%u procRes=%d puid=%u\n",
+                            headerOpcode, packetSize, (unsigned)readBuf.validData(),
+                            processResources ? 1 : 0, (unsigned)tInfo->m_puid);
+                }
                 if (last > 0) {
                     if (!processResources) {
                         GFXSTREAM_ERROR(
