@@ -109,6 +109,7 @@ class VkDecoder::Impl {
     // before whatever follows it -- and the difference is the whole point when tracking down
     // which packet leaves bytes behind.
     uint32_t mLastOpcode = 0;
+    uint32_t mEarlyPacketsLogged = 0;
     bool m_queueSubmitWithCommandsEnabled = false;
     const bool m_snapshotsEnabled = false;
 };
@@ -249,6 +250,10 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             processResources ? processResources->getSequenceNumberPtr() : nullptr;
 
         std::optional<uint32_t> thisPacketSeqno;
+        const uint32_t counterBeforePacket =
+            processResources && processResources->getSequenceNumberPtr()
+                ? processResources->getSequenceNumberPtr()->load(std::memory_order_seq_cst)
+                : 0u;
         if (m_queueSubmitWithCommandsEnabled &&
             ((opcode >= OP_vkFirst && opcode < OP_vkLast) ||
              (opcode >= OP_vkFirst_old && opcode < OP_vkLast_old))) {
@@ -23332,6 +23337,20 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         decoderProfileEnd(opcode, profileStart);
         ++profilePackets;
 
+        // The first few packets of a decoder, with what the counter did across each one. The
+        // stall that matters is "want=1 have=1" on kwin's very first Vulkan call: the counter is
+        // one ahead before that packet is even processed, so something incremented it with no
+        // packet of its own. Print opcode, whether a sequence number was read, and the counter on
+        // both sides, and whatever did it has to appear in these eight lines.
+        if (mEarlyPacketsLogged < 8) {
+            ++mEarlyPacketsLogged;
+            fprintf(stderr,
+                    "PKT#%u: opcode=%u len=%u seqno=%s counter=%u->%u\n", mEarlyPacketsLogged,
+                    opcode, packetLen,
+                    thisPacketSeqno ? std::to_string(*thisPacketSeqno).c_str() : "none",
+                    counterBeforePacket,
+                    seqnoPtr ? seqnoPtr->load(std::memory_order_seq_cst) : 0u);
+        }
         mLastOpcode = opcode;
         ptr += packetLen;
         vkStream->clearPool();
