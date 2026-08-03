@@ -141,6 +141,21 @@ size_t VkDecoder::decode(void* buf, size_t bufsize, IOStream* stream,
 // without advancing the sequence counter. The render thread then re-reads the same bytes forever
 // and every thread of that process waiting on a later sequence number waits forever with it, so a
 // single unknown opcode silently wedges the whole stream. Nothing said so before this.
+// Off by default. Every variant of "repair the counter" has had a side effect of its own -- one
+// let packets run out of order and composited black, two rewound a counter under a live process
+// and took the VM down -- so the baseline has to be the upstream behaviour (wait, and keep
+// waiting) with the escape available for comparison rather than always armed.
+// GFXSTREAM_SEQNO_REPAIR=1 turns it on.
+static bool seqnoRepairEnabled() {
+    static std::once_flag once;
+    static bool on = false;
+    std::call_once(once, [] {
+        const char* v = getenv("GFXSTREAM_SEQNO_REPAIR");
+        on = v && v[0] && v[0] != '0';
+    });
+    return on;
+}
+
 static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32_t packetLen) {
     static std::mutex sMutex;
     static std::set<std::pair<std::string, uint32_t>> sSeen;
@@ -317,7 +332,8 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         // ordering entirely for that process, and ordering is the only reason
                         // this counter exists. Both repairs below therefore happen after seconds
                         // of nothing moving, never on sight.
-                        if (spins > 65536 && std::chrono::steady_clock::now() > seqnoDeadline) {
+                        if (seqnoRepairEnabled() && spins > 65536 &&
+                            std::chrono::steady_clock::now() > seqnoDeadline) {
                             if (delta > 1) {
                                 fprintf(stderr,
                                         "SEQNO-REPAIR: counter stuck at %u, packet needs %u "
