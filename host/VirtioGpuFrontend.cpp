@@ -160,6 +160,12 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
 
     GFXSTREAM_DEBUG("ctxid: %u len: %u name: %s", contextId, nlen, contextName.c_str());
 
+    // Whether this path runs at all. The counter reset below has never printed, and the two
+    // explanations -- the id here not being the one a render thread keys on, and this function not
+    // being on the path contexts actually take -- are told apart by whether this line appears.
+    fprintf(stderr, "CTX-CREATE: contextId=%u name=%s\n", contextId,
+            contextName.empty() ? "(none)" : contextName.c_str());
+
     auto contextOpt = VirtioGpuContext::Create(mRenderer, contextId, contextName, contextInit);
     if (!contextOpt) {
         GFXSTREAM_ERROR("Failed to create context %u.", contextId);
@@ -189,12 +195,15 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
     if (const ProcessResources* resources = FrameBuffer::getFB()->getProcessResources(contextId)) {
         if (std::atomic<uint32_t>* counter = resources->getSequenceNumberPtr()) {
             const uint32_t stale = counter->exchange(0, std::memory_order_seq_cst);
-            if (stale != 0) {
-                fprintf(stderr,
-                        "SEQNO-RESET: context %u reused; dropped a predecessor's count of %u\n",
-                        contextId, stale);
-            }
+            fprintf(stderr, "SEQNO-RESET: context %u had count %u\n", contextId, stale);
+        } else {
+            fprintf(stderr, "SEQNO-RESET: context %u has resources but no counter\n", contextId);
         }
+    } else {
+        // Unconditional, because "nothing printed" had two explanations and only one of them is
+        // a bug: a counter that was already zero needs no reset, a counter that cannot be found
+        // means the reset is aimed at the wrong key.
+        fprintf(stderr, "SEQNO-RESET: no process resources for context %u\n", contextId);
     }
     return 0;
 }
