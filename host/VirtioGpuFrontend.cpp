@@ -200,6 +200,7 @@ int VirtioGpuFrontend::destroyContext(VirtioGpuCtxId contextId) {
     // fds / AHB references that would otherwise leak for the process lifetime.
     ExternalObjectManager::get()->removeContextBlobDescriptorInfos(contextId);
 
+
     mContexts.erase(contextIt);
     return 0;
 }
