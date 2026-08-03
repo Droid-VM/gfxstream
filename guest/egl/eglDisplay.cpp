@@ -139,7 +139,7 @@ bool eglDisplay::initialize(EGLClient_eglInterface *eglIface)
         }
 
         //
-        // Query host reneder and EGL version
+        // Query host renderer and EGL version
         //
         m_hostRendererVersion = rcEnc->rcGetRendererVersion(rcEnc);
         EGLint status = rcEnc->rcGetEGLVersion(rcEnc, &m_major, &m_minor);
@@ -150,7 +150,7 @@ bool eglDisplay::initialize(EGLClient_eglInterface *eglIface)
         }
 
         //
-        // Take minimum version beween what we support and what the host support
+        // Take minimum version between what we support and what the host support
         //
         if (m_major > systemEGLVersionMajor) {
             m_major = systemEGLVersionMajor;
@@ -495,7 +495,7 @@ EGLBoolean eglDisplay::getConfigAttrib(EGLConfig config, EGLint attrib, EGLint *
         *value = EGL_COLOR_COMPONENT_TYPE_FIXED_EXT;
         return EGL_TRUE;
     }
-    //Though it seems that valueFor() is thread-safe, we don't take chanses
+    //Though it seems that valueFor() is thread-safe, we don't take chances
     pthread_mutex_lock(&m_lock);
     EGLBoolean ret =
         getAttribValue(
@@ -531,7 +531,7 @@ EGLBoolean eglDisplay::setAttribValue(EGLConfig config, EGLint attribIdx, EGLint
 
 EGLBoolean eglDisplay::setConfigAttrib(EGLConfig config, EGLint attrib, EGLint value)
 {
-    //Though it seems that valueFor() is thread-safe, we don't take chanses
+    //Though it seems that valueFor() is thread-safe, we don't take chances
     pthread_mutex_lock(&m_lock);
     EGLBoolean ret =
         setAttribValue(

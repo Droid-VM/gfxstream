@@ -75,7 +75,7 @@ public:
     void onDestroySurface(EGLSurface surface);
 
     bool isContext(EGLContext ctx);
-    bool isSurface(EGLSurface ctx);
+    bool isSurface(EGLSurface surface);
 
     // Needs a current context (put this near eglMakeCurrent)
     HostDriverCaps getHostDriverCaps(int majorVersion, int minorVersion);
@@ -84,8 +84,8 @@ private:
     EGLClient_glesInterface *loadGLESClientAPI(const char *libName,
                                                EGLClient_eglInterface *eglIface,
                                                void **libHandle);
-    EGLBoolean getAttribValue(EGLConfig config, EGLint attribIdxi, EGLint * value);
-    EGLBoolean setAttribValue(EGLConfig config, EGLint attribIdxi, EGLint value);
+    EGLBoolean getAttribValue(EGLConfig config, EGLint attribIdx, EGLint * value);
+    EGLBoolean setAttribValue(EGLConfig config, EGLint attribIdx, EGLint value);
     void     processConfigs();
 
 private:
@@ -99,7 +99,7 @@ private:
 
     /* This is the mapping between an attribute name to it's index in any given config */
     std::map<EGLint, EGLint>    m_attribs;
-    /* This is an array of all config's attributes values stored in the following sequencial fasion (read: v[c,a] = the value of attribute <a> of config <c>)
+    /* This is an array of all config's attributes values stored in the following sequential fashion (read: v[c,a] = the value of attribute <a> of config <c>)
      * v[0,0],..,v[0,m_numConfigAttribs-1],
      *...
      * v[m_numConfigs-1,0],..,v[m_numConfigs-1,m_numConfigAttribs-1]

@@ -223,7 +223,7 @@ int VirtioGpuFrontend::destroyContext(VirtioGpuCtxId contextId) {
 template <typename T>
 bool SafeDecode(T& out, const uint8_t* buffer, uint32_t buffer_size) {
     if (buffer_size < sizeof(T)) {
-        GFXSTREAM_ERROR("failed to decode: need %u bytes but have %u bytes)",
+        GFXSTREAM_ERROR("failed to decode: need %zu bytes but have %u bytes",
                         sizeof(T), buffer_size);
         return false;
     }
@@ -535,7 +535,7 @@ int VirtioGpuFrontend::importResource(uint32_t res_handle,
     if (resourceIt == mResources.end()) {
         GFXSTREAM_ERROR(
             "import_data::flags specified STREAM_RENDERER_IMPORT_FLAG_RESOURCE_EXISTS, but "
-            "internal resource does not already exist",
+            "internal resource does not already exist (res_handle: %u)",
             res_handle);
         return -EINVAL;
     }
@@ -793,7 +793,7 @@ void VirtioGpuFrontend::detachResource(uint32_t contextId, uint32_t resourceId) 
 
     auto resourceIt = mResources.find(resourceId);
     if (resourceIt == mResources.end()) {
-        GFXSTREAM_ERROR("failed to attach resource %u to context %u: resource not found.",
+        GFXSTREAM_ERROR("failed to detach resource %u from context %u: resource not found.",
                         resourceId, contextId);
         return;
     }
