@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -111,8 +112,22 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
     auto takeFree = [&pool](uint64_t sz) -> std::shared_ptr<RingBlob> {
         auto it = pool.freeBySize.find(sz);
         if (it == pool.freeBySize.end() || it->second.empty()) return nullptr;
-        std::shared_ptr<RingBlob> blob = std::move(it->second.back());
-        it->second.pop_back();
+
+        // Only a blob nobody else still holds. A resource being dropped puts its RingBlob back
+        // here immediately, but the consumer that was reading it is a separate thread with its own
+        // reference and does not stop just because the resource did. Handing such a blob to a new
+        // context puts two render threads on one ring: the old one goes on consuming, the new one
+        // waits in its opening read for bytes the old one is taking, and neither ever finishes.
+        // Seen directly -- two RING-VIEW lines with the same storage address, two RT-ENTERs, and
+        // only the first HS-DONE.
+        //
+        // use_count()==1 means this vector is the last owner, so the reader is gone. Anything else
+        // stays where it is and is looked at again next time.
+        auto idle = std::find_if(it->second.begin(), it->second.end(),
+                                 [](const std::shared_ptr<RingBlob>& b) { return b.use_count() == 1; });
+        if (idle == it->second.end()) return nullptr;
+        std::shared_ptr<RingBlob> blob = std::move(*idle);
+        it->second.erase(idle);
 
         // Same physical pages as before, and that is the point -- but they still hold the previous
         // ring's header. A recycled blob arrives with the old write and read positions and the old

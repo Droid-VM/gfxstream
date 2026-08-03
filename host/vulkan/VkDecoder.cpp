@@ -23359,7 +23359,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         // one ahead before that packet is even processed, so something incremented it with no
         // packet of its own. Print opcode, whether a sequence number was read, and the counter on
         // both sides, and whatever did it has to appear in these eight lines.
-        if (gfxDiagEnabled() && mEarlyPacketsLogged < 8) {
+        if (gfxDiagEnabled() && mEarlyPacketsLogged < 40) {
             ++mEarlyPacketsLogged;
             fprintf(stderr,
                     "PKT#%u: opcode=%u len=%u seqno=%s counter=%u->%u\n", mEarlyPacketsLogged,
