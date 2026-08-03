@@ -444,6 +444,20 @@ intptr_t RenderThread::main() {
             packetSize = 8;
         }
         if (!anyProgress) {
+            // A whole packet already present and nothing decoded it is not the case this rule
+            // was written for. Asking for one more byte then converts "I am holding a complete
+            // packet the decoder declined" into "I am waiting for a byte the guest will never
+            // send", because the guest is itself waiting for the reply to that very packet --
+            // a park at `have = want - 1` with a correct opcode, and no error on either side.
+            if (readBuf.validData() >= 8 && packetSize >= 8 &&
+                readBuf.validData() >= packetSize && !mDecodeStallReported) {
+                mDecodeStallReported = true;
+                fprintf(stderr,
+                        "DECODE-STALL: whole packet present and undecoded: opcode=%u len=%u "
+                        "valid=%u ring=%d\n",
+                        headerOpcode, packetSize, (unsigned)readBuf.validData(),
+                        mRingStream ? 1 : 0);
+            }
             // If we didn't make any progress last time, then make sure we read at least one
             // extra byte.
             packetSize = std::max(packetSize, static_cast<uint32_t>(readBuf.validData() + 1));

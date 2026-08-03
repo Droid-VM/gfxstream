@@ -116,6 +116,7 @@ class RenderThread : public gfxstream::base::Thread {
     bool mReportedMisalign = false;
     bool mReportedFirstWord = false;
     bool mResyncChecked = false;
+    bool mDecodeStallReported = false;
     uint32_t mCapsetId = 0;
     // If we need to reload process resources.
     // This happens in snapshot testing where we don't snapshot render threads.
