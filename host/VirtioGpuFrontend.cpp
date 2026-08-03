@@ -14,6 +14,8 @@
 
 #include "VirtioGpuFrontend.h"
 
+#include "gfxstream/host/external_object_manager.h"
+
 #ifdef GFXSTREAM_BUILD_WITH_SNAPSHOT_FRONTEND_SUPPORT
 #include <filesystem>
 #include <fcntl.h>
@@ -490,6 +492,14 @@ void VirtioGpuFrontend::unrefResource(uint32_t resourceId) {
     }
 
     resource.Destroy();
+
+    // Drop the guest-blob dma-buf kept for this resource id. Ids are recycled by the guest, so an
+    // entry left here outlives the buffer it names: the next resource to be handed the same id is
+    // imported against its predecessor's pages, the GPU renders into memory nothing scans out,
+    // and the display shows black -- intermittently, depending on whether an id happens to be
+    // reused before it is imported again. Nothing else in the registry has a lifetime, so this is
+    // where it ends.
+    ExternalObjectManager::get()->removeGuestBlobResourceDescriptor(resourceId);
 
     // Gunyah workaround: hand this resource's RingBlob (if any) back to the recycle
     // pool so its backing pages stay alive and can be reused by a later same-size
