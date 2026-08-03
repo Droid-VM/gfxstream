@@ -15,8 +15,11 @@
 
 #include <utility>
 
-#if defined(__ANDROID__)
+#if defined(__linux__) || defined(__ANDROID__)
 #include <unistd.h>
+#endif
+
+#if defined(__ANDROID__)
 
 #include <android/hardware_buffer.h>
 #endif
@@ -190,6 +193,35 @@ std::optional<ExternalHandleInfo> ExternalObjectManager::removeResourceExternalH
     }
 
     return std::nullopt;
+}
+
+void ExternalObjectManager::addGuestBlobResourceDescriptor(uint32_t resHandle, int fd) {
+    if (fd < 0) return;
+    int keep = dup(fd);
+    if (keep < 0) return;
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto found = mGuestBlobResourceFds.find(resHandle);
+    if (found != mGuestBlobResourceFds.end()) {
+        close(found->second);
+        found->second = keep;
+        return;
+    }
+    mGuestBlobResourceFds[resHandle] = keep;
+}
+
+int ExternalObjectManager::dupGuestBlobResourceDescriptor(uint32_t resHandle) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto found = mGuestBlobResourceFds.find(resHandle);
+    if (found == mGuestBlobResourceFds.end()) return -1;
+    return dup(found->second);
+}
+
+void ExternalObjectManager::removeGuestBlobResourceDescriptor(uint32_t resHandle) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto found = mGuestBlobResourceFds.find(resHandle);
+    if (found == mGuestBlobResourceFds.end()) return;
+    close(found->second);
+    mGuestBlobResourceFds.erase(found);
 }
 
 }  // namespace gfxstream

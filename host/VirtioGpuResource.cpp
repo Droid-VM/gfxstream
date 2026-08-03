@@ -536,6 +536,15 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
     } else if (features.ExternalBlob.enabled) {
         if (createBlobArgs->blob_mem == STREAM_BLOB_MEM_GUEST &&
             (createBlobArgs->blob_flags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
+            // Also keyed by resource, not just by blob id. A compositor's scanout buffer is
+            // created here by the gbm/gallium winsys on one virtio context and imported into
+            // Vulkan on another, and the importer can only name the resource -- the blob id is
+            // private to whoever created it. Without this second key the import has nothing to
+            // bind to and falls through to a colour buffer the host never created.
+#if defined(__linux__) || defined(__ANDROID__)
+            ExternalObjectManager::get()->addGuestBlobResourceDescriptor(resourceId,
+                                                                        (int)handle->os_handle);
+#endif
 #if defined(__ANDROID__)
             ExternalObjectManager::get()->addBlobDescriptorInfo(
                 contextId, createBlobArgs->blob_id, handle->os_handle, handle->handle_type, 0,

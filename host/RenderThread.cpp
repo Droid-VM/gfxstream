@@ -334,9 +334,21 @@ intptr_t RenderThread::main() {
     } else {
         // Not loading from a snapshot: continue regular startup, read
         // the |flags|.
+        // Accumulate. read() is "up to n bytes", so re-reading into &flags from the start after
+        // a short read throws away what it already took out of the stream and leaves the decoder
+        // at an arbitrary offset inside the first packet -- which is one of the two misframings
+        // seen on this path (the other being these four bytes not consumed at all). Neither is
+        // repairable downstream once the bytes are gone.
         uint32_t flags = 0;
-        size_t got;
-        while ((got = ioStream->read(&flags, sizeof(flags))) != sizeof(flags)) {
+        size_t got = 0;
+        size_t flagsHave = 0;
+        while (flagsHave < sizeof(flags)) {
+            got = ioStream->read(reinterpret_cast<char*>(&flags) + flagsHave,
+                                 sizeof(flags) - flagsHave);
+            if (got > 0) {
+                flagsHave += got;
+                continue;
+            }
             // Stream read may fail because of a pending snapshot.
             if (!saveSnapshot(snapshotObjects)) {
                 // Giving up here means this thread never decodes anything and never replies, so
@@ -345,9 +357,9 @@ intptr_t RenderThread::main() {
                 // returned, because the guest cannot tell this apart from a host that is merely
                 // slow.
                 GFXSTREAM_ERROR(
-                    "RTEXIT-EARLY: ctx=%u gave up on the opening handshake: read returned %zu of "
-                    "%zu bytes; this thread will never answer",
-                    mContextId, got, sizeof(flags));
+                    "RTEXIT-EARLY: ctx=%u gave up on the opening handshake: read returned %zu, "
+                    "have %zu of %zu bytes; this thread will never answer",
+                    mContextId, got, flagsHave, sizeof(flags));
                 setFinished();
                 tInfo.reset();
                 waitForExitSignal();
@@ -419,6 +431,7 @@ intptr_t RenderThread::main() {
                             "four bytes before its first packet\n",
                             who, headerOpcode);
                     readBuf.consume(sizeof(uint32_t));
+                    mResynced = true;
                     anyProgress = true;
                     continue;
                 } else if (readBuf.validData() >= 12) {
@@ -454,9 +467,9 @@ intptr_t RenderThread::main() {
                 mDecodeStallReported = true;
                 fprintf(stderr,
                         "DECODE-STALL: whole packet present and undecoded: opcode=%u len=%u "
-                        "valid=%u ring=%d\n",
+                        "valid=%u ring=%d resynced=%d\n",
                         headerOpcode, packetSize, (unsigned)readBuf.validData(),
-                        mRingStream ? 1 : 0);
+                        mRingStream ? 1 : 0, (int)mResynced);
             }
             // If we didn't make any progress last time, then make sure we read at least one
             // extra byte.

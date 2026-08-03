@@ -6595,6 +6595,58 @@ class VkDecoderGlobalState::Impl {
         const VkCreateBlobGOOGLE* createBlobInfoPtr =
             vk_find_struct<VkCreateBlobGOOGLE>(pAllocateInfo);
 
+        // A guest-pool blob imported by someone who did not create it. The guest names it the
+        // only way it can -- VkImportColorBufferGOOGLE with the virtio resource -- and there is
+        // no colour buffer behind that number, because the buffer is a gbm bo the winsys made on
+        // another context. That is the compositor's scanout buffer, and refusing it is what kills
+        // kwin two seconds into a session.
+        //
+        // The dma-buf for that resource is on file. Rewrite the request into the guest-blob
+        // import that would have been made had the importer known the blob id: seed the retained
+        // descriptor under a resource-derived id and let the ordinary path below pick it up.
+        VkCreateBlobGOOGLE syntheticBlobInfo = {};
+#if defined(__linux__) || defined(__ANDROID__)
+        if (!createBlobInfoPtr && (importCbInfoPtr || importBufferInfoPtr)) {
+            const uint32_t resHandle =
+                importCbInfoPtr ? importCbInfoPtr->colorBuffer : importBufferInfoPtr->buffer;
+            uint64_t unusedSize = 0;
+            uint32_t unusedTypeIndex = 0;
+            bool unusedDedicated = false;
+            void* unusedMapped = nullptr;
+            const bool known =
+                importCbInfoPtr
+                    ? m_vkEmulation->getColorBufferAllocationInfo(resHandle, &unusedSize,
+                                                                  &unusedTypeIndex,
+                                                                  &unusedDedicated, &unusedMapped)
+                    : m_vkEmulation->getBufferAllocationInfo(resHandle, &unusedSize,
+                                                             &unusedTypeIndex, &unusedDedicated);
+            if (!known) {
+                int fd = ExternalObjectManager::get()->dupGuestBlobResourceDescriptor(resHandle);
+                if (fd >= 0) {
+                    // Distinct from any guest-minted id, which is (pid << 32) | counter.
+                    const uint64_t syntheticId = 0xFFFFFFFF00000000ull | (uint64_t)resHandle;
+                    {
+                        std::lock_guard<std::mutex> lock(mGuestBlobFdsMutex);
+                        auto it = mGuestBlobFds.find(syntheticId);
+                        if (it != mGuestBlobFds.end()) close(it->second);
+                        mGuestBlobFds[syntheticId] = fd;
+                    }
+                    syntheticBlobInfo.sType = VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE;
+                    syntheticBlobInfo.blobMem = STREAM_BLOB_MEM_GUEST;
+                    syntheticBlobInfo.blobFlags = STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE;
+                    syntheticBlobInfo.blobId = syntheticId;
+                    createBlobInfoPtr = &syntheticBlobInfo;
+                    importCbInfoPtr = nullptr;
+                    importBufferInfoPtr = nullptr;
+                    fprintf(stderr,
+                            "GUESTBLOB-REIMPORT: resource=%u bound through its own dma-buf "
+                            "(no colour buffer)\n",
+                            resHandle);
+                }
+            }
+        }
+#endif
+
 #ifdef _WIN32
         VkImportMemoryWin32HandleInfoKHR importWin32HandleInfo{
             VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
