@@ -420,33 +420,14 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             }
         }
 
-        // The invariant this counter needs is "once the packet carrying sequence number S has been
-        // processed, the counter is at least S". As generated that is the joint responsibility of
-        // 383 separate epilogues, one per opcode, while the number itself is read in a single
-        // place above. Any path between the two that never reaches an epilogue -- an opcode with
-        // no case, an early return out of one, a thread that exits mid-packet -- leaves the
-        // counter permanently short, and every thread of that guest process then waits forever for
-        // a value that cannot arrive. An invariant owned by hundreds of sites, whose failure is
-        // unbounded and process-wide, cannot be made reliable by repairing the sites one at a
-        // time.
-        //
-        // So enforce it once, here, on every exit from this packet -- including the early ones.
-        // Monotonic and idempotent: a packet whose epilogue ran normally leaves the counter
-        // already at S and this does nothing; a packet that skipped its epilogue is corrected; and
-        // a packet from a process that restarted its numbering (the counter is keyed by guest
-        // process id, but sequence numbers begin again at zero in every new process) cannot drag
-        // the counter backwards.
-        struct SeqnoFloor {
-            std::atomic<uint32_t>* counter;
-            uint32_t value;
-            ~SeqnoFloor() {
-                if (!counter) return;
-                uint32_t have = counter->load(std::memory_order_seq_cst);
-                while (static_cast<int32_t>(value - have) > 0 &&
-                       !counter->compare_exchange_weak(have, value, std::memory_order_seq_cst)) {
-                }
-            }
-        } seqnoFloor{thisPacketSeqno ? seqnoPtr : nullptr, thisPacketSeqno.value_or(0)};
+        // No floor here. Forcing the counter up to this packet's number on every exit from
+        // this scope looked like enforcing "processed implies counted" in one place, but it fires
+        // for packets that were not processed too -- a decode that returns zero is retried, and by
+        // then the counter has already been pushed past what the retry waits for. The retry then
+        // waits forever: "seqno loop stuck: want=2 have=2", one ahead, on kwin's very first Vulkan
+        // call, which blocks its main thread, which stops it serving Wayland, which leaves
+        // plasmashell in wl_display_roundtrip_queue until systemd gives up on it. A whole desktop,
+        // from a counter one too high.
 
         VkSnapshotApiCallHandle snapshotApiCallHandle = kInvalidSnapshotApiCallHandle;
         if (m_snapshotsEnabled) {
