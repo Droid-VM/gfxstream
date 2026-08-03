@@ -545,6 +545,13 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
             ExternalObjectManager::get()->addGuestBlobResourceDescriptor(resourceId,
                                                                         (int)handle->os_handle);
 #endif
+            // The pairing that lets a scanout be traced back to the memory the GPU was bound to.
+            // The display side knows resources; the allocation side knows blob ids; nothing wrote
+            // down which is which, so "kwin scans out 46/52/62 while the GPU is bound to 39/40/41"
+            // could not be turned into "and 46/52/62 were never bound at all".
+            fprintf(stderr, "GUESTBLOB-CREATE: res=%u blobId=%llu size=%llu\n", resourceId,
+                    (unsigned long long)createBlobArgs->blob_id,
+                    (unsigned long long)createBlobArgs->size);
 #if defined(__ANDROID__)
             ExternalObjectManager::get()->addBlobDescriptorInfo(
                 contextId, createBlobArgs->blob_id, handle->os_handle, handle->handle_type, 0,

@@ -7055,6 +7055,11 @@ class VkDecoderGlobalState::Impl {
         if (emulateHostVisible) {
             if (createBlobInfoPtr && createBlobInfoPtr->blobMem == STREAM_BLOB_MEM_GUEST &&
                 (createBlobInfoPtr->blobFlags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
+                // Pairs with GUESTBLOB-CREATE: this is the memory the GPU will actually render
+                // into, named by the id the display side can be matched against.
+                fprintf(stderr, "GUESTBLOB-BIND: blobId=%llu size=%llu\n",
+                        (unsigned long long)createBlobInfoPtr->blobId,
+                        (unsigned long long)localAllocInfo.allocationSize);
 // DroidVM: the Android host (Gunyah pVM on the phone) DOES use dmabuf for guest-alloc: the guest
 // carves a slice of the host-accessible gfx-guest pool (GpuPoolGuest) and crosvm wraps it in a
 // udmabuf, which we must import here as the VkDeviceMemory backing so the host GPU reads/writes the
