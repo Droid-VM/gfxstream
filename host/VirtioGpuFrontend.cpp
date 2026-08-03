@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <atomic>
+
 #include "VirtioGpuFrontend.h"
 
 #include "gfxstream/host/external_object_manager.h"
@@ -164,6 +166,36 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
         return -EINVAL;
     }
     mContexts[contextId] = std::move(*contextOpt);
+
+    // A context being created is a guest connection with no history, and one guest process is
+    // exactly one virtio context -- so any sequence counter left under this id belongs to a
+    // process that is gone. Start it at zero to match the numbering the new one will send.
+    //
+    // Leaving it is what produces "seqno loop stuck: want=30 have=19372 process=kwin_wayland":
+    // a fresh kwin inheriting its predecessor's count on a recycled id, every one of its packets
+    // waiting for a value that went by long ago. Its main thread blocks on its first Vulkan call,
+    // it stops serving Wayland, plasmashell sits in wl_display_roundtrip_queue until systemd
+    // gives up on it, and the session has no desktop.
+    //
+    // Reset here rather than on destroy: the counter is shared by every render thread of a live
+    // process, and clearing it when one context closes killed a running kwin.
+    // Create it here rather than waiting for the first render thread to do it lazily: at this
+    // point there is nothing to reset yet, which is why an earlier version of this logged nothing
+    // at all. Creating is idempotent, so this either makes the counter that was missing or leaves
+    // the stale one in place for the store below. The object itself is never freed here -- live
+    // render threads hold raw pointers to it, and dropping it under them is what took the VM down
+    // when this was attempted on the destroy side.
+    FrameBuffer::getFB()->createGraphicsProcessResources(contextId);
+    if (const ProcessResources* resources = FrameBuffer::getFB()->getProcessResources(contextId)) {
+        if (std::atomic<uint32_t>* counter = resources->getSequenceNumberPtr()) {
+            const uint32_t stale = counter->exchange(0, std::memory_order_seq_cst);
+            if (stale != 0) {
+                fprintf(stderr,
+                        "SEQNO-RESET: context %u reused; dropped a predecessor's count of %u\n",
+                        contextId, stale);
+            }
+        }
+    }
     return 0;
 }
 
