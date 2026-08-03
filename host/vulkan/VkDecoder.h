@@ -59,6 +59,11 @@ class VkDecoder {
     void setForSnapshotLoad(bool forSnapshotLoad);
     size_t decode(void* buf, size_t bufsize, IOStream* stream,
                   const ProcessResources* processResources, const VkDecoderContext&);
+    // The opcode of the last packet this decoder actually consumed. decode() consumes as many
+    // packets as it can per call, so the caller's own view -- the opcode at the head of the buffer
+    // it handed over -- names the first packet of a batch, not the last one before whatever
+    // follows it.
+    uint32_t lastOpcode() const;
 
    private:
     class Impl;

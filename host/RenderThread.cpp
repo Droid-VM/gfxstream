@@ -650,7 +650,8 @@ intptr_t RenderThread::main() {
                             "Processed some Vulkan packets without process resources created. "
                             "That's problematic.");
                     }
-                    if (mRingStream) mRingStream->noteDecoded(headerOpcode);
+                    if (mRingStream)
+                        mRingStream->noteDecoded(tInfo->m_vkInfo->m_vkDec.lastOpcode());
                     readBuf.consume(last);
                     progress = true;
                 }

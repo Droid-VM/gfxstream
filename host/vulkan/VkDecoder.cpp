@@ -72,6 +72,7 @@ using gfxstream::base::MetricEventDuplicateSequenceNum;
 
 class VkDecoder::Impl {
    public:
+    uint32_t lastOpcode() const { return mLastOpcode; }
     Impl()
         : m_logCalls(gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_LOG_CALLS") == "1"),
           m_vk(vkDispatch()),
@@ -103,6 +104,11 @@ class VkDecoder::Impl {
     BoxedHandleUnwrapMapping m_boxedHandleUnwrapMapping;
     gfxstream::base::BumpPool m_pool;
     std::optional<uint32_t> m_prevSeqno;
+    // The opcode of the last packet actually consumed. decode() takes as many packets as it can
+    // per call, so the caller's own view names the first packet of a batch, not the last one
+    // before whatever follows it -- and the difference is the whole point when tracking down
+    // which packet leaves bytes behind.
+    uint32_t mLastOpcode = 0;
     bool m_queueSubmitWithCommandsEnabled = false;
     const bool m_snapshotsEnabled = false;
 };
@@ -114,6 +120,8 @@ VkDecoder::~VkDecoder() = default;
 void VkDecoder::setForSnapshotLoad(bool forSnapshotLoad) {
     mImpl->setForSnapshotLoad(forSnapshotLoad);
 }
+
+uint32_t VkDecoder::lastOpcode() const { return mImpl->lastOpcode(); }
 
 size_t VkDecoder::decode(void* buf, size_t bufsize, IOStream* stream,
                          const ProcessResources* processResources,
@@ -23307,6 +23315,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         decoderProfileEnd(opcode, profileStart);
         ++profilePackets;
 
+        mLastOpcode = opcode;
         ptr += packetLen;
         vkStream->clearPool();
     }
