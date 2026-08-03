@@ -324,21 +324,26 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                         "(opcode=%u process=%s) -- an increment was lost; "
                                         "advancing the counter rather than waiting forever\n",
                                         have, seqno, opcode, processName ? processName : "null");
+                                seqnoPtr->store(seqno - 1, std::memory_order_seq_cst);
                             } else {
-                                // The counter is ahead of this packet. The counter is keyed by
-                                // guest process id but sequence numbers restart at zero in every
-                                // new guest process, so this is a process that has taken over a
-                                // puid its predecessor left high. Rebase onto the new numbering --
-                                // after the stall, never on sight, because doing it immediately
-                                // rewinds a counter a live process is already past and takes the
-                                // VM down with it.
+                                // The counter is ahead of this packet, so its slot has already
+                                // gone by and there is nothing left to wait for. Let this packet
+                                // through and leave the counter alone.
+                                //
+                                // Not "rebase the counter onto this packet's numbering": that
+                                // rewinds a counter every other thread of a live process is
+                                // already past, and it took the VM down twice -- once when done
+                                // on sight, once when done after the stall.
+                                //
+                                // Not "let it through on sight" either: that removes ordering for
+                                // the whole process the moment the counter looks wrong, and a KDE
+                                // session then composites black. Only after seconds of nothing
+                                // moving, which healthy traffic never reaches.
                                 fprintf(stderr,
-                                        "SEQNO-REBASE: counter at %u is ahead of packet %u "
-                                        "(opcode=%u process=%s) -- new process on a reused id; "
-                                        "rebasing onto its numbering\n",
+                                        "SEQNO-STALE: counter at %u is past packet %u "
+                                        "(opcode=%u process=%s) -- proceeding without it\n",
                                         have, seqno, opcode, processName ? processName : "null");
                             }
-                            seqnoPtr->store(seqno - 1, std::memory_order_seq_cst);
                             break;
                         }
                         if (shouldExit.load(std::memory_order_relaxed)) {
