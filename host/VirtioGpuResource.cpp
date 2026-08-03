@@ -113,7 +113,22 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
         if (it == pool.freeBySize.end() || it->second.empty()) return nullptr;
         std::shared_ptr<RingBlob> blob = std::move(it->second.back());
         it->second.pop_back();
-        return blob;  // same physical pages as before
+
+        // Same physical pages as before, and that is the point -- but they still hold the previous
+        // ring's header. A recycled blob arrives with the old write and read positions and the old
+        // state byte, and whether the session survives then depends on a race: the guest
+        // initialises the ring when it maps the blob, this side attaches when the guest pings, and
+        // nothing orders those two. Attach first and the consumer is looking at a ring that says
+        // it is empty and already consumed, so it waits in the opening four-byte read for bytes
+        // that, as far as its view is concerned, were taken long ago -- and the guest waits for a
+        // reply that will never come.
+        //
+        // Measured: every healthy attach reports write=0 read=0 state=0, the stuck one reported
+        // write=16 read=16 state=1. Hand back pages that say nothing rather than pages that lie.
+        if (void* mem = blob->map()) {
+            memset(mem, 0, blob->size());
+        }
+        return blob;
     };
 
     // DroidVM gfxstream PRE-ALLOC: back the ASG RingBlob from the boot-blessed GpuPool so it is

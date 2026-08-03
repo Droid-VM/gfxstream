@@ -288,6 +288,20 @@ static bool gfxDiagEnabled() {
     return on;
 }
 
+// Microseconds to wait before reading the guest's opening word. A probe, not a fix: the traces
+// that made this failure stop reproducing all sit in this window, so if a plain sleep here has the
+// same effect then the host is simply arriving before the guest is ready, and the question becomes
+// what it should be waiting on instead. GFXSTREAM_STARTUP_DELAY_US, unset means none.
+static unsigned startupDelayUs() {
+    static std::once_flag once;
+    static unsigned us = 0;
+    std::call_once(once, [] {
+        const char* v = getenv("GFXSTREAM_STARTUP_DELAY_US");
+        if (v && v[0]) us = (unsigned)strtoul(v, nullptr, 10);
+    });
+    return us;
+}
+
 static bool plausibleOpcode(uint32_t word) {
     return (word >= 20000 && word < 30000) || (word >= 200000000 && word < 300000000) ||
            (word >= 1000 && word < 20000);
@@ -362,6 +376,7 @@ intptr_t RenderThread::main() {
         // receives the guest's opening bytes. These three markers say which side of the handshake
         // that happens on.
         if (gfxDiagEnabled()) fprintf(stderr, "HS-BEGIN: ctx=%u ring=%d\n", mContextId, mRingStream ? 1 : 0);
+        if (const unsigned d = startupDelayUs()) usleep(d);
         uint32_t flags = 0;
         struct FlagsOut { uint32_t& dst; uint32_t& src; ~FlagsOut() { dst = src; } }
             flagsOut{flagsAfterHandshake, flags};

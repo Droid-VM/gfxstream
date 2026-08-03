@@ -63,6 +63,23 @@ struct asg_context CreateContext(const AsgConsumerCreateInfo& info) {
     context.host_state = reinterpret_cast<asg_host_state*>(&context.to_host->state);
     context.ring_config = reinterpret_cast<asg_ring_config*>(context.to_host->config);
 
+    // What this side thinks the ring is, at the moment it attaches.
+    //
+    // A stuck session shows the host blocked in the opening four-byte read while the guest reports
+    // "ring has 0 bytes, host_state=0" -- but the host writes CAN_CONSUME into host_state before
+    // every read. One field, two values, so the two sides are not looking at the same memory.
+    // These are the numbers that say whether that is true: the storage base this side was handed,
+    // the ring's own read and write positions as it sees them, and the state byte it is about to
+    // write through.
+    if (getenv("GFXSTREAM_DIAG")) {
+        fprintf(stderr,
+                "RING-VIEW: storage=%p to_host=%p state=%p write=%u read=%u stateval=%u "
+                "buffer=%p size=%u\n",
+                (void*)info.ring_storage, (void*)context.to_host, (void*)context.host_state,
+                context.to_host->write_pos, context.to_host->read_pos,
+                (unsigned)*(context.host_state), (void*)context.buffer, info.buffer_size);
+    }
+
     ring_buffer_init_view_only(&context.to_host_large_xfer.view, (uint8_t*)context.buffer,
                                info.buffer_size);
     ring_buffer_init_view_only(&context.from_host_large_xfer.view, (uint8_t*)context.buffer,
