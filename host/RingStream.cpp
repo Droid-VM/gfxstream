@@ -370,17 +370,18 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                     // A thread that parks once and stays there never reaches a periodic
                     // limit, so always report the first few.
                     if (++mParkReports <= 3 || (mParkReports & 0xFF) == 0) {
-                        GFXSTREAM_WARNING(
-                            "PARK-STATE: decoded %llu packets, last opcode=%u, ring has %u bytes",
-                            (unsigned long long)mDecodedCount, mLastDecoded, availBeforePark);
+                        fprintf(stderr,
+                                "PARK-STATE: decoded %llu packets, last opcode=%u, ring has %u "
+                                "bytes\n",
+                                (unsigned long long)mDecodedCount, mLastDecoded, availBeforePark);
                     }
                     if (availBeforePark > 0) {
                         ++mParkSpins;
-                        GFXSTREAM_ERROR(
-                            "PARK-WITH-DATA: %u bytes in the ring, pending packet opcode=%u "
-                            "want=%u have=%u, occurrence %llu",
-                            availBeforePark, mPendingOpcode, mPendingWant, mPendingHave,
-                            (unsigned long long)mParkSpins);
+                        fprintf(stderr,
+                                "PARK-WITH-DATA: %u bytes in the ring, pending packet opcode=%u "
+                                "want=%u have=%u, occurrence %llu\n",
+                                availBeforePark, mPendingOpcode, mPendingWant, mPendingHave,
+                                (unsigned long long)mParkSpins);
                     } else if (mPendingWant > mPendingHave) {
                         // The other half of the same question: an empty ring but a decoder still
                         // short of a packet it has already started. That is a guest that wrote a
@@ -390,10 +391,10 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                         const uint64_t key = ((uint64_t)mPendingOpcode << 32) | mPendingWant;
                         if (key != mReportedPartial) {
                             mReportedPartial = key;
-                            GFXSTREAM_ERROR(
-                                "PARK-WITH-PARTIAL: empty ring but holding %u of %u bytes of "
-                                "opcode=%u",
-                                mPendingHave, mPendingWant, mPendingOpcode);
+                            fprintf(stderr,
+                                    "PARK-WITH-PARTIAL: empty ring but holding %u of %u bytes of "
+                                    "opcode=%u\n",
+                                    mPendingHave, mPendingWant, mPendingOpcode);
                         }
                     }
                     const AsgOnUnavailableReadStatus status = mCallbacks.onUnavailableRead();

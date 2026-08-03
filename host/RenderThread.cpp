@@ -283,6 +283,7 @@ intptr_t RenderThread::main() {
     }
 
     std::unique_ptr<RenderThreadInfo> tInfo = std::make_unique<RenderThreadInfo>();
+    fprintf(stderr, "RT-ENTER: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
     ChecksumCalculatorThreadInfo tChecksumInfo;
     ChecksumCalculator& checksumCalc = tChecksumInfo.get();
     bool needRestoreFromSnapshot = false;
@@ -350,7 +351,7 @@ intptr_t RenderThread::main() {
                 setFinished();
                 tInfo.reset();
                 waitForExitSignal();
-                GFXSTREAM_DEBUG("Exited a RenderThread @%p early", this);
+                fprintf(stderr, "RT-EXIT-EARLY: thread=%p\n", this);
                 return 0;
             }
         }
@@ -391,29 +392,44 @@ intptr_t RenderThread::main() {
             // Only the first header of a stream is eligible, and only when the word that follows
             // is itself a valid opcode, so a healthy stream can never take this path -- and past
             // that first header this costs nothing at all.
-            if (!mResyncChecked && readBuf.validData() >= 12) {
-                mResyncChecked = true;
-                uint32_t firstWord, second;
-                std::memcpy(&firstWord, readBuf.buf(), sizeof(uint32_t));
-                std::memcpy(&second, readBuf.buf() + 4, sizeof(uint32_t));
-                if (!plausibleOpcode(firstWord)) {
-                    const char* who =
-                        tInfo->m_processName ? tInfo->m_processName->c_str() : "null";
-                    if (plausibleOpcode(second)) {
-                        GFXSTREAM_WARNING(
+            if (!mResyncChecked && readBuf.validData() >= 8) {
+                // headerOpcode and packetSize are the two words this decoder is about to trust.
+                // Eight bytes is all it takes to tell whether they are a header or a header
+                // shifted by the four-byte clientFlags word: asking for twelve meant the check
+                // could not run until after the decision to block on packetSize had already been
+                // made, and a decoder that commits to a 20013-byte body never returns to the top
+                // of this loop to be rescued. Latch only once a plausible header has been seen,
+                // so a stream that opens with a short read still gets checked on the next pass.
+                const char* who = tInfo->m_processName ? tInfo->m_processName->c_str() : "null";
+                if (plausibleOpcode(headerOpcode)) {
+                    mResyncChecked = true;
+                    fprintf(stderr,
+                            "STREAM-FIRST: process=%s opcode=%u len=%u valid=%u ring=%d\n", who,
+                            headerOpcode, packetSize, (unsigned)readBuf.validData(),
+                            mRingStream ? 1 : 0);
+                } else if (plausibleOpcode(packetSize)) {
+                    // The stream began four bytes before its first packet: what is being read as
+                    // an opcode is the clientFlags word, and what is being read as a length is the
+                    // real opcode. Drop the four bytes and the stream is back on a packet
+                    // boundary; leave them and the guest thread that made the call waits for a
+                    // reply forever, with an empty ring and no error on either side.
+                    mResyncChecked = true;
+                    fprintf(stderr,
                             "STREAM-RESYNC: process=%s dropped a leading %u; the stream began "
-                            "four bytes before its first packet",
-                            who, firstWord);
-                        readBuf.consume(sizeof(uint32_t));
-                        anyProgress = true;
-                        continue;
-                    }
-                    // Not the four-byte case, so nothing here can repair it; say so rather than
-                    // let it present as a host that never answers.
-                    GFXSTREAM_ERROR(
-                        "STREAM-MISALIGN: process=%s opens with %u (len %u), which is not an "
-                        "opcode, and the word after it is not one either",
-                        who, firstWord, packetSize);
+                            "four bytes before its first packet\n",
+                            who, headerOpcode);
+                    readBuf.consume(sizeof(uint32_t));
+                    anyProgress = true;
+                    continue;
+                } else if (readBuf.validData() >= 12) {
+                    // Neither word is an opcode and there is enough data that more will not
+                    // help. Nothing here can repair that, but say so rather than let it present
+                    // as a host that never answers.
+                    mResyncChecked = true;
+                    fprintf(stderr,
+                            "STREAM-MISALIGN: process=%s opens with %u (len %u), which is not an "
+                            "opcode, and the word after it is not one either\n",
+                            who, headerOpcode, packetSize);
                 }
             }
             if (!packetSize) {
@@ -661,7 +677,7 @@ intptr_t RenderThread::main() {
     tInfo.reset();
     waitForExitSignal();
 
-    GFXSTREAM_DEBUG("Exited a RenderThread @%p", this);
+    fprintf(stderr, "RT-EXIT: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
     return 0;
 }
 
