@@ -620,13 +620,24 @@ intptr_t RenderThread::main() {
                 // A complete packet the Vulkan decoder declined. Everything downstream of this
                 // reads as "the host never answered", so name it here with the two things that
                 // decide whether the decoder could have run at all.
-                if (last == 0 && readBuf.validData() >= packetSize && packetSize >= 8 &&
-                    !mVkDeclineReported) {
-                    mVkDeclineReported = true;
-                    fprintf(stderr,
-                            "VKDEC-DECLINED: opcode=%u len=%u valid=%u procRes=%d puid=%u\n",
-                            headerOpcode, packetSize, (unsigned)readBuf.validData(),
-                            processResources ? 1 : 0, (unsigned)tInfo->m_puid);
+                // Read the header here, not at the top of the loop: getData() refills the
+                // buffer in between, so the values captured up there describe whatever was
+                // present before the read and say nothing about what the decoder was handed.
+                // (An earlier version of this probe printed those stale values and reported
+                // "opcode=0 len=8" for every ordinary partial packet.)
+                if (last == 0 && readBuf.validData() >= 8 && !mVkDeclineReported) {
+                    uint32_t liveOp = 0, liveLen = 0;
+                    std::memcpy(&liveOp, readBuf.buf(), sizeof(uint32_t));
+                    std::memcpy(&liveLen, readBuf.buf() + 4, sizeof(uint32_t));
+                    // Only a whole packet is interesting: short of that, returning zero is the
+                    // decoder correctly asking for the rest of it.
+                    if (liveLen >= 8 && readBuf.validData() >= liveLen) {
+                        mVkDeclineReported = true;
+                        fprintf(stderr,
+                                "VKDEC-DECLINED: opcode=%u len=%u valid=%u procRes=%d puid=%u\n",
+                                liveOp, liveLen, (unsigned)readBuf.validData(),
+                                processResources ? 1 : 0, (unsigned)tInfo->m_puid);
+                    }
                 }
                 if (last > 0) {
                     if (!processResources) {

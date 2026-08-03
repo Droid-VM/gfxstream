@@ -274,11 +274,39 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                     // hanging; it exists to make the hang say who is waiting on what, since the
                     // health monitor's annotations only surface if a hang report is collected.
                     uint64_t spins = 0;
+                    // A lost increment is unrecoverable as written. The counter is advanced once
+                    // per decoded packet, in each opcode's epilogue; any packet whose seqno is
+                    // read before the switch but whose case never runs its epilogue -- an opcode
+                    // with no case, an early return, a thread that exits mid-packet -- leaves the
+                    // counter permanently one short, and every thread of that guest process then
+                    // waits here forever. Measured on KDE: want=10352 have=10350, unchanged for
+                    // minutes, kwin's render threads all parked on it and a desktop that never
+                    // draws.
+                    //
+                    // Waiting is still the right thing to do; waiting *forever* is not. Real waits
+                    // here are microseconds -- the value is one or two packets away. If it has not
+                    // arrived in seconds it is not going to, so repair the deficit rather than
+                    // hang: set the counter to what this packet needs and carry on. Ordering is
+                    // preserved for everything after, which is more than a wedged process offers.
+                    const auto seqnoDeadline =
+                        std::chrono::steady_clock::now() + std::chrono::seconds(3);
                     while ((seqno - seqnoPtr->load(std::memory_order_seq_cst) != 1)) {
+                        if (spins > 65536 && std::chrono::steady_clock::now() > seqnoDeadline) {
+                            const uint32_t have = seqnoPtr->load(std::memory_order_seq_cst);
+                            fprintf(stderr,
+                                    "SEQNO-REPAIR: counter stuck at %u, packet needs %u "
+                                    "(opcode=%u process=%s) -- an increment was lost; advancing "
+                                    "the counter rather than waiting forever\n",
+                                    have, seqno, opcode, processName ? processName : "null");
+                            seqnoPtr->store(seqno - 1, std::memory_order_seq_cst);
+                            break;
+                        }
                         if (shouldExit.load(std::memory_order_relaxed)) {
-                            GFXSTREAM_WARNING(
-                                "Process=%s is exitting. Skip processing seqno=%d on thread=0x%x.",
-                                processName ? processName : "null", seqno, getCurrentThreadId());
+                            fprintf(stderr,
+                                    "SEQNO-ABORT: process=%s exiting, skipping seqno=%d on "
+                                    "thread=0x%llx\n",
+                                    processName ? processName : "null", seqno,
+                                    (unsigned long long)getCurrentThreadId());
                             return 0;
                         }
 #if (defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64)))
@@ -315,13 +343,14 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         // for its whole life while still reporting promptly.
                         ++spins;
                         if ((spins & (spins - 1)) == 0) {
-                            GFXSTREAM_WARNING(
+                            fprintf(stderr,
                                 "seqno loop stuck: want=%u have=%u opcode=%u process=%s "
-                                "counter=%p thread=0x%x spins=%llu",
+                                "counter=%p thread=0x%llx spins=%llu\n",
                                 seqno, seqnoPtr->load(std::memory_order_seq_cst), opcode,
                                 processName ? processName : "null",
                                 (const void*)processResources,
-                                getCurrentThreadId(), (unsigned long long)spins);
+                                (unsigned long long)getCurrentThreadId(),
+                                (unsigned long long)spins);
                         }
                     }
                     m_prevSeqno = seqno;
