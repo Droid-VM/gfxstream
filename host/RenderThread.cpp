@@ -271,6 +271,23 @@ void RenderThread::waitForExitSignal() {
 
 // The two opcode ranges the decoders use, plus the renderControl range below them. Anything
 // outside all three at a packet boundary means the stream is not where it thinks it is.
+// Diagnostics that are loud enough to change what they measure.
+//
+// The startup failure this chases stopped reproducing the moment the packet and handshake traces
+// were added -- eight clean session restarts against a three-in-six baseline, which is not luck.
+// fprintf on this path is a synchronisation point, so the traces themselves perturb the race.
+// They stay, but off by default: GFXSTREAM_DIAG=1 turns them on, and the quiet build is the one
+// the failure rate is measured against.
+static bool gfxDiagEnabled() {
+    static std::once_flag once;
+    static bool on = false;
+    std::call_once(once, [] {
+        const char* v = getenv("GFXSTREAM_DIAG");
+        on = v && v[0] && v[0] != '0';
+    });
+    return on;
+}
+
 static bool plausibleOpcode(uint32_t word) {
     return (word >= 20000 && word < 30000) || (word >= 200000000 && word < 300000000) ||
            (word >= 1000 && word < 20000);
@@ -283,7 +300,7 @@ intptr_t RenderThread::main() {
     }
 
     std::unique_ptr<RenderThreadInfo> tInfo = std::make_unique<RenderThreadInfo>();
-    fprintf(stderr, "RT-ENTER: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
+    if (gfxDiagEnabled()) fprintf(stderr, "RT-ENTER: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
     ChecksumCalculatorThreadInfo tChecksumInfo;
     ChecksumCalculator& checksumCalc = tChecksumInfo.get();
     bool needRestoreFromSnapshot = false;
@@ -344,7 +361,7 @@ intptr_t RenderThread::main() {
         // then nothing at all -- no first header, no packet, no seqno wait -- so the thread never
         // receives the guest's opening bytes. These three markers say which side of the handshake
         // that happens on.
-        fprintf(stderr, "HS-BEGIN: ctx=%u ring=%d\n", mContextId, mRingStream ? 1 : 0);
+        if (gfxDiagEnabled()) fprintf(stderr, "HS-BEGIN: ctx=%u ring=%d\n", mContextId, mRingStream ? 1 : 0);
         uint32_t flags = 0;
         struct FlagsOut { uint32_t& dst; uint32_t& src; ~FlagsOut() { dst = src; } }
             flagsOut{flagsAfterHandshake, flags};
@@ -390,7 +407,7 @@ intptr_t RenderThread::main() {
     GfxApiLogger gfxLogger;
     auto& metricsLogger = FrameBuffer::getFB()->getMetricsLogger();
 
-    fprintf(stderr, "HS-DONE: ctx=%u flags=0x%x\n", mContextId, flagsAfterHandshake);
+    if (gfxDiagEnabled()) fprintf(stderr, "HS-DONE: ctx=%u flags=0x%x\n", mContextId, flagsAfterHandshake);
 
     const ProcessResources* processResources = nullptr;
     bool anyProgress = false;
@@ -750,7 +767,7 @@ intptr_t RenderThread::main() {
     tInfo.reset();
     waitForExitSignal();
 
-    fprintf(stderr, "RT-EXIT: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
+    if (gfxDiagEnabled()) fprintf(stderr, "RT-EXIT: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
     return 0;
 }
 

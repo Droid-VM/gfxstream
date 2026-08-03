@@ -147,6 +147,23 @@ size_t VkDecoder::decode(void* buf, size_t bufsize, IOStream* stream,
 // and took the VM down -- so the baseline has to be the upstream behaviour (wait, and keep
 // waiting) with the escape available for comparison rather than always armed.
 // GFXSTREAM_SEQNO_REPAIR=1 turns it on.
+// Diagnostics that are loud enough to change what they measure.
+//
+// The startup failure this chases stopped reproducing the moment the packet and handshake traces
+// were added -- eight clean session restarts against a three-in-six baseline, which is not luck.
+// fprintf on this path is a synchronisation point, so the traces themselves perturb the race.
+// They stay, but off by default: GFXSTREAM_DIAG=1 turns them on, and the quiet build is the one
+// the failure rate is measured against.
+static bool gfxDiagEnabled() {
+    static std::once_flag once;
+    static bool on = false;
+    std::call_once(once, [] {
+        const char* v = getenv("GFXSTREAM_DIAG");
+        on = v && v[0] && v[0] != '0';
+    });
+    return on;
+}
+
 static bool seqnoRepairEnabled() {
     static std::once_flag once;
     static bool on = false;
@@ -23342,7 +23359,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         // one ahead before that packet is even processed, so something incremented it with no
         // packet of its own. Print opcode, whether a sequence number was read, and the counter on
         // both sides, and whatever did it has to appear in these eight lines.
-        if (mEarlyPacketsLogged < 8) {
+        if (gfxDiagEnabled() && mEarlyPacketsLogged < 8) {
             ++mEarlyPacketsLogged;
             fprintf(stderr,
                     "PKT#%u: opcode=%u len=%u seqno=%s counter=%u->%u\n", mEarlyPacketsLogged,
