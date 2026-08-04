@@ -31,7 +31,7 @@ std::optional<VirtioGpuContext> VirtioGpuContext::Create(RendererPtr renderer,
     context.mCapsetId = capsetId;
     context.mHostPipe = std::make_shared<VirtioGpuPipe>(renderer, contextId);
 
-    renderer->onGuestGraphicsProcessCreate(contextId);
+    context.mProcessInstance = renderer->onGuestGraphicsProcessCreate(contextId);
     // Which guest process a context belongs to. Once per context, and the only way to put a name
     // to a render thread that fails before it learns one.
     GFXSTREAM_WARNING("CTX: id=%u name=%s", contextId, contextName.c_str());
@@ -46,7 +46,7 @@ int VirtioGpuContext::Destroy(const address_space_device_control_ops& asgOps) {
         asgOps.destroy_handle(handle);
     }
 
-    mRenderer->cleanupProcGLObjects(mId);
+    mRenderer->cleanupProcGLObjects(mId, mProcessInstance);
 
     return 0;
 }

@@ -214,11 +214,19 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
 
     void closeBuffer(HandleType p_colorbuffer);
 
-    void createGraphicsProcessResources(uint64_t puid);
+    uint64_t createGraphicsProcessResources(uint64_t puid);
+
+    void ensureGraphicsProcessResources(uint64_t puid);
+
+    uint64_t currentProcessInstance(uint64_t puid);
 
     std::unique_ptr<ProcessResources> removeGraphicsProcessResources(uint64_t puid);
 
-    void cleanupProcGLObjects(uint64_t puid);
+    std::unordered_set<uint64_t> markProcessRenderThreadsForExit(uint64_t puid,
+                                                                 uint64_t processInstance);
+
+    void cleanupProcGLObjects(uint64_t puid,
+                              const std::unordered_set<uint64_t>& renderThreadsToWaitFor);
 
     void readBuffer(HandleType p_buffer, uint64_t offset, uint64_t size, void* bytes);
 
@@ -737,6 +745,10 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     std::string m_graphicsDeviceExtensions;
     gfxstream::base::Lock m_procOwnedResourcesLock;
     std::unordered_map<uint64_t, std::unique_ptr<ProcessResources>> m_procOwnedResources;
+    // Which use of each context id is the current one, and the counter they come from. Both are
+    // under m_procOwnedResourcesLock.
+    std::unordered_map<uint64_t, uint64_t> m_processInstances;
+    uint64_t m_processInstanceCounter = 0;
 
     // Flag set when emulator is shutting down.
     bool m_shuttingDown = false;
@@ -2013,15 +2025,38 @@ void FrameBuffer::Impl::eraseDelayedCloseColorBufferLocked(HandleType cb, uint64
     }
 }
 
-void FrameBuffer::Impl::createGraphicsProcessResources(uint64_t puid) {
+uint64_t FrameBuffer::Impl::createGraphicsProcessResources(uint64_t puid) {
     bool inserted = false;
+    uint64_t instance = 0;
     {
         AutoLock mutex(m_procOwnedResourcesLock);
         inserted = m_procOwnedResources.try_emplace(puid, ProcessResources::create()).second;
+        // Distinguishes this use of the id from the next one. A guest context id is reused as
+        // soon as its owner exits, so on its own it names a slot rather than a process, and
+        // teardown for one occupant then reaches the next one. Only context creation gets to
+        // advance this -- it is the one event that means "a different process now" -- which is
+        // why the render thread's fallback below has its own entry point that does not.
+        instance = ++m_processInstanceCounter;
+        m_processInstances[puid] = instance;
     }
     if (!inserted) {
         GFXSTREAM_WARNING("Failed to create process resource for puid %" PRIu64 ".", puid);
     }
+    return instance;
+}
+
+void FrameBuffer::Impl::ensureGraphicsProcessResources(uint64_t puid) {
+    AutoLock mutex(m_procOwnedResourcesLock);
+    m_procOwnedResources.try_emplace(puid, ProcessResources::create());
+    // Deliberately no new instance number: this fills in resources for a process that already
+    // exists, so claiming it is a new occupant would leave the context that really is one holding
+    // a number nothing matches, and its teardown would then never find its own threads.
+}
+
+uint64_t FrameBuffer::Impl::currentProcessInstance(uint64_t puid) {
+    AutoLock mutex(m_procOwnedResourcesLock);
+    auto it = m_processInstances.find(puid);
+    return it == m_processInstances.end() ? 0 : it->second;
 }
 
 std::unique_ptr<ProcessResources> FrameBuffer::Impl::removeGraphicsProcessResources(uint64_t puid) {
@@ -2038,22 +2073,73 @@ std::unique_ptr<ProcessResources> FrameBuffer::Impl::removeGraphicsProcessResour
     return res;
 }
 
-void FrameBuffer::Impl::cleanupProcGLObjects(uint64_t puid) {
-    bool renderThreadWithThisPuidExists = false;
-
-    do {
-        renderThreadWithThisPuidExists = false;
-        RenderThreadInfo::forAllRenderThreadInfos(
-            [puid, &renderThreadWithThisPuidExists](RenderThreadInfo* i) {
-            if (i->m_puid == puid) {
-                renderThreadWithThisPuidExists = true;
-
-                bool shouldExit = false;
-                i->m_shouldExit.compare_exchange_strong(shouldExit, true);
+std::unordered_set<uint64_t> FrameBuffer::Impl::markProcessRenderThreadsForExit(
+    uint64_t puid, uint64_t processInstance) {
+    // Decide once who is being torn down, and name them by something that is never handed out
+    // twice.
+    //
+    // A guest process id is the guest's context id, and the guest reuses it the moment the process
+    // holding it exits. The teardown this replaces re-read the registry every 10ms and set
+    // m_shouldExit on whatever carried the puid at that moment; worse, it ran on the cleanup
+    // worker, long after the context was destroyed. A replacement process -- XWayland respawning,
+    // a KDE session restarting -- routinely owns the id by then, so the teardown told the
+    // replacement's own render thread to exit.
+    //
+    // That thread does not exit. Once shouldExit is set the Vulkan decoder abandons the packet it
+    // is on and returns zero for every packet after it, which the render thread reads as "need
+    // more data" and answers by waiting for one more byte than the guest ever sends. The guest is
+    // by then waiting for the reply to that packet, so neither side moves again. Seen as a fresh
+    // XWayland parked in vkWaitSemaphores for the whole session -- X clients then hang on connect
+    // because it stopped accepting -- and as a restarted kwin doing the same, which is a desktop
+    // that never draws.
+    //
+    // Matching on the id alone is not enough even here, because a context destroy can reach the
+    // host after the replacement context of the same id is already running: measured as a live
+    // XWayland told to exit at the same point in its startup, run after run. So match on which
+    // use of the id this is as well.
+    std::unordered_set<uint64_t> victims;
+    RenderThreadInfo::forAllRenderThreadInfos(
+        [puid, processInstance, &victims](RenderThreadInfo* i) {
+            if (i->m_puid != puid) {
+                return;
             }
+            const bool mine = i->m_processInstance == processInstance;
+            fprintf(stderr, "MARK-EXIT: puid=%llu tearing down instance=%llu; thread %llu is on "
+                            "instance=%llu -> %s\n",
+                    (unsigned long long)puid, (unsigned long long)processInstance,
+                    (unsigned long long)i->m_id, (unsigned long long)i->m_processInstance,
+                    mine ? "exit" : "left alone");
+            if (!mine) {
+                return;
+            }
+            victims.insert(i->m_id);
+            bool shouldExit = false;
+            i->m_shouldExit.compare_exchange_strong(shouldExit, true);
         });
+    return victims;
+}
+
+void FrameBuffer::Impl::cleanupProcGLObjects(
+    uint64_t puid, const std::unordered_set<uint64_t>& renderThreadsToWaitFor) {
+    std::unordered_set<uint64_t> victims = renderThreadsToWaitFor;
+
+    while (!victims.empty()) {
+        bool anyVictimStillRunning = false;
+        RenderThreadInfo::forAllRenderThreadInfos(
+            [&victims, &anyVictimStillRunning](RenderThreadInfo* i) {
+                // By id rather than by puid, so that a render thread which took this puid after
+                // the snapshot is neither signalled nor waited for; and by id rather than by
+                // address, because the allocator reuses the address of a thread that has already
+                // gone, which would leave this waiting on a thread that no longer exists.
+                if (victims.count(i->m_id)) {
+                    anyVictimStillRunning = true;
+                }
+            });
+        if (!anyVictimStillRunning) {
+            break;
+        }
         gfxstream::base::sleepUs(10000);
-    } while (renderThreadWithThisPuidExists);
+    }
 
 
     AutoLock mutex(m_lock);
@@ -4624,15 +4710,31 @@ void FrameBuffer::closeColorBuffer(HandleType p_colorbuffer) {
 
 void FrameBuffer::closeBuffer(HandleType p_buffer) { mImpl->closeBuffer(p_buffer); }
 
-void FrameBuffer::createGraphicsProcessResources(uint64_t puid) {
-    mImpl->createGraphicsProcessResources(puid);
+uint64_t FrameBuffer::createGraphicsProcessResources(uint64_t puid) {
+    return mImpl->createGraphicsProcessResources(puid);
+}
+
+void FrameBuffer::ensureGraphicsProcessResources(uint64_t puid) {
+    mImpl->ensureGraphicsProcessResources(puid);
 }
 
 std::unique_ptr<ProcessResources> FrameBuffer::removeGraphicsProcessResources(uint64_t puid) {
     return mImpl->removeGraphicsProcessResources(puid);
 }
 
-void FrameBuffer::cleanupProcGLObjects(uint64_t puid) { mImpl->cleanupProcGLObjects(puid); }
+std::unordered_set<uint64_t> FrameBuffer::markProcessRenderThreadsForExit(uint64_t puid,
+                                                                         uint64_t instance) {
+    return mImpl->markProcessRenderThreadsForExit(puid, instance);
+}
+
+uint64_t FrameBuffer::currentProcessInstance(uint64_t puid) {
+    return mImpl->currentProcessInstance(puid);
+}
+
+void FrameBuffer::cleanupProcGLObjects(uint64_t puid,
+                                       const std::unordered_set<uint64_t>& renderThreadsToWaitFor) {
+    mImpl->cleanupProcGLObjects(puid, renderThreadsToWaitFor);
+}
 
 void FrameBuffer::readBuffer(HandleType p_buffer, uint64_t offset, uint64_t size, void* bytes) {
     mImpl->readBuffer(p_buffer, offset, size, bytes);

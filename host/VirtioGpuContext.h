@@ -83,6 +83,9 @@ class VirtioGpuContext {
     // LINT.IfChange(virtio_gpu_context)
     RendererPtr mRenderer;
     VirtioGpuContextId mId;
+    // Which use of mId this context is. The guest reuses context ids immediately, so
+    // teardown has to name the occupant, not the slot.
+    uint64_t mProcessInstance = 0;
     std::string mName;
     uint32_t mCapsetId;
     std::shared_ptr<VirtioGpuPipe> mHostPipe;

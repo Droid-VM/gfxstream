@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <utility>
 #include <variant>
+#include <unordered_set>
 
 #include "FrameBuffer.h"
 #include "gfxstream/host/graphics_driver_lock.h"
@@ -66,7 +67,8 @@ public:
             using gfxstream::base::WorkerProcessingResult;
             struct {
                 WorkerProcessingResult operator()(CleanProcessResources resources) {
-                    FrameBuffer::getFB()->cleanupProcGLObjects(resources.puid);
+                    FrameBuffer::getFB()->cleanupProcGLObjects(resources.puid,
+                                                               resources.renderThreads);
                     // resources.resource are destroyed automatically when going out of the scope.
                     return WorkerProcessingResult::Continue;
                 }
@@ -83,10 +85,12 @@ public:
         mCleanupWorker.enqueue(Exit{});
     }
 
-    void cleanup(uint64_t processId, std::unique_ptr<ProcessResources> resource) {
+    void cleanup(uint64_t processId, std::unique_ptr<ProcessResources> resource,
+                 std::unordered_set<uint64_t> renderThreads) {
         mCleanupWorker.enqueue(CleanProcessResources{
             .puid = processId,
             .resource = std::move(resource),
+            .renderThreads = std::move(renderThreads),
         });
     }
 
@@ -103,6 +107,9 @@ private:
     struct CleanProcessResources {
         uint64_t puid;
         std::unique_ptr<ProcessResources> resource;
+        // Named when the context was destroyed, because the puid alone no longer identifies them
+        // by the time this runs.
+        std::unordered_set<uint64_t> renderThreads;
     };
     struct Exit {};
     using Cmd = std::variant<CleanProcessResources, Exit>;
@@ -543,14 +550,19 @@ void RendererImpl::setScreenMask(int width, int height, const uint8_t* rgbaData)
     mRenderWindow->setScreenMask(width, height, rgbaData);
 }
 
-void RendererImpl::onGuestGraphicsProcessCreate(uint64_t puid) {
-    FrameBuffer::getFB()->createGraphicsProcessResources(puid);
+uint64_t RendererImpl::onGuestGraphicsProcessCreate(uint64_t puid) {
+    return FrameBuffer::getFB()->createGraphicsProcessResources(puid);
 }
 
-void RendererImpl::cleanupProcGLObjects(uint64_t puid) {
+void RendererImpl::cleanupProcGLObjects(uint64_t puid, uint64_t processInstance) {
+    // Both of these have to happen here, where the guest still means this process by this id, and
+    // not on the cleanup worker: the guest reuses a context id as soon as its owner exits, so a
+    // replacement process is often already answering to the id by the time the worker runs.
+    std::unordered_set<uint64_t> renderThreads =
+        FrameBuffer::getFB()->markProcessRenderThreadsForExit(puid, processInstance);
     std::unique_ptr<ProcessResources> resource =
         FrameBuffer::getFB()->removeGraphicsProcessResources(puid);
-    mCleanupThread->cleanup(puid, std::move(resource));
+    mCleanupThread->cleanup(puid, std::move(resource), std::move(renderThreads));
 }
 
 static struct AndroidVirtioGpuOps sVirtioGpuOps = {

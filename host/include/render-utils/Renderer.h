@@ -255,12 +255,14 @@ class Renderer {
     // onGuestGraphicsProcessCreate
     //    Notify the renderer that a new graphics process is created. Used to create process
     //    specific resources.
-    virtual void onGuestGraphicsProcessCreate(uint64_t puid) = 0;
+    // Returns which use of this context id the process is, to be handed back to
+    // cleanupProcGLObjects so that teardown cannot reach a later occupant of the id.
+    virtual uint64_t onGuestGraphicsProcessCreate(uint64_t puid) = 0;
     // cleanupProcGLObjects -
     //    clean up all per-process resources when guest process exits (or is
     // killed). Such resources include color buffer handles and EglImage handles.
     // TODO(kaiyili): rename this interface to onGuestGraphicsProcessDestroy.
-    virtual void cleanupProcGLObjects(uint64_t puid) = 0;
+    virtual void cleanupProcGLObjects(uint64_t puid, uint64_t processInstance) = 0;
 
     // Wait for cleanupProcGLObjects to finish.
     virtual void waitForProcessCleanup() = 0;

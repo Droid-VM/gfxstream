@@ -51,8 +51,19 @@ struct RenderThreadInfo {
     void initGl();
 #endif
 
+    // Names this render thread for as long as the host runs, and is never handed out twice.
+    //
+    // Neither of the two identifiers next to it can do that. m_puid is the guest's context id,
+    // which is reused the moment a guest process exits, and the object's own address is reused by
+    // the allocator just as fast. Process teardown has to say exactly which threads it is tearing
+    // down and wait for exactly those, so it names them by this.
+    const uint64_t m_id;
+
     // The unique id of owner guest process of this render thread
     uint64_t m_puid = 0;
+    // Which use of that id this thread joined. The id is reused; this is not, so the pair says
+    // which process rather than which slot.
+    uint64_t m_processInstance = 0;
     std::atomic_bool m_shouldExit{false};
     std::optional<std::string> m_processName;
 

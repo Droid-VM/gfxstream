@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <unordered_set>
 
 #if GFXSTREAM_ENABLE_HOST_GLES
 #include <EGL/egl.h>
@@ -182,11 +183,27 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
 
     // The caller mustn't refer to this puid before this function returns, i.e. the creation of the
     // host process pipe must be blocked until this function returns.
-    void createGraphicsProcessResources(uint64_t puid);
+    // Returns which use of this context id the new process is, so that teardown for an earlier
+    // occupant of the same id can be told apart from this one.
+    uint64_t createGraphicsProcessResources(uint64_t puid);
+
+    // Fill in resources for a process that already exists, without claiming it is a new one.
+    void ensureGraphicsProcessResources(uint64_t puid);
+
+    // Which use of this context id is current, for a render thread adopting it.
+    uint64_t currentProcessInstance(uint64_t puid);
     // The process resource is returned so that we can destroy it on a separate thread.
     std::unique_ptr<ProcessResources> removeGraphicsProcessResources(uint64_t puid);
+    // Tell this process's render threads to stop, and name them so that the teardown which
+    // follows can wait for exactly these. Must be called while the guest context is being
+    // destroyed, not from the cleanup worker: by the time the worker runs, the guest has usually
+    // handed the same id to a replacement process, and asking again for "threads with this puid"
+    // then answers with the replacement's threads.
+    std::unordered_set<uint64_t> markProcessRenderThreadsForExit(uint64_t puid,
+                                                                 uint64_t processInstance);
     // TODO(kaiyili): retire cleanupProcGLObjects in favor of removeGraphicsProcessResources.
-    void cleanupProcGLObjects(uint64_t puid);
+    void cleanupProcGLObjects(uint64_t puid,
+                              const std::unordered_set<uint64_t>& renderThreadsToWaitFor);
 
     // Read the content of a given Buffer into client memory.
     // |p_buffer| is the Buffer's handle value.

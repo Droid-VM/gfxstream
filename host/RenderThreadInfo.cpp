@@ -19,6 +19,7 @@
 #include "gfxstream/synchronization/Lock.h"
 #include "FrameBuffer.h"
 
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -37,7 +38,11 @@ struct RenderThreadRegistry {
 
 static RenderThreadRegistry sRegistry;
 
-RenderThreadInfo::RenderThreadInfo() {
+// Monotonic and never reset, so an id identifies one render thread for the life of the host.
+static std::atomic<uint64_t> sNextRenderThreadInfoId{1};
+
+RenderThreadInfo::RenderThreadInfo()
+    : m_id(sNextRenderThreadInfoId.fetch_add(1, std::memory_order_relaxed)) {
     s_threadInfoPtr = this;
     AutoLock lock(sRegistry.lock);
     sRegistry.threadInfos.insert(this);

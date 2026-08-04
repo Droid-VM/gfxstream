@@ -1230,6 +1230,7 @@ static void rcSetPuid(uint64_t puid) {
 
     RenderThreadInfo *tInfo = RenderThreadInfo::get();
     tInfo->m_puid = puid;
+    tInfo->m_processInstance = FrameBuffer::getFB()->currentProcessInstance(puid);
     auto* renderThreadInfoVk = vk::RenderThreadInfoVk::get();
     if (renderThreadInfoVk) {
         renderThreadInfoVk->ctx_id = puid;

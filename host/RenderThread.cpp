@@ -639,9 +639,17 @@ intptr_t RenderThread::main() {
                 // zero. Creating it here is idempotent -- try_emplace on the same puid is a
                 // no-op -- so this only ever fills in one that is genuinely missing.
                 if (!processResources) {
-                    FrameBuffer::getFB()->createGraphicsProcessResources(tInfo->m_puid);
+                    // Fill in, do not claim to be a new occupant of the id: advancing the instance
+                    // here would strand the context that really is one, and its own teardown would
+                    // then match none of its threads.
+                    FrameBuffer::getFB()->ensureGraphicsProcessResources(tInfo->m_puid);
                     processResources = FrameBuffer::getFB()->getProcessResources(tInfo->m_puid);
                 }
+                // Only now, with the resources settled, take the use of the id that is current.
+                // Reading it before that could pick up the previous occupant's number, and this
+                // thread would then be torn down along with a process it has nothing to do with.
+                tInfo->m_processInstance =
+                    FrameBuffer::getFB()->currentProcessInstance(tInfo->m_puid);
             }
 
             progress = false;
