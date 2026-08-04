@@ -203,13 +203,26 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
     //     3000:0,50000:1                  558
     //     3000:0,150000:1                 567    <- default
     //     20000:0,150000:1                494    (worse than no ladder at all)
-    // Two things fall out. The sleeping stage is where all the gain is: parking is nearly always a
-    // loss, because the host consumer is ~99% idle anyway, so waiting cheaply costs nobody
-    // anything while a park has to be paid back with a VM exit. And spinning is the opposite --
-    // stretching the yield stage to 20000 lands below the flat baseline, since that is expensive
-    // waiting that takes cores the guest needs. 3000 is the same sweet spot the flat count found.
-    // Only 1 us matters as a sleep value; the 10 us and 50 us stages measured as noise and are
-    // gone, because by then parking is the honest answer.
+    // Two things fell out of that. Spinning past 3000 lands below the flat baseline, since that is
+    // expensive waiting that takes cores the guest needs. And the sleeping stage looked like where
+    // all the gain was: parking seemed a loss, because the host consumer is ~99% idle anyway, so
+    // waiting cheaply appeared to cost nobody anything while a park has to be paid back with a VM
+    // exit.
+    //
+    // "Waiting cheaply" was the mistake, and Minecraft was the wrong workload to find it on. Each
+    // sleepUs(1) programs a timer and takes an interrupt on expiry; one guest process has a couple
+    // of render threads doing that, and a KDE session has one per client. Measured on an idle KDE
+    // desktop -- nothing running, nothing moving -- as timer interrupts across the phone, how busy
+    // the phone was, and vkmark on the same boot:
+    //
+    //     3000:0,150000:1     289211 irq/s   100.0% busy   vkmark 1643   (the old default)
+    //     3000:0                1822 irq/s    21.1% busy   vkmark 3632   <- default
+    //     30:0                  1133 irq/s    12.6% busy   vkmark  924   (upstream's flat 30)
+    //
+    // The sleeping stage does not merely cost CPU that was going spare -- it saturates the phone
+    // with interrupt work and takes throughput down with it, to less than half of what the same
+    // build does without it. Spinning is what buys the handoff latency; 30 is too short to buy any
+    // and parks constantly. Keep the yield stage, park after it, and let a doorbell do the rest.
     //
     // GFXSTREAM_ASG_SPIN_LEVELS overrides the stages, as ascending "iters:sleep_us" pairs; an
     // empty-ring iteration past the last stage parks. A single stage reproduces the old flat
@@ -221,7 +234,7 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
     static const std::vector<SpinLevel> spinLevels = [] {
         std::vector<SpinLevel> levels;
         const char* env = getenv("GFXSTREAM_ASG_SPIN_LEVELS");
-        const char* spec = env ? env : "3000:0,150000:1";
+        const char* spec = env ? env : "3000:0";
         uint32_t prev = 0;
         while (*spec) {
             char* end = nullptr;
