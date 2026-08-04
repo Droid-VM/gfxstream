@@ -202,7 +202,7 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
     std::unordered_set<uint64_t> markProcessRenderThreadsForExit(uint64_t puid,
                                                                  uint64_t processInstance);
     // TODO(kaiyili): retire cleanupProcGLObjects in favor of removeGraphicsProcessResources.
-    void cleanupProcGLObjects(uint64_t puid,
+    void cleanupProcGLObjects(uint64_t puid, uint64_t processInstance,
                               const std::unordered_set<uint64_t>& renderThreadsToWaitFor);
 
     // Read the content of a given Buffer into client memory.

@@ -226,7 +226,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     std::unordered_set<uint64_t> markProcessRenderThreadsForExit(uint64_t puid,
                                                                  uint64_t processInstance);
 
-    void cleanupProcGLObjects(uint64_t puid,
+    void cleanupProcGLObjects(uint64_t puid, uint64_t processInstance,
                               const std::unordered_set<uint64_t>& renderThreadsToWaitFor);
 
     void readBuffer(HandleType p_buffer, uint64_t offset, uint64_t size, void* bytes);
@@ -2113,7 +2113,8 @@ std::unordered_set<uint64_t> FrameBuffer::Impl::markProcessRenderThreadsForExit(
 }
 
 void FrameBuffer::Impl::cleanupProcGLObjects(
-    uint64_t puid, const std::unordered_set<uint64_t>& renderThreadsToWaitFor) {
+    uint64_t puid, uint64_t processInstance,
+    const std::unordered_set<uint64_t>& renderThreadsToWaitFor) {
     std::unordered_set<uint64_t> victims = renderThreadsToWaitFor;
 
     // No wait. See markProcessRenderThreadsForExit: every configuration that waited here scored
@@ -2122,6 +2123,41 @@ void FrameBuffer::Impl::cleanupProcGLObjects(
 
 
     AutoLock mutex(m_lock);
+
+    // Is this id already someone else's? Everything below frees what is registered under the id,
+    // and the guest hands the id to the next process the moment this one exits -- so a teardown
+    // that arrives late frees the new occupant's objects, with no error on either side. The
+    // instance number is the only thing that can tell the two apart.
+    //
+    // Colour buffers are the exposure that matters here: they are the process's render targets,
+    // and closing them under a live process is a black screen with nothing logged. The other
+    // per-process maps are either GLES-only or handled elsewhere.
+    {
+        const uint64_t current = currentProcessInstance(puid);
+        auto it = m_procOwnedColorBuffers.find(puid);
+        const size_t owned = it == m_procOwnedColorBuffers.end() ? 0 : it->second.size();
+        // Whether the exposure exists at all on this route. openColorBuffer registers under the
+        // calling render thread's puid, and the virtio-gpu path that creates scanout resources
+        // does not run on a render thread -- so this may well always be zero here, in which case
+        // there is nothing for a late teardown to take from a live process. Say which it is
+        // rather than reasoning about it.
+        if (owned > 0) {
+            GFXSTREAM_GUARD_FIRED("colorBuffersAreProcessOwned",
+                                  "teardown for puid=%llu found %zu colour buffer(s) registered "
+                                  "to it -- the per-process colour buffer map is in use here\n",
+                                  (unsigned long long)puid, owned);
+        }
+        if (processInstance != 0 && current != processInstance) {
+            if (owned > 0) {
+                GFXSTREAM_GUARD_FIRED("colorBuffersOfALaterProcess",
+                                      "teardown for puid=%llu instance=%llu is about to close %zu "
+                                      "colour buffer(s), but the id now belongs to instance=%llu\n",
+                                      (unsigned long long)puid,
+                                      (unsigned long long)processInstance, owned,
+                                      (unsigned long long)current);
+            }
+        }
+    }
 
     cleanupProcGLObjects_locked(puid);
 
@@ -4710,9 +4746,9 @@ uint64_t FrameBuffer::currentProcessInstance(uint64_t puid) {
     return mImpl->currentProcessInstance(puid);
 }
 
-void FrameBuffer::cleanupProcGLObjects(uint64_t puid,
+void FrameBuffer::cleanupProcGLObjects(uint64_t puid, uint64_t processInstance,
                                        const std::unordered_set<uint64_t>& renderThreadsToWaitFor) {
-    mImpl->cleanupProcGLObjects(puid, renderThreadsToWaitFor);
+    mImpl->cleanupProcGLObjects(puid, processInstance, renderThreadsToWaitFor);
 }
 
 void FrameBuffer::readBuffer(HandleType p_buffer, uint64_t offset, uint64_t size, void* bytes) {

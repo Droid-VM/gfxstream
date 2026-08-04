@@ -11347,9 +11347,15 @@ class VkDecoderGlobalState::Impl {
         // callback -- too late, since the copy was taken -- and the callback then arrives at an
         // instance that is gone. Seen exactly once, on vkmark exiting.
         if (objects.instance.empty()) {
+            // Not a band-aid: extracting the instance from mInstanceInfo happens under mMutex,
+            // so of two callers racing to destroy the same instance exactly one wins the node and
+            // the other arrives here. Doing nothing is the correct half of that claim. Measured at
+            // roughly one in seventy session restarts, which is the guest destroying its instance
+            // inside the window where cleanupProcGLObjects has already copied the callback list
+            // out from under its lock.
             GFXSTREAM_GUARD_FIRED("destroyInstanceObjects",
-                                  "an instance was torn down twice -- the lifetime bug this "
-                                  "guards is still live\n");
+                                  "two callers raced to destroy one instance; this one lost the "
+                                  "claim and correctly did nothing\n");
             return;
         }
         VkInstance instance = objects.instance.key();

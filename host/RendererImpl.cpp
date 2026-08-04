@@ -67,8 +67,8 @@ public:
             using gfxstream::base::WorkerProcessingResult;
             struct {
                 WorkerProcessingResult operator()(CleanProcessResources resources) {
-                    FrameBuffer::getFB()->cleanupProcGLObjects(resources.puid,
-                                                               resources.renderThreads);
+                    FrameBuffer::getFB()->cleanupProcGLObjects(
+                        resources.puid, resources.processInstance, resources.renderThreads);
                     // resources.resource are destroyed automatically when going out of the scope.
                     return WorkerProcessingResult::Continue;
                 }
@@ -85,10 +85,12 @@ public:
         mCleanupWorker.enqueue(Exit{});
     }
 
-    void cleanup(uint64_t processId, std::unique_ptr<ProcessResources> resource,
+    void cleanup(uint64_t processId, uint64_t processInstance,
+                 std::unique_ptr<ProcessResources> resource,
                  std::unordered_set<uint64_t> renderThreads) {
         mCleanupWorker.enqueue(CleanProcessResources{
             .puid = processId,
+            .processInstance = processInstance,
             .resource = std::move(resource),
             .renderThreads = std::move(renderThreads),
         });
@@ -106,6 +108,7 @@ public:
 private:
     struct CleanProcessResources {
         uint64_t puid;
+        uint64_t processInstance;
         std::unique_ptr<ProcessResources> resource;
         // Named when the context was destroyed, because the puid alone no longer identifies them
         // by the time this runs.
@@ -562,7 +565,8 @@ void RendererImpl::cleanupProcGLObjects(uint64_t puid, uint64_t processInstance)
         FrameBuffer::getFB()->markProcessRenderThreadsForExit(puid, processInstance);
     std::unique_ptr<ProcessResources> resource =
         FrameBuffer::getFB()->removeGraphicsProcessResources(puid);
-    mCleanupThread->cleanup(puid, std::move(resource), std::move(renderThreads));
+    mCleanupThread->cleanup(puid, processInstance, std::move(resource),
+                            std::move(renderThreads));
 }
 
 static struct AndroidVirtioGpuOps sVirtioGpuOps = {
