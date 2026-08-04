@@ -1273,10 +1273,19 @@ class VkDecoderGlobalState::Impl {
         if (vkCleanupEnabled()) {
             m_vkEmulation->getCallbacks().registerProcessCleanupCallback(
                 unbox_VkInstance(boxed), info.contextId, [this, boxed] {
+                    // try_, not unbox_: this callback outlives the instance whenever the guest
+                    // destroys it after cleanupProcGLObjects has copied the callback list out of
+                    // its lock, and by then the boxed handle has been deleted. Unboxing a deleted
+                    // handle can hand back whatever now occupies that slot, which would destroy a
+                    // live instance belonging to someone else.
+                    VkInstance instance = try_unbox_VkInstance(boxed);
+                    if (instance == VK_NULL_HANDLE) {
+                        return;
+                    }
                     if (snapshotsEnabled()) {
                         snapshot()->vkDestroyInstance(nullptr, kInvalidSnapshotApiCallHandle, nullptr, 0, boxed, nullptr);
                     }
-                    vkDestroyInstanceImpl(unbox_VkInstance(boxed), nullptr);
+                    vkDestroyInstanceImpl(instance, nullptr);
                 });
         }
 
@@ -11323,6 +11332,20 @@ class VkDecoderGlobalState::Impl {
     }
 
     void destroyInstanceObjects(InstanceObjects& objects) {
+        // An empty node means extractInstanceAndDependenciesLocked found nothing to extract, so
+        // this instance has already been destroyed and there is nothing here to take apart.
+        // key() and mapped() on an empty node handle are undefined; in practice they read through
+        // a null pointer and take the VMM down with SIGSEGV at fault address 0x10.
+        //
+        // Two callers race to get here for the same instance. The guest's own vkDestroyInstance is
+        // one; the other is the per-process cleanup callback registered at instance creation,
+        // which cleanupProcGLObjects copies out from under its lock and then runs after releasing
+        // it. A guest that destroys its instance inside that window has already unregistered the
+        // callback -- too late, since the copy was taken -- and the callback then arrives at an
+        // instance that is gone. Seen exactly once, on vkmark exiting.
+        if (objects.instance.empty()) {
+            return;
+        }
         VkInstance instance = objects.instance.key();
         InstanceInfo& instanceInfo = objects.instance.mapped();
         LOG_CALLS_VERBOSE(
