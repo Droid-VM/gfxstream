@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#include "GfxstreamDiag.h"
 #include "VkCommonOperations.h"
 
 #include <GLES2/gl2.h>
@@ -1463,7 +1464,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
                             {VK_KHR_SWAPCHAIN_EXTENSION_NAME})) {
         selectedDeviceExtensionNames.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     } else {
-        fprintf(stderr,
+        GFXSTREAM_DIAG_PRINT(
                 "CBVK-CREATEDEV: host driver does not advertise VK_KHR_swapchain; "
                 "skipping it (raw HAL/ICD path).\n");
     }
@@ -1580,7 +1581,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
     res = ivk->vkCreateDevice(emulation->mPhysicalDevice, &dCi, nullptr, &emulation->mDevice);
 
-    fprintf(stderr, "CBVK-CREATEDEV: vkCreateDevice res=%d (%s) device=%p\n", (int)res,
+    GFXSTREAM_DIAG_PRINT( "CBVK-CREATEDEV: vkCreateDevice res=%d (%s) device=%p\n", (int)res,
             string_VkResult(res), (void*)emulation->mDevice);
     if (res != VK_SUCCESS || emulation->mDevice == VK_NULL_HANDLE) {
         GFXSTREAM_ERROR("Failed to create Vulkan device. Error %s.", string_VkResult(res));
@@ -2148,7 +2149,7 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
                 plainDed.pNext = nullptr;
                 if (info->dedicatedAllocation) plainAi.pNext = &plainDed;
                 VkResult plainRes = vk->vkAllocateMemory(mDevice, &plainAi, nullptr, &info->memory);
-                fprintf(stderr,
+                GFXSTREAM_DIAG_PRINT(
                         "CBVK-ALLOC: AHB export res=%d, plain(no-export) fallback res=%d\n",
                         allocRes, plainRes);
                 if (plainRes == VK_SUCCESS) {
@@ -2256,7 +2257,7 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
         exportRes = reinterpret_cast<PFN_vkGetMemoryFdKHR>(mDeviceInfo.getMemoryHandleFunc)(
             mDevice, &getFdInfo, &exportFd);
         validHandle = (VK_SUCCESS == exportRes) && (-1 != exportFd);
-        fprintf(stderr, "CBVK-EXPORT: dmabuf fd export res=%d fd=%d\n", (int)exportRes, exportFd);
+        GFXSTREAM_DIAG_PRINT( "CBVK-EXPORT: dmabuf fd export res=%d fd=%d\n", (int)exportRes, exportFd);
         info->handleInfo = ExternalHandleInfo{
             .handle = exportFd,
             .streamHandleType = STREAM_HANDLE_TYPE_MEM_DMABUF,
@@ -2664,7 +2665,7 @@ std::unique_ptr<VkImageCreateInfo> VkEmulation::generateColorBufferVkImageCreate
     }
     if (!maybeImageSupportInfo) {
         GFXSTREAM_ERROR("Format %s [%d] is not supported.", string_VkFormat(format), format);
-        fprintf(stderr, "CBVK-FAIL: format %d not in supported table\n", format);
+        GFXSTREAM_DIAG_PRINT( "CBVK-FAIL: format %d not in supported table\n", format);
         return nullptr;
     }
     const VkEmulation::ImageSupportInfo& imageSupportInfo = *maybeImageSupportInfo;
@@ -2781,7 +2782,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     if (!isFormatVulkanCompatible(internalFormat)) {
         GFXSTREAM_ERROR("Failed to create Vk ColorBuffer: format:%d not compatible.",
                         internalFormat);
-        fprintf(stderr, "CBVK-FAIL: internalFormat %d not vk-compatible\n", internalFormat);
+        GFXSTREAM_DIAG_PRINT( "CBVK-FAIL: internalFormat %d not vk-compatible\n", internalFormat);
         return false;
     }
 
@@ -2804,7 +2805,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
             __func__, colorBufferHandle, width, height,
             mDeviceInfo.physdevProps.limits.maxFramebufferWidth,
             mDeviceInfo.physdevProps.limits.maxFramebufferHeight);
-        fprintf(stderr, "CBVK-FAIL: size %ux%u exceeds fb limit %ux%u\n", width, height,
+        GFXSTREAM_DIAG_PRINT( "CBVK-FAIL: size %ux%u exceeds fb limit %ux%u\n", width, height,
                 mDeviceInfo.physdevProps.limits.maxFramebufferWidth,
                 mDeviceInfo.physdevProps.limits.maxFramebufferHeight);
         return false;
@@ -2866,7 +2867,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     // pNext will be filled later.
     if (imageCi == nullptr) {
         // it can happen if the format is not supported
-        fprintf(stderr, "CBVK-FAIL: generateImageCreateInfo null (vkFormat=%d gl=%d)\n",
+        GFXSTREAM_DIAG_PRINT( "CBVK-FAIL: generateImageCreateInfo null (vkFormat=%d gl=%d)\n",
                 vkFormat, internalFormat);
         return false;
     }
@@ -2933,7 +2934,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         formatExternalizable) {
         extImageCiPtr = &extImageCi;
     }
-    fprintf(stderr,
+    GFXSTREAM_DIAG_PRINT(
             "CBVK-EXT: cb=%u vkFormat=%d formatSupportsExternal=%d ahbCompatible=%d extMemHandleInfo=%d "
             "supportsExternalMemoryExport=%d supportsDmaBuf=%d imageExportBroken=%d handleTypes=0x%x "
             "-> external=%d\n",
@@ -2967,7 +2968,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         drmExplicit.pPlaneLayouts = &planeLayout;
         imageCi->tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
         imageCi->pNext = &drmExplicit;
-        fprintf(stderr, "CBVK-EXT: cb=%u DRM_MODIFIER LINEAR rowPitch=%llu\n", colorBufferHandle,
+        GFXSTREAM_DIAG_PRINT( "CBVK-EXT: cb=%u DRM_MODIFIER LINEAR rowPitch=%llu\n", colorBufferHandle,
                 (unsigned long long)planeLayout.rowPitch);
     } else {
         imageCi->pNext = extImageCiPtr;
@@ -2979,7 +2980,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     if (createRes != VK_SUCCESS) {
         GFXSTREAM_DEBUG("Failed to create Vulkan image for ColorBuffer %d, error: %s",
                         colorBufferHandle, string_VkResult(createRes));
-        fprintf(stderr, "CBVK-FAIL: vkCreateImage res=%d vkFormat=%d usage=0x%x flags=0x%x %ux%u\n",
+        GFXSTREAM_DIAG_PRINT( "CBVK-FAIL: vkCreateImage res=%d vkFormat=%d usage=0x%x flags=0x%x %ux%u\n",
                 createRes, vkFormat, imageCi->usage, imageCi->flags, width, height);
         return false;
     }
@@ -3019,7 +3020,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         vk->vkGetImageMemoryRequirements(mDevice, infoPtr->image, &memReqs);
         memReqBranch = 1;
     }
-    fprintf(stderr,
+    GFXSTREAM_DIAG_PRINT(
             "CBVK-MEMREQ: cb=%u %ux%u fmt=%d branch=%d 2khr=%p plain=%p size=%llu align=%llu "
             "typeBits=0x%x dedicated=%d image=%p\n",
             colorBufferHandle, width, height, internalFormat, memReqBranch,
@@ -3037,7 +3038,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         if (memReqs.memoryTypeBits == 0) {
             memReqs.memoryTypeBits = (uint32_t)((1ull << mDeviceInfo.memProps.memoryTypeCount) - 1);
         }
-        fprintf(stderr, "CBVK-MEMREQ: synthesized size=%llu align=%llu typeBits=0x%x\n",
+        GFXSTREAM_DIAG_PRINT( "CBVK-MEMREQ: synthesized size=%llu align=%llu typeBits=0x%x\n",
                 (unsigned long long)memReqs.size, (unsigned long long)memReqs.alignment,
                 memReqs.memoryTypeBits);
     }
@@ -3180,7 +3181,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
                                             deviceAlignment, kNullopt, dedicatedImage);
         if (!allocRes) {
             GFXSTREAM_ERROR("Failed to allocate ColorBuffer with Vulkan backing.");
-            fprintf(stderr,
+            GFXSTREAM_DIAG_PRINT(
                     "CBVK-FAIL: allocExternalMemory failed size=%llu typeIndex=%u dedicated=%d\n",
                     (unsigned long long)infoPtr->memory.size, infoPtr->memory.typeIndex,
                     useDedicated ? 1 : 0);
@@ -3205,7 +3206,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         imageCi->pNext = nullptr;  // recreate as non-external
         VkResult reCreate = vk->vkCreateImage(mDevice, imageCi.get(), nullptr, &infoPtr->image);
         if (reCreate != VK_SUCCESS) {
-            fprintf(stderr, "CBVK-FAIL: recreate non-external vkCreateImage res=%d\n", reCreate);
+            GFXSTREAM_DIAG_PRINT( "CBVK-FAIL: recreate non-external vkCreateImage res=%d\n", reCreate);
             return false;
         }
         infoPtr->imageCreateInfoShallow = vk_make_orphan_copy(*imageCi);
@@ -3221,11 +3222,11 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         Optional<VkImage> reDedicated =
             useDedicated ? Optional<VkImage>(infoPtr->image) : kNullopt;
         if (!allocExternalMemory(vk, &infoPtr->memory, deviceAlignment, kNullopt, reDedicated)) {
-            fprintf(stderr, "CBVK-FAIL: recreate non-external alloc failed\n");
+            GFXSTREAM_DIAG_PRINT( "CBVK-FAIL: recreate non-external alloc failed\n");
             return false;
         }
         infoPtr->externalMemoryCompatible = false;
-        fprintf(stderr, "CBVK-EXT: cb=%u recreated non-external size=%llu typeIndex=%u\n",
+        GFXSTREAM_DIAG_PRINT( "CBVK-EXT: cb=%u recreated non-external size=%llu typeIndex=%u\n",
                 colorBufferHandle, (unsigned long long)infoPtr->memory.size,
                 infoPtr->memory.typeIndex);
     }
@@ -3245,7 +3246,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     if (bindImageMemoryRes != VK_SUCCESS) {
         GFXSTREAM_ERROR("Failed to bind image memory. Error: %s",
                         string_VkResult(bindImageMemoryRes));
-        fprintf(stderr, "CBVK-FAIL: vkBindImageMemory res=%d\n", bindImageMemoryRes);
+        GFXSTREAM_DIAG_PRINT( "CBVK-FAIL: vkBindImageMemory res=%d\n", bindImageMemoryRes);
         return false;
     }
 
@@ -3290,7 +3291,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
     if (createRes != VK_SUCCESS) {
         GFXSTREAM_DEBUG("Failed to create Vulkan image view for ColorBuffer %d, Error: %s",
                         colorBufferHandle, string_VkResult(createRes));
-        fprintf(stderr, "CBVK-FAIL: vkCreateImageView res=%d vkFormat=%d\n", createRes,
+        GFXSTREAM_DIAG_PRINT( "CBVK-FAIL: vkCreateImageView res=%d vkFormat=%d\n", createRes,
                 imageVkFormat);
         return false;
     }

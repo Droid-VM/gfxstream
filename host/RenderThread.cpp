@@ -13,6 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 */
+#include "GfxstreamDiag.h"
 #include "RenderThread.h"
 
 #include <assert.h>
@@ -275,18 +276,6 @@ void RenderThread::waitForExitSignal() {
 //
 // The startup failure this chases stopped reproducing the moment the packet and handshake traces
 // were added -- eight clean session restarts against a three-in-six baseline, which is not luck.
-// fprintf on this path is a synchronisation point, so the traces themselves perturb the race.
-// They stay, but off by default: GFXSTREAM_DIAG=1 turns them on, and the quiet build is the one
-// the failure rate is measured against.
-static bool gfxDiagEnabled() {
-    static std::once_flag once;
-    static bool on = false;
-    std::call_once(once, [] {
-        const char* v = getenv("GFXSTREAM_DIAG");
-        on = v && v[0] && v[0] != '0';
-    });
-    return on;
-}
 
 // Microseconds to wait before reading the guest's opening word. A probe, not a fix: the traces
 // that made this failure stop reproducing all sit in this window, so if a plain sleep here has the
@@ -314,7 +303,7 @@ intptr_t RenderThread::main() {
     }
 
     std::unique_ptr<RenderThreadInfo> tInfo = std::make_unique<RenderThreadInfo>();
-    if (gfxDiagEnabled()) fprintf(stderr, "RT-ENTER: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
+    GFXSTREAM_DIAG_PRINT( "RT-ENTER: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
     ChecksumCalculatorThreadInfo tChecksumInfo;
     ChecksumCalculator& checksumCalc = tChecksumInfo.get();
     bool needRestoreFromSnapshot = false;
@@ -375,7 +364,7 @@ intptr_t RenderThread::main() {
         // then nothing at all -- no first header, no packet, no seqno wait -- so the thread never
         // receives the guest's opening bytes. These three markers say which side of the handshake
         // that happens on.
-        if (gfxDiagEnabled()) fprintf(stderr, "HS-BEGIN: ctx=%u ring=%d\n", mContextId, mRingStream ? 1 : 0);
+        GFXSTREAM_DIAG_PRINT( "HS-BEGIN: ctx=%u ring=%d\n", mContextId, mRingStream ? 1 : 0);
         if (const unsigned d = startupDelayUs()) usleep(d);
         uint32_t flags = 0;
         struct FlagsOut { uint32_t& dst; uint32_t& src; ~FlagsOut() { dst = src; } }
@@ -398,14 +387,14 @@ intptr_t RenderThread::main() {
                 // with a drained ring and no error on either side. Say so, and say what the read
                 // returned, because the guest cannot tell this apart from a host that is merely
                 // slow.
-                fprintf(stderr,
+                GFXSTREAM_DIAG_PRINT(
                         "HS-GIVEUP: ctx=%u gave up on the opening handshake after %u reads: last "
                         "returned %zu, have %zu of %zu bytes; this thread will never answer\n",
                         mContextId, flagsReads, got, flagsHave, sizeof(flags));
                 setFinished();
                 tInfo.reset();
                 waitForExitSignal();
-                fprintf(stderr, "RT-EXIT-EARLY: thread=%p\n", this);
+                GFXSTREAM_DIAG_PRINT( "RT-EXIT-EARLY: thread=%p\n", this);
                 return 0;
             }
         }
@@ -422,7 +411,7 @@ intptr_t RenderThread::main() {
     GfxApiLogger gfxLogger;
     auto& metricsLogger = FrameBuffer::getFB()->getMetricsLogger();
 
-    if (gfxDiagEnabled()) fprintf(stderr, "HS-DONE: ctx=%u flags=0x%x\n", mContextId, flagsAfterHandshake);
+    GFXSTREAM_DIAG_PRINT( "HS-DONE: ctx=%u flags=0x%x\n", mContextId, flagsAfterHandshake);
 
     const ProcessResources* processResources = nullptr;
     bool anyProgress = false;
@@ -463,7 +452,7 @@ intptr_t RenderThread::main() {
                 if (plausibleOpcode(headerOpcode)) {
                     if (!mResyncChecked) {
                         mResyncChecked = true;
-                        fprintf(stderr,
+                        GFXSTREAM_DIAG_PRINT(
                                 "STREAM-FIRST: process=%s opcode=%u len=%u valid=%u ring=%d\n",
                                 who, headerOpcode, packetSize, (unsigned)readBuf.validData(),
                                 mRingStream ? 1 : 0);
@@ -520,7 +509,7 @@ intptr_t RenderThread::main() {
             if (readBuf.validData() >= 8 && packetSize >= 8 &&
                 readBuf.validData() >= packetSize && !mDecodeStallReported) {
                 mDecodeStallReported = true;
-                fprintf(stderr,
+                GFXSTREAM_DIAG_PRINT(
                         "DECODE-STALL: whole packet present and undecoded: opcode=%u len=%u "
                         "valid=%u ring=%d resynced=%d\n",
                         headerOpcode, packetSize, (unsigned)readBuf.validData(),
@@ -690,7 +679,7 @@ intptr_t RenderThread::main() {
                     // decoder correctly asking for the rest of it.
                     if (liveLen >= 8 && readBuf.validData() >= liveLen) {
                         mVkDeclineReported = true;
-                        fprintf(stderr,
+                        GFXSTREAM_DIAG_PRINT(
                                 "VKDEC-DECLINED: opcode=%u len=%u valid=%u procRes=%d puid=%u\n",
                                 liveOp, liveLen, (unsigned)readBuf.validData(),
                                 processResources ? 1 : 0, (unsigned)tInfo->m_puid);
@@ -790,7 +779,7 @@ intptr_t RenderThread::main() {
     tInfo.reset();
     waitForExitSignal();
 
-    if (gfxDiagEnabled()) fprintf(stderr, "RT-EXIT: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
+    GFXSTREAM_DIAG_PRINT( "RT-EXIT: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
     return 0;
 }
 

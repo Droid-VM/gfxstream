@@ -34,6 +34,8 @@
 #include <cstdint>
 #include <cstdint>
 #include <cstdio>
+
+#include "GfxstreamDiag.h"
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -188,7 +190,7 @@ class HostVisiblePool {
             snprintf(head, sizeof(head), " off=0x%llx",
                      (unsigned long long)chunks[0].offset);
         }
-        fprintf(stderr,
+        GFXSTREAM_DIAG_PRINT(
                 "GFXPOOL: %s req=%lluKB chg=%lluKB align=%lluKB nchunks=%zu%s "
                 "used=%lluKB high=%lluKB free=%lluKB largest=%lluKB blocks=%zu\n",
                 what, (unsigned long long)(reqSize >> 10), (unsigned long long)(chargedSize >> 10),

@@ -30,6 +30,7 @@
 // $CEREAL_OUTPUT_DIR
 //
 
+#include "GfxstreamDiag.h"
 #include "VkDecoder.h"
 #include "DecoderProfile.h"
 
@@ -182,7 +183,7 @@ static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32
     if (!sSeen.insert({name, opcode}).second) return;
     // fprintf, not GFXSTREAM_ERROR: crosvm sets the gfxstream log level so that neither warnings
     // nor errors are emitted, and a diagnostic nobody can read is the same as no diagnostic.
-    fprintf(stderr,
+    GFXSTREAM_DIAG_PRINT(
             "DECODE-UNKNOWN: process=%s opcode=%u packetLen=%u -- no case for this opcode, the "
             "stream stalls here permanently\n",
             name.c_str(), opcode, packetLen);
@@ -319,6 +320,12 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                     // early would let the decoder run a packet out of order, which is worse than
                     // hanging; it exists to make the hang say who is waiting on what, since the
                     // health monitor's annotations only surface if a hang report is collected.
+                    // Past this the wait has stopped being ordinary cross-thread latency;
+                    // below it, every report describes a healthy stream.
+                    constexpr uint64_t kSpinsWorthReporting = 4096;
+                    // And past this it is not a wait at all. ~4M spins with the yields and sleeps
+                    // below it is seconds of going nowhere.
+                    constexpr uint64_t kSpinsThatMeanStuck = 1ull << 22;
                     uint64_t spins = 0;
                     // A lost increment is unrecoverable as written. The counter is advanced once
                     // per decoded packet, in each opcode's epilogue; any packet whose seqno is
@@ -357,7 +364,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         if (seqnoRepairEnabled() && spins > 65536 &&
                             std::chrono::steady_clock::now() > seqnoDeadline) {
                             if (delta > 1) {
-                                fprintf(stderr,
+                                GFXSTREAM_DIAG_PRINT(
                                         "SEQNO-REPAIR: counter stuck at %u, packet needs %u "
                                         "(opcode=%u process=%s) -- an increment was lost; "
                                         "advancing the counter rather than waiting forever\n",
@@ -377,7 +384,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                 // the whole process the moment the counter looks wrong, and a KDE
                                 // session then composites black. Only after seconds of nothing
                                 // moving, which healthy traffic never reaches.
-                                fprintf(stderr,
+                                GFXSTREAM_DIAG_PRINT(
                                         "SEQNO-STALE: counter at %u is past packet %u "
                                         "(opcode=%u process=%s) -- proceeding without it\n",
                                         have, seqno, opcode, processName ? processName : "null");
@@ -385,7 +392,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                             break;
                         }
                         if (shouldExit.load(std::memory_order_relaxed)) {
-                            fprintf(stderr,
+                            GFXSTREAM_DIAG_PRINT(
                                     "SEQNO-ABORT: process=%s exiting, skipping seqno=%d on "
                                     "thread=0x%llx\n",
                                     processName ? processName : "null", seqno,
@@ -424,9 +431,15 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         // records -- the ones naming who owns which counter -- out of the ring
                         // buffer before they can be read. This caps a stuck thread at ~60 lines
                         // for its whole life while still reporting promptly.
+                        //
+                        // Only once the wait is long enough to be worth a line. Reporting from
+                        // the first spin described the ordinary case -- a value one or two
+                        // packets away, arriving within microseconds -- and a single vkmark run
+                        // emitted 5293 of these, 400 waits' worth, all of them healthy. What is
+                        // left says "this wait is pathological", which is what the name claims.
                         ++spins;
-                        if ((spins & (spins - 1)) == 0) {
-                            fprintf(stderr,
+                        if (spins >= kSpinsWorthReporting && (spins & (spins - 1)) == 0) {
+                            GFXSTREAM_DIAG_PRINT(
                                 "seqno loop stuck: want=%u have=%u opcode=%u process=%s "
                                 "counter=%p thread=0x%llx spins=%llu\n",
                                 seqno, seqnoPtr->load(std::memory_order_seq_cst), opcode,
@@ -434,6 +447,18 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                 (const void*)processResources,
                                 (unsigned long long)getCurrentThreadId(),
                                 (unsigned long long)spins);
+                        }
+                        // A wait this long is a hang, not a slow packet, and a shipping build
+                        // should still be able to say so. Once per wait, so a wedged thread
+                        // contributes one line rather than a stream.
+                        if (spins == kSpinsThatMeanStuck) {
+                            fprintf(stderr,
+                                    "seqno wait has not ended: want=%u have=%u opcode=%u "
+                                    "process=%s thread=0x%llx -- set GFXSTREAM_DIAG=1 for the "
+                                    "full picture\n",
+                                    seqno, seqnoPtr->load(std::memory_order_seq_cst), opcode,
+                                    processName ? processName : "null",
+                                    (unsigned long long)getCurrentThreadId());
                         }
                     }
                     m_prevSeqno = seqno;
@@ -23361,7 +23386,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         // both sides, and whatever did it has to appear in these eight lines.
         if (gfxDiagEnabled() && mEarlyPacketsLogged < 40) {
             ++mEarlyPacketsLogged;
-            fprintf(stderr,
+            GFXSTREAM_DIAG_PRINT(
                     "PKT#%u: opcode=%u len=%u seqno=%s counter=%u->%u\n", mEarlyPacketsLogged,
                     opcode, packetLen,
                     thisPacketSeqno ? std::to_string(*thisPacketSeqno).c_str() : "none",

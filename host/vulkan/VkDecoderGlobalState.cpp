@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#include "GfxstreamDiag.h"
 #include "VkDecoderGlobalState.h"
 #include "DecoderProfile.h"
 
@@ -3201,7 +3202,7 @@ class VkDecoderGlobalState::Impl {
                 if (s->sType == VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT)
                     hasModExplicit = true;
             }
-            fprintf(stderr,
+            GFXSTREAM_DIAG_PRINT(
                     "ZC-CREATEIMG: fmt=%u tiling=%u usage=0x%x %ux%u extMem=%d modList=%d "
                     "modExplicit=%d\n",
                     (unsigned)pCreateInfo->format, (unsigned)pCreateInfo->tiling,
@@ -3297,7 +3298,7 @@ class VkDecoderGlobalState::Impl {
             !nativeBufferANDROID) {
             const auto* extMem = vk_find_struct<VkExternalMemoryImageCreateInfo>(pCreateInfo);
             if (extMem && zcTraceEnabled()) {
-                fprintf(stderr, "ZC-CREATEIMG: extMem handleTypes=0x%x tiling=%d\n",
+                GFXSTREAM_DIAG_PRINT( "ZC-CREATEIMG: extMem handleTypes=0x%x tiling=%d\n",
                         (unsigned)extMem->handleTypes, (int)pCreateInfo->tiling);
             }
             // Trigger for dma-buf-CLASS external images: DMA_BUF *or* ANDROID_HARDWARE_BUFFER.
@@ -3361,7 +3362,7 @@ class VkDecoderGlobalState::Impl {
                 zcModCreateInfo.pNext = &zcExtMem;
                 pCreateInfo = &zcModCreateInfo;
                 if (zcTraceEnabled()) {
-                    fprintf(stderr,
+                    GFXSTREAM_DIAG_PRINT(
                             "ZC-CREATEIMG: converted guest image to DRM_MODIFIER LINEAR "
                             "(dmabuf-only) rowPitch=%llu\n",
                             (unsigned long long)zcPlaneLayout.rowPitch);
@@ -3585,12 +3586,12 @@ class VkDecoderGlobalState::Impl {
 
         VALIDATE_REQUIRED_HANDLE(memory);
         if (zcTraceEnabled()) {
-            fprintf(stderr, "ZC-BIND: before vkBindImageMemory image=%p memory=%p offset=%llu\n",
+            GFXSTREAM_DIAG_PRINT( "ZC-BIND: before vkBindImageMemory image=%p memory=%p offset=%llu\n",
                     (void*)image, (void*)memory, (unsigned long long)memoryOffset);
         }
         VkResult result = vk->vkBindImageMemory(device, image, memory, memoryOffset);
         if (zcTraceEnabled()) {
-            fprintf(stderr, "ZC-BIND: after vkBindImageMemory res=%d\n", (int)result);
+            GFXSTREAM_DIAG_PRINT( "ZC-BIND: after vkBindImageMemory res=%d\n", (int)result);
         }
         if (result != VK_SUCCESS) {
             return result;
@@ -6638,7 +6639,7 @@ class VkDecoderGlobalState::Impl {
                     createBlobInfoPtr = &syntheticBlobInfo;
                     importCbInfoPtr = nullptr;
                     importBufferInfoPtr = nullptr;
-                    fprintf(stderr,
+                    GFXSTREAM_DIAG_PRINT(
                             "GUESTBLOB-REIMPORT: resource=%u bound through its own dma-buf "
                             "(no colour buffer)\n",
                             resHandle);
@@ -7057,7 +7058,7 @@ class VkDecoderGlobalState::Impl {
                 (createBlobInfoPtr->blobFlags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
                 // Pairs with GUESTBLOB-CREATE: this is the memory the GPU will actually render
                 // into, named by the id the display side can be matched against.
-                fprintf(stderr, "GUESTBLOB-BIND: blobId=%llu size=%llu\n",
+                GFXSTREAM_DIAG_PRINT( "GUESTBLOB-BIND: blobId=%llu size=%llu\n",
                         (unsigned long long)createBlobInfoPtr->blobId,
                         (unsigned long long)localAllocInfo.allocationSize);
 // DroidVM: the Android host (Gunyah pVM on the phone) DOES use dmabuf for guest-alloc: the guest
@@ -7198,7 +7199,7 @@ class VkDecoderGlobalState::Impl {
                                 vk_append_struct(&structChainIter, &importFdInfo);
                                 poolOffset = (int64_t)chunks[0].offset;
                                 poolSize = chunks[0].size;
-                                fprintf(stderr,
+                                GFXSTREAM_DIAG_PRINT(
                                         "GFXPOOL: alloc size=%llu -> pool offset=0x%llx blobId=%llu "
                                         "(no SHARE)\n",
                                         (unsigned long long)localAllocInfo.allocationSize,
@@ -7943,7 +7944,7 @@ class VkDecoderGlobalState::Impl {
             // Which (context, blobId) this pool slice is filed under: three swapchain images
             // reporting one offset means either the allocator handed the same slice out twice or
             // several blob ids resolved to one allocation.
-            fprintf(stderr, "GFXPOOL: register ctx=%u blobId=%llu poolOffset=0x%llx size=%llu\n",
+            GFXSTREAM_DIAG_PRINT( "GFXPOOL: register ctx=%u blobId=%llu poolOffset=0x%llx size=%llu\n",
                     virtioGpuContextId, (unsigned long long)hostBlobId,
                     (unsigned long long)info->poolOffset, (unsigned long long)info->size);
             info->blobId = hostBlobId;

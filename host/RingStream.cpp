@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "GfxstreamDiag.h"
 #include "RingStream.h"
 
 #include <assert.h>
@@ -71,8 +72,8 @@ struct asg_context CreateContext(const AsgConsumerCreateInfo& info) {
     // These are the numbers that say whether that is true: the storage base this side was handed,
     // the ring's own read and write positions as it sees them, and the state byte it is about to
     // write through.
-    if (getenv("GFXSTREAM_DIAG")) {
-        fprintf(stderr,
+    if (::gfxstream::diagEnabled()) {
+        GFXSTREAM_DIAG_PRINT(
                 "RING-VIEW: storage=%p to_host=%p state=%p write=%u read=%u stateval=%u "
                 "buffer=%p size=%u\n",
                 (void*)info.ring_storage, (void*)context.to_host, (void*)context.host_state,
@@ -387,14 +388,14 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                     // A thread that parks once and stays there never reaches a periodic
                     // limit, so always report the first few.
                     if (++mParkReports <= 3 || (mParkReports & 0xFF) == 0) {
-                        fprintf(stderr,
+                        GFXSTREAM_DIAG_PRINT(
                                 "PARK-STATE: decoded %llu packets, last opcode=%u, ring has %u "
                                 "bytes\n",
                                 (unsigned long long)mDecodedCount, mLastDecoded, availBeforePark);
                     }
                     if (availBeforePark > 0) {
                         ++mParkSpins;
-                        fprintf(stderr,
+                        GFXSTREAM_DIAG_PRINT(
                                 "PARK-WITH-DATA: %u bytes in the ring, pending packet opcode=%u "
                                 "want=%u have=%u, occurrence %llu\n",
                                 availBeforePark, mPendingOpcode, mPendingWant, mPendingHave,
@@ -408,7 +409,7 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                         const uint64_t key = ((uint64_t)mPendingOpcode << 32) | mPendingWant;
                         if (key != mReportedPartial) {
                             mReportedPartial = key;
-                            fprintf(stderr,
+                            GFXSTREAM_DIAG_PRINT(
                                     "PARK-WITH-PARTIAL: empty ring but holding %u of %u bytes of "
                                     "opcode=%u\n",
                                     mPendingHave, mPendingWant, mPendingOpcode);

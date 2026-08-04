@@ -14,6 +14,7 @@
 * limitations under the License.
 */
 
+#include "GfxstreamDiag.h"
 #include "FrameBuffer.h"
 
 #include <stdio.h>
@@ -1777,7 +1778,7 @@ void FrameBuffer::Impl::createColorBufferWithResourceHandle(int p_width, int p_h
 HandleType FrameBuffer::Impl::createColorBufferWithResourceHandleLocked(
     int p_width, int p_height, GLenum p_internalFormat, FrameworkFormat p_frameworkFormat,
     HandleType handle) {
-    fprintf(stderr, "createColorBuffer: emulationGl=%p emulationVk=%p format=%d fwfmt=%d %dx%d\n",
+    GFXSTREAM_DIAG_PRINT( "createColorBuffer: emulationGl=%p emulationVk=%p format=%d fwfmt=%d %dx%d\n",
             (void*)m_emulationGl.get(), (void*)m_emulationVk.get(), p_internalFormat,
             p_frameworkFormat, p_width, p_height);
     ColorBufferPtr cb =
@@ -2104,7 +2105,7 @@ std::unordered_set<uint64_t> FrameBuffer::Impl::markProcessRenderThreadsForExit(
                 return;
             }
             const bool mine = i->m_processInstance == processInstance;
-            fprintf(stderr, "MARK-EXIT: puid=%llu tearing down instance=%llu; thread %llu is on "
+            GFXSTREAM_DIAG_PRINT( "MARK-EXIT: puid=%llu tearing down instance=%llu; thread %llu is on "
                             "instance=%llu -> %s\n",
                     (unsigned long long)puid, (unsigned long long)processInstance,
                     (unsigned long long)i->m_id, (unsigned long long)i->m_processInstance,

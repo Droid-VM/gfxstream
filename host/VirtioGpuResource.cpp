@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "GfxstreamDiag.h"
 #include "VirtioGpuResource.h"
 
 #include <drm/drm_fourcc.h>
@@ -175,7 +176,7 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
                 std::shared_ptr<RingBlob> pblob = std::move(pooled);
                 if (void* addr = pblob->map()) std::memset(addr, 0, poolSize);
                 pool.pinned.push_back(pblob);
-                fprintf(stderr, "RINGBLOB-POOL: id=%u size=%llu -> pool offset=0x%llx (no SHARE)\n",
+                GFXSTREAM_DIAG_PRINT( "RINGBLOB-POOL: id=%u size=%llu -> pool offset=0x%llx (no SHARE)\n",
                         id, (unsigned long long)poolSize,
                         (unsigned long long)chunks[0].offset);
                 return pblob;
@@ -244,7 +245,7 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
             }
             close(hfd);
             if (collapseRet) {
-                fprintf(stderr, "RINGBLOB-POOL: collapse failed id=%u rounded=%llu errno=%d\n",
+                GFXSTREAM_DIAG_PRINT( "RINGBLOB-POOL: collapse failed id=%u rounded=%llu errno=%d\n",
                         id, (unsigned long long)roundedSize, collapseErrno);
             }
         }
@@ -259,7 +260,7 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
     if (void* addr = blob->map()) {
         std::memset(addr, 0, roundedSize);
         if (mlock(addr, roundedSize) != 0) {
-            fprintf(stderr, "RINGBLOB-PIN: mlock failed id=%u size=%llu errno=%d\n", id,
+            GFXSTREAM_DIAG_PRINT( "RINGBLOB-PIN: mlock failed id=%u size=%llu errno=%d\n", id,
                     (unsigned long long)size, errno);
         }
     }
@@ -579,7 +580,7 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
             // The display side knows resources; the allocation side knows blob ids; nothing wrote
             // down which is which, so "kwin scans out 46/52/62 while the GPU is bound to 39/40/41"
             // could not be turned into "and 46/52/62 were never bound at all".
-            fprintf(stderr, "GUESTBLOB-CREATE: res=%u blobId=%llu size=%llu\n", resourceId,
+            GFXSTREAM_DIAG_PRINT( "GUESTBLOB-CREATE: res=%u blobId=%llu size=%llu\n", resourceId,
                     (unsigned long long)createBlobArgs->blob_id,
                     (unsigned long long)createBlobArgs->size);
 #if defined(__ANDROID__)

@@ -14,6 +14,7 @@
 
 #include <atomic>
 
+#include "GfxstreamDiag.h"
 #include "VirtioGpuFrontend.h"
 
 #include "gfxstream/host/external_object_manager.h"
@@ -163,7 +164,7 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
     // Whether this path runs at all. The counter reset below has never printed, and the two
     // explanations -- the id here not being the one a render thread keys on, and this function not
     // being on the path contexts actually take -- are told apart by whether this line appears.
-    fprintf(stderr, "CTX-CREATE: contextId=%u name=%s\n", contextId,
+    GFXSTREAM_DIAG_PRINT("CTX-CREATE: contextId=%u name=%s\n", contextId,
             contextName.empty() ? "(none)" : contextName.c_str());
 
     auto contextOpt = VirtioGpuContext::Create(mRenderer, contextId, contextName, contextInit);
@@ -202,7 +203,7 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
     // and freeing it under them is what took the VM down when this was attempted from the destroy
     // side. One small object per context re-creation, a few dozen over a session.
     if (auto stale = FrameBuffer::getFB()->removeGraphicsProcessResources(contextId)) {
-        fprintf(stderr, "SEQNO-FORK: context %u re-created; retiring its old counter\n", contextId);
+        GFXSTREAM_DIAG_PRINT( "SEQNO-FORK: context %u re-created; retiring its old counter\n", contextId);
         mRetiredProcessResources.push_back(std::move(stale));
     }
     FrameBuffer::getFB()->createGraphicsProcessResources(contextId);
