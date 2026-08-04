@@ -2076,71 +2076,49 @@ std::unique_ptr<ProcessResources> FrameBuffer::Impl::removeGraphicsProcessResour
 
 std::unordered_set<uint64_t> FrameBuffer::Impl::markProcessRenderThreadsForExit(
     uint64_t puid, uint64_t processInstance) {
-    // Decide once who is being torn down, and name them by something that is never handed out
-    // twice.
+    // Named for what it used to attempt. It no longer signals anything, and the set it returns is
+    // reported, not waited on.
     //
-    // A guest process id is the guest's context id, and the guest reuses it the moment the process
-    // holding it exits. The teardown this replaces re-read the registry every 10ms and set
-    // m_shouldExit on whatever carried the puid at that moment; worse, it ran on the cleanup
-    // worker, long after the context was destroyed. A replacement process -- XWayland respawning,
-    // a KDE session restarting -- routinely owns the id by then, so the teardown told the
-    // replacement's own render thread to exit.
+    // The signal was m_shouldExit, and nothing acts on it in a way that ends a thread: RenderThread
+    // never reads it, and its one consumer is the Vulkan decoder, which answers it by abandoning
+    // the packet it is on and returning zero for every packet after -- which the render thread
+    // reads as "need more data" and answers by waiting for one more byte than the guest will send.
+    // So the flag could only wedge a thread, and teardown would then wait for one it had just
+    // wedged. That is the deadlock this whole area was chasing, arriving from the inside.
     //
-    // That thread does not exit. Once shouldExit is set the Vulkan decoder abandons the packet it
-    // is on and returns zero for every packet after it, which the render thread reads as "need
-    // more data" and answers by waiting for one more byte than the guest ever sends. The guest is
-    // by then waiting for the reply to that packet, so neither side moves again. Seen as a fresh
-    // XWayland parked in vkWaitSemaphores for the whole session -- X clients then hang on connect
-    // because it stopped accepting -- and as a restarted kwin doing the same, which is a desktop
-    // that never draws.
+    // Waiting without the flag is no better. Three configurations, same harness, same golden
+    // image, twenty session restarts each:
     //
-    // Matching on the id alone is not enough even here, because a context destroy can reach the
-    // host after the replacement context of the same id is already running: measured as a live
-    // XWayland told to exit at the same point in its startup, run after run. So match on which
-    // use of the id this is as well.
-    std::unordered_set<uint64_t> victims;
+    //   teardown does nothing (the id it carried never matched a thread)   20/20 desktops
+    //   teardown flags the dying instance's own threads                     1/6, guest unreachable
+    //   teardown waits for them without flagging                            0/6, kwin never starts
+    //
+    // What ends a render thread here is the guest closing its stream, which it does on its own.
+    // Teardown's job is to free what the process owned, and the guard in destroyInstanceObjects is
+    // what makes that safe against a straggler rather than a wait that costs a working session.
+    std::unordered_set<uint64_t> stragglers;
     RenderThreadInfo::forAllRenderThreadInfos(
-        [puid, processInstance, &victims](RenderThreadInfo* i) {
-            if (i->m_puid != puid) {
+        [puid, processInstance, &stragglers](RenderThreadInfo* i) {
+            if (i->m_puid != puid || i->m_processInstance != processInstance) {
                 return;
             }
-            const bool mine = i->m_processInstance == processInstance;
-            GFXSTREAM_DIAG_PRINT( "MARK-EXIT: puid=%llu tearing down instance=%llu; thread %llu is on "
-                            "instance=%llu -> %s\n",
-                    (unsigned long long)puid, (unsigned long long)processInstance,
-                    (unsigned long long)i->m_id, (unsigned long long)i->m_processInstance,
-                    mine ? "exit" : "left alone");
-            if (!mine) {
-                return;
-            }
-            victims.insert(i->m_id);
-            bool shouldExit = false;
-            i->m_shouldExit.compare_exchange_strong(shouldExit, true);
+            stragglers.insert(i->m_id);
         });
-    return victims;
+    if (!stragglers.empty()) {
+        GFXSTREAM_DIAG_PRINT(
+            "TEARDOWN: puid=%llu instance=%llu still has %zu render thread(s); freeing anyway\n",
+            (unsigned long long)puid, (unsigned long long)processInstance, stragglers.size());
+    }
+    return stragglers;
 }
 
 void FrameBuffer::Impl::cleanupProcGLObjects(
     uint64_t puid, const std::unordered_set<uint64_t>& renderThreadsToWaitFor) {
     std::unordered_set<uint64_t> victims = renderThreadsToWaitFor;
 
-    while (!victims.empty()) {
-        bool anyVictimStillRunning = false;
-        RenderThreadInfo::forAllRenderThreadInfos(
-            [&victims, &anyVictimStillRunning](RenderThreadInfo* i) {
-                // By id rather than by puid, so that a render thread which took this puid after
-                // the snapshot is neither signalled nor waited for; and by id rather than by
-                // address, because the allocator reuses the address of a thread that has already
-                // gone, which would leave this waiting on a thread that no longer exists.
-                if (victims.count(i->m_id)) {
-                    anyVictimStillRunning = true;
-                }
-            });
-        if (!anyVictimStillRunning) {
-            break;
-        }
-        gfxstream::base::sleepUs(10000);
-    }
+    // No wait. See markProcessRenderThreadsForExit: every configuration that waited here scored
+    // worse than not waiting, and the straggler case is handled where it actually bites.
+    (void)renderThreadsToWaitFor;
 
 
     AutoLock mutex(m_lock);

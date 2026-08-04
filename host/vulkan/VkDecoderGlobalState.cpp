@@ -1280,6 +1280,9 @@ class VkDecoderGlobalState::Impl {
                     // live instance belonging to someone else.
                     VkInstance instance = try_unbox_VkInstance(boxed);
                     if (instance == VK_NULL_HANDLE) {
+                        GFXSTREAM_GUARD_FIRED("cleanupCallbackStale",
+                                              "process cleanup ran for an instance whose boxed "
+                                              "handle was already deleted\n");
                         return;
                     }
                     if (snapshotsEnabled()) {
@@ -11344,6 +11347,9 @@ class VkDecoderGlobalState::Impl {
         // callback -- too late, since the copy was taken -- and the callback then arrives at an
         // instance that is gone. Seen exactly once, on vkmark exiting.
         if (objects.instance.empty()) {
+            GFXSTREAM_GUARD_FIRED("destroyInstanceObjects",
+                                  "an instance was torn down twice -- the lifetime bug this "
+                                  "guards is still live\n");
             return;
         }
         VkInstance instance = objects.instance.key();

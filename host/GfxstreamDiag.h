@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,4 +47,19 @@ inline bool diagEnabled() {
         if (::gfxstream::diagEnabled()) {            \
             fprintf(stderr, __VA_ARGS__);            \
         }                                            \
+    } while (0)
+
+// A defensive guard firing is evidence, not safety. Each of these was added to stop a crash whose
+// cause was never established, so the tree cannot tell "the guard is insurance" from "the bug is
+// still live and the guard is hiding it". Say so, once per site, whether or not diagnostics are
+// on -- a run that prints none of these is the only version of "fixed" worth believing.
+#define GFXSTREAM_GUARD_FIRED(name, ...)                                                 \
+    do {                                                                                 \
+        static std::atomic<bool> reported_{false};                                       \
+        bool expected_ = false;                                                          \
+        if (reported_.compare_exchange_strong(expected_, true)) {                         \
+            fprintf(stderr, "GUARD-FIRED[%s]: ", name);                                  \
+            fprintf(stderr, __VA_ARGS__);                                                \
+            fflush(stderr);                                                              \
+        }                                                                                \
     } while (0)

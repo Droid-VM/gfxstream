@@ -266,6 +266,11 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         // "if (m_queueSubmitWithCommandsEnabled)" that guards a seqnoPtr->fetch_add.
         std::atomic<uint32_t>* seqnoPtr =
             processResources ? processResources->getSequenceNumberPtr() : nullptr;
+        if (!seqnoPtr) {
+            GFXSTREAM_GUARD_FIRED("noSequenceCounter",
+                                  "a packet is being decoded for a process with no counter -- "
+                                  "ordering for it is not being enforced\n");
+        }
 
         std::optional<uint32_t> thisPacketSeqno;
         const uint32_t counterBeforePacket =

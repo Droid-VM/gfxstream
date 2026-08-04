@@ -167,6 +167,19 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
     GFXSTREAM_DIAG_PRINT("CTX-CREATE: contextId=%u name=%s\n", contextId,
             contextName.empty() ? "(none)" : contextName.c_str());
 
+    // Retire the previous occupant's counter before creating the context, not after.
+    //
+    // VirtioGpuContext::Create already makes this context's process resources, and doing it again
+    // afterwards made two per creation. The second advanced the "which use of this id" number a
+    // second time, so the context recorded N while its own render threads recorded N+1, and
+    // teardown -- which carries the context's number -- matched none of its threads. Measured as
+    // 102 of 102 reports reading "tearing down instance=5; thread is on instance=6 -> not mine".
+    if (auto stale = FrameBuffer::getFB()->removeGraphicsProcessResources(contextId)) {
+        GFXSTREAM_DIAG_PRINT("SEQNO-FORK: context %u re-created; retiring its old counter\n",
+                             contextId);
+        mRetiredProcessResources.push_back(std::move(stale));
+    }
+
     auto contextOpt = VirtioGpuContext::Create(mRenderer, contextId, contextName, contextInit);
     if (!contextOpt) {
         GFXSTREAM_ERROR("Failed to create context %u.", contextId);
@@ -202,12 +215,6 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
     // one is deliberately kept alive rather than freed: render threads hold raw pointers into it,
     // and freeing it under them is what took the VM down when this was attempted from the destroy
     // side. One small object per context re-creation, a few dozen over a session.
-    if (auto stale = FrameBuffer::getFB()->removeGraphicsProcessResources(contextId)) {
-        GFXSTREAM_DIAG_PRINT( "SEQNO-FORK: context %u re-created; retiring its old counter\n", contextId);
-        mRetiredProcessResources.push_back(std::move(stale));
-    }
-    FrameBuffer::getFB()->createGraphicsProcessResources(contextId);
-
     return 0;
 }
 
