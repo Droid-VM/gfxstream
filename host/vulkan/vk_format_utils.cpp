@@ -18,6 +18,7 @@
 
 #include "gfxstream/common/logging.h"
 #include "gfxstream/host/gfxstream_format.h"
+#include "gfxstream/host/guest_operations.h"
 #include "vulkan/vk_enum_string_helper.h"
 
 namespace gfxstream {
@@ -416,8 +417,16 @@ bool getFormatTransferInfo(VkFormat format, VkExtent3D extent, TransferInfo* out
         return false;
     }
 
-    const uint32_t alignedWidth =
-        alignToPower2(extent.width, formatInfo->horizontalAlignmentPixels);
+    uint32_t alignmentPixels = formatInfo->horizontalAlignmentPixels;
+    if (format == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM) {
+        if (gfxstream::host::get_gfxstream_guest_android_gralloc() == MINIGBM) {
+            alignmentPixels = 32;
+        } else {
+            alignmentPixels = 1;
+        }
+    }
+
+    const uint32_t alignedWidth = alignToPower2(extent.width, alignmentPixels);
     const uint32_t alignedHeight = extent.height;
     uint32_t cumulativeOffset = 0;
 

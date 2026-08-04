@@ -271,7 +271,16 @@ enum class GfxstreamFormat : uint32_t {
      *   Vulkan: VK_FORMAT_A8_UNORM_KHR
      */
     A8_UNORM,
+
+    /**
+     * Indicates the last valid format for validity checks.
+     */
+    LAST = A8_UNORM,
 };
+
+inline bool IsValidGfxstreamFormat(uint32_t value) {
+    return value <= static_cast<uint32_t>(GfxstreamFormat::LAST);
+}
 
 inline bool IsYuvFormat(GfxstreamFormat format) {
     switch (format) {

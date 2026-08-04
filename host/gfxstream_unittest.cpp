@@ -20,18 +20,19 @@
 #include "gfxstream/system/System.h"
 #include "gfxstream/virtio-gpu-gfxstream-renderer-unstable.h"
 #include "gfxstream/virtio-gpu-gfxstream-renderer.h"
+#include "virtgpu_gfxstream_protocol.h"
 #include "virtio_gpu_format_utils.h"
 
 using gfxstream::base::sleepMs;
 
 class GfxStreamBackendTest : public ::testing::Test {
-private:
- static void sWriteFence(void* cookie, struct stream_renderer_fence* fence) {
-     uint32_t current = *(uint32_t*)cookie;
-     if (current < fence->fence_id) *(uint64_t*)(cookie) = fence->fence_id;
- }
+   private:
+    static void sWriteFence(void* cookie, struct stream_renderer_fence* fence) {
+        uint32_t current = *(uint32_t*)cookie;
+        if (current < fence->fence_id) *(uint64_t*)(cookie) = fence->fence_id;
+    }
 
-protected:
+   protected:
     uint32_t cookie;
     static const bool useWindow;
     std::vector<stream_renderer_param> streamRendererParams;
@@ -87,7 +88,7 @@ protected:
 std::unique_ptr<OSWindow> GfxStreamBackendTest::window = nullptr;
 
 const bool GfxStreamBackendTest::useWindow =
-        gfxstream::base::getEnvironmentVariable("ANDROID_EMU_TEST_WITH_WINDOW") == "1";
+    gfxstream::base::getEnvironmentVariable("ANDROID_EMU_TEST_WITH_WINDOW") == "1";
 
 TEST_F(GfxStreamBackendTest, Init) {
     stream_renderer_init(streamRendererParams.data(), streamRendererParams.size());
@@ -99,14 +100,14 @@ TEST_F(GfxStreamBackendTest, InitOpenGLWindow) {
     }
 
     std::vector<stream_renderer_param> glParams = streamRendererParams;
-    for (auto& param: glParams) {
+    for (auto& param : glParams) {
         if (param.key == STREAM_RENDERER_PARAM_RENDERER_FLAGS) {
             param.value = rendererFlags;
         }
     }
     stream_renderer_init(glParams.data(), glParams.size());
-    gfxstream_backend_setup_window(window->getFramebufferNativeWindow(), 0, 0,
-                                       width, height, width, height);
+    gfxstream_backend_setup_window(window->getFramebufferNativeWindow(), 0, 0, width, height, width,
+                                   height);
 }
 
 TEST_F(GfxStreamBackendTest, SimpleFlush) {
@@ -202,4 +203,56 @@ TEST_F(GfxStreamBackendTest, MissingRequiredParameter) {
     // Initialize once more for the teardown function.
     int initResult = stream_renderer_init(streamRendererParams.data(), streamRendererParams.size());
     EXPECT_EQ(initResult, 0);
+}
+
+TEST_F(GfxStreamBackendTest, RenderThreadTracking) {
+    int initResult = stream_renderer_init(streamRendererParams.data(), streamRendererParams.size());
+    EXPECT_EQ(initResult, 0);
+    struct GfxstreamMetrics metrics = {};
+    EXPECT_EQ(stream_renderer_get_metrics(&metrics), 0);
+    const uint32_t initialRenderThreads = metrics.render_thread_count;
+    EXPECT_GT(initialRenderThreads, 0);
+
+    {
+        const uint32_t context_id = 1;
+        EXPECT_EQ(stream_renderer_context_create(context_id, 0, nullptr, 0), 0);
+
+        // When `blob_id` is 0, creating a pipe resource which is just for communication:
+        const uint32_t blob_resource_id = 1;
+        const struct stream_renderer_create_blob create_blob = {
+            .blob_mem = STREAM_BLOB_MEM_HOST3D,
+            .blob_flags = STREAM_BLOB_FLAG_USE_MAPPABLE,
+            .blob_id = 0,
+            .size = 2 * 1024 * 1024,
+        };
+        EXPECT_EQ(stream_renderer_create_blob(context_id, blob_resource_id, &create_blob, nullptr,
+                                              0, nullptr),
+                  0);
+
+        const struct gfxstream::gfxstreamContextCreate contextCreate = {
+            .hdr =
+                {
+                    .opCode = GFXSTREAM_CONTEXT_CREATE,
+                },
+            .resourceId = blob_resource_id,
+        };
+        struct stream_renderer_command cmd = {
+            .ctx_id = context_id,
+            .cmd_size = sizeof(contextCreate),
+            .cmd = reinterpret_cast<uint8_t*>(
+                const_cast<struct gfxstream::gfxstreamContextCreate*>(&contextCreate)),
+            .num_in_fences = 0,
+            .fences = nullptr,
+        };
+        EXPECT_EQ(stream_renderer_submit_cmd(&cmd), 0);
+
+        EXPECT_EQ(stream_renderer_get_metrics(&metrics), 0);
+        EXPECT_EQ(metrics.render_thread_count, initialRenderThreads + 1);
+
+        stream_renderer_context_destroy(context_id);
+        stream_renderer_resource_unref(blob_resource_id);
+    }
+
+    EXPECT_EQ(stream_renderer_get_metrics(&metrics), 0);
+    EXPECT_EQ(metrics.render_thread_count, initialRenderThreads);
 }

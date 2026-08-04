@@ -115,6 +115,10 @@ class DeviceOpBuilder {
     // has completed.
     DeviceOpWaitable OnQueueSubmittedWithFence(VkFence fence);
 
+    // Cleans up the internal state when OnQueueSubmittedWithFence won't be called
+    // due to errors.
+    void OnQueueSubmissionAborted(VkFence fence);
+
    private:
     DeviceOpTracker& mTracker;
 
