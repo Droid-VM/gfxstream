@@ -143,37 +143,13 @@ size_t VkDecoder::decode(void* buf, size_t bufsize, IOStream* stream,
 // without advancing the sequence counter. The render thread then re-reads the same bytes forever
 // and every thread of that process waiting on a later sequence number waits forever with it, so a
 // single unknown opcode silently wedges the whole stream. Nothing said so before this.
-// Off by default. Every variant of "repair the counter" has had a side effect of its own -- one
-// let packets run out of order and composited black, two rewound a counter under a live process
-// and took the VM down -- so the baseline has to be the upstream behaviour (wait, and keep
-// waiting) with the escape available for comparison rather than always armed.
-// GFXSTREAM_SEQNO_REPAIR=1 turns it on.
-// Diagnostics that are loud enough to change what they measure.
-//
-// The startup failure this chases stopped reproducing the moment the packet and handshake traces
-// were added -- eight clean session restarts against a three-in-six baseline, which is not luck.
-// fprintf on this path is a synchronisation point, so the traces themselves perturb the race.
-// They stay, but off by default: GFXSTREAM_DIAG=1 turns them on, and the quiet build is the one
-// the failure rate is measured against.
-static bool gfxDiagEnabled() {
-    static std::once_flag once;
-    static bool on = false;
-    std::call_once(once, [] {
-        const char* v = getenv("GFXSTREAM_DIAG");
-        on = v && v[0] && v[0] != '0';
-    });
-    return on;
-}
+// Waiting is all this does, and that is deliberate. Four ways of "repairing" the counter were
+// tried and every one had a side effect worse than the wait: letting packets through on sight
+// removed ordering and composited black, rewinding the counter took the VM down twice, and a
+// forward-only repair left the VM up but the desktop blank. plans/SEQNO_DEAD_ENDS.md has the
+// table. A lost increment is a symptom -- a packet that went missing or an opcode whose guest and
+// host lengths disagree -- and rewriting the tally does not find the missing entry.
 
-static bool seqnoRepairEnabled() {
-    static std::once_flag once;
-    static bool on = false;
-    std::call_once(once, [] {
-        const char* v = getenv("GFXSTREAM_SEQNO_REPAIR");
-        on = v && v[0] && v[0] != '0';
-    });
-    return on;
-}
 
 static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32_t packetLen) {
     static std::mutex sMutex;
@@ -346,8 +322,6 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                     // arrived in seconds it is not going to, so repair the deficit rather than
                     // hang: set the counter to what this packet needs and carry on. Ordering is
                     // preserved for everything after, which is more than a wedged process offers.
-                    const auto seqnoDeadline =
-                        std::chrono::steady_clock::now() + std::chrono::seconds(3);
                     // Signed, and the direction matters. The counter belongs to the guest
                     // process id, but sequence numbers restart at zero in every new guest
                     // process, so a process that takes over a puid arrives with small numbers
@@ -366,36 +340,6 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         // ordering entirely for that process, and ordering is the only reason
                         // this counter exists. Both repairs below therefore happen after seconds
                         // of nothing moving, never on sight.
-                        if (seqnoRepairEnabled() && spins > 65536 &&
-                            std::chrono::steady_clock::now() > seqnoDeadline) {
-                            if (delta > 1) {
-                                GFXSTREAM_DIAG_PRINT(
-                                        "SEQNO-REPAIR: counter stuck at %u, packet needs %u "
-                                        "(opcode=%u process=%s) -- an increment was lost; "
-                                        "advancing the counter rather than waiting forever\n",
-                                        have, seqno, opcode, processName ? processName : "null");
-                                seqnoPtr->store(seqno - 1, std::memory_order_seq_cst);
-                            } else {
-                                // The counter is ahead of this packet, so its slot has already
-                                // gone by and there is nothing left to wait for. Let this packet
-                                // through and leave the counter alone.
-                                //
-                                // Not "rebase the counter onto this packet's numbering": that
-                                // rewinds a counter every other thread of a live process is
-                                // already past, and it took the VM down twice -- once when done
-                                // on sight, once when done after the stall.
-                                //
-                                // Not "let it through on sight" either: that removes ordering for
-                                // the whole process the moment the counter looks wrong, and a KDE
-                                // session then composites black. Only after seconds of nothing
-                                // moving, which healthy traffic never reaches.
-                                GFXSTREAM_DIAG_PRINT(
-                                        "SEQNO-STALE: counter at %u is past packet %u "
-                                        "(opcode=%u process=%s) -- proceeding without it\n",
-                                        have, seqno, opcode, processName ? processName : "null");
-                            }
-                            break;
-                        }
                         if (shouldExit.load(std::memory_order_relaxed)) {
                             GFXSTREAM_DIAG_PRINT(
                                     "SEQNO-ABORT: process=%s exiting, skipping seqno=%d on "
@@ -23389,7 +23333,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         // one ahead before that packet is even processed, so something incremented it with no
         // packet of its own. Print opcode, whether a sequence number was read, and the counter on
         // both sides, and whatever did it has to appear in these eight lines.
-        if (gfxDiagEnabled() && mEarlyPacketsLogged < 40) {
+        if (::gfxstream::diagEnabled() && mEarlyPacketsLogged < 40) {
             ++mEarlyPacketsLogged;
             GFXSTREAM_DIAG_PRINT(
                     "PKT#%u: opcode=%u len=%u seqno=%s counter=%u->%u\n", mEarlyPacketsLogged,
