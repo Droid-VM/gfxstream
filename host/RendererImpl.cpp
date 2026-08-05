@@ -14,6 +14,14 @@
 #include "RendererImpl.h"
 
 #include <assert.h>
+#include <cstdio>
+#include <chrono>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <time.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
 
 #include <algorithm>
 #include <utility>
@@ -135,8 +143,118 @@ RendererImpl::~RendererImpl() {
     mRenderWindow.reset();
 }
 
+
+// What a handoff between two host threads actually costs, measured rather than assumed.
+//
+// The Vulkan decoder's sequence-number wait is exactly this: a thread waiting for a value another
+// thread of the same process is about to write. It currently spins 4096 times on a contended
+// seq_cst load before it even yields. Replacing that with a futex is only worth it if sleeping and
+// being woken costs less than the spinning it replaces, and the crossover decides how long the
+// spin prefix should be -- so measure both on the device rather than quoting figures.
+//
+// GFXSTREAM_HANDOFF_BENCH=1 runs it once at startup and prints the distribution.
+namespace {
+
+uint64_t nowNs() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
+}
+
+int futexCall(std::atomic<uint32_t>* addr, int op, uint32_t val) {
+    return static_cast<int>(syscall(SYS_futex, reinterpret_cast<uint32_t*>(addr), op, val,
+                                    nullptr, nullptr, 0));
+}
+
+void report(const char* what, std::vector<uint64_t>& v) {
+    if (v.empty()) return;
+    std::sort(v.begin(), v.end());
+    fprintf(stderr, "HANDOFF %-22s min=%4llu ns  median=%5llu ns  p90=%6llu ns  max=%7llu ns\n",
+            what, (unsigned long long)v.front(), (unsigned long long)v[v.size() / 2],
+            (unsigned long long)v[v.size() * 9 / 10], (unsigned long long)v.back());
+}
+
+void handoffBench() {
+    constexpr int kRounds = 300;
+    static const int kGapUs = [] {
+        const char* v = getenv("GFXSTREAM_HANDOFF_GAP_US");
+        return v ? atoi(v) : 300;
+    }();
+    for (int mode = 0; mode < 2; ++mode) {
+        const bool useFutex = (mode == 1);
+        std::atomic<uint32_t> word{0};
+        std::atomic<uint64_t> sawAt{0};
+        std::vector<uint64_t> samples;
+        samples.reserve(kRounds);
+
+        std::thread waiter([&] {
+            for (int r = 1; r <= kRounds; ++r) {
+                uint32_t have;
+                while ((have = word.load(std::memory_order_acquire)) != static_cast<uint32_t>(r)) {
+                    if (useFutex) {
+                        futexCall(&word, FUTEX_WAIT_PRIVATE, have);
+                    } else {
+#if defined(__aarch64__)
+                        __asm__ __volatile__("yield");
+#endif
+                    }
+                }
+                sawAt.store(nowNs(), std::memory_order_release);
+            }
+        });
+
+        for (int r = 1; r <= kRounds; ++r) {
+            // Long enough that the waiter is genuinely parked, or genuinely spinning, rather than
+            // still on its way there -- otherwise this times the handshake, not the wakeup.
+            //
+            // But not so long that the core it is on drops into a deep idle state, because then
+            // the wake is timing the exit from that rather than the futex. The real pattern is
+            // waits arriving back to back on warm cores, so sweep this: 300us and 10us should not
+            // give the same answer, and if they do the number is about the futex rather than the
+            // scheduler.
+            std::this_thread::sleep_for(std::chrono::microseconds(kGapUs));
+            sawAt.store(0, std::memory_order_release);
+            const uint64_t t0 = nowNs();
+            word.store(static_cast<uint32_t>(r), std::memory_order_release);
+            if (useFutex) {
+                futexCall(&word, FUTEX_WAKE_PRIVATE, INT32_MAX);
+            }
+            uint64_t t1;
+            while ((t1 = sawAt.load(std::memory_order_acquire)) == 0) {
+#if defined(__aarch64__)
+                __asm__ __volatile__("yield");
+#endif
+            }
+            samples.push_back(t1 - t0);
+        }
+        waiter.join();
+        char label[64];
+        snprintf(label, sizeof(label), "%s gap=%dus",
+                 useFutex ? "futex wake->observe" : "spin store->observe", kGapUs);
+        report(label, samples);
+    }
+
+    // What the producer pays on the hot path if it wakes unconditionally. The seqno counter is
+    // advanced once per decoded packet, so this is the cost a waiters-count check exists to avoid.
+    {
+        std::atomic<uint32_t> word{0};
+        std::vector<uint64_t> samples;
+        for (int r = 0; r < 300; ++r) {
+            const uint64_t t0 = nowNs();
+            futexCall(&word, FUTEX_WAKE_PRIVATE, INT32_MAX);
+            samples.push_back(nowNs() - t0);
+        }
+        report("wake, no waiter", samples);
+    }
+}
+
+}  // namespace
+
 bool RendererImpl::initialize(int width, int height, const gfxstream::host::FeatureSet& features,
                               bool useSubWindow) {
+    if (const char* v = getenv("GFXSTREAM_HANDOFF_BENCH")) {
+        if (v[0] && v[0] != '0') handoffBench();
+    }
     if (mRenderWindow) {
         return false;
     }
