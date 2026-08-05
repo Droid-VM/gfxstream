@@ -32,6 +32,9 @@
 
 #include "GfxstreamDiag.h"
 #include "VkDecoder.h"
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
 #include "DecoderProfile.h"
 
 #include <cstring>
@@ -165,6 +168,27 @@ static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32
             name.c_str(), opcode, packetLen);
 }
 
+
+
+// Advancing the counter has to wake anyone parked on it.
+//
+// Past the point where spinning stops paying, a waiter sleeps on the counter's address rather than
+// on a 100us timer, so an increment that nobody announces leaves it there until the timeout it no
+// longer has. The check is a relaxed load of a process-wide count -- zero for every packet on a
+// healthy stream, which is the case that matters, since this runs once per decoded packet. Waking
+// unconditionally instead measured 313 ns on a warm core and 1 us on a cold one.
+//
+// Process-wide rather than per-counter on purpose: it only decides whether to make the syscall at
+// all, and the syscall itself is keyed by address, so a stray wake reaches nobody else's waiters.
+static std::atomic<int> sSeqnoWaiters{0};
+
+static inline void advanceSeqno(std::atomic<uint32_t>* seqnoPtr) {
+    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+    if (sSeqnoWaiters.load(std::memory_order_relaxed) != 0) {
+        syscall(SYS_futex, reinterpret_cast<uint32_t*>(seqnoPtr), FUTEX_WAKE_PRIVATE, INT32_MAX,
+                nullptr, nullptr, 0);
+    }
+}
 
 size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                const ProcessResources* processResources,
@@ -368,11 +392,35 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         // packets away and arrives within microseconds, then step aside. Sleeping
                         // costs nothing here: by this point the wait has already cost far more
                         // than a wakeup ever will.
+                        // Where sleeping starts paying. Measured on this device: a futex round
+                        // trip is 8.4us on a warm core, while a wait that reaches the yield stage
+                        // has already spent 4096 iterations of a contended seq_cst load -- tens of
+                        // microseconds, well past the crossover. And in one vkmark run 1626 waits
+                        // reached 4096 spins while none reached 8192, so a threshold of 65536 was
+                        // never reached at all and the tail behind it never ran. Tunable so the
+                        // trade can be swept rather than argued.
+                        static const uint64_t kFutexAt = [] {
+                            const char* v = getenv("GFXSTREAM_SEQNO_FUTEX_AT");
+                            return v ? strtoull(v, nullptr, 10) : 65536ull;
+                        }();
                         if (spins > 4096) {
-                            if (spins < 65536) {
+                            if (spins < kFutexAt) {
                                 std::this_thread::yield();
                             } else {
-                                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                                // Sleep on the counter, not on a timer. This used to sleep 100us
+                                // at a time; a futex round trip measured 8.4us on a warm core and
+                                // costs no timer interrupt, and by this point the wait is long
+                                // enough that neither number is the one that matters -- freeing
+                                // the core is, because the value is produced by another thread of
+                                // this same process and spinning here is what starves it.
+                                //
+                                // No lost wakeup: FUTEX_WAIT rechecks the word against `have`
+                                // under the kernel's lock and returns immediately if an increment
+                                // landed between the load above and this call, registered or not.
+                                sSeqnoWaiters.fetch_add(1, std::memory_order_relaxed);
+                                syscall(SYS_futex, reinterpret_cast<uint32_t*>(seqnoPtr),
+                                        FUTEX_WAIT_PRIVATE, have, nullptr, nullptr, 0);
+                                sSeqnoWaiters.fetch_sub(1, std::memory_order_relaxed);
                             }
                         }
                         // Powers of two, not a fixed stride: a thread that never gets unstuck
@@ -501,7 +549,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyInstance: {
@@ -544,7 +592,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkEnumeratePhysicalDevices: {
@@ -645,7 +693,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceFeatures: {
@@ -694,7 +742,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceFormatProperties: {
@@ -747,7 +795,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceImageFormatProperties: {
@@ -828,7 +876,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceProperties: {
@@ -877,7 +925,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceQueueFamilyProperties: {
@@ -978,7 +1026,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceMemoryProperties: {
@@ -1030,7 +1078,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetInstanceProcAddr: {
@@ -1068,7 +1116,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceProcAddr: {
@@ -1106,7 +1154,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateDevice: {
@@ -1182,7 +1230,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyDevice: {
@@ -1224,7 +1272,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkEnumerateInstanceExtensionProperties: {
@@ -1336,7 +1384,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkEnumerateDeviceExtensionProperties: {
@@ -1459,7 +1507,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkEnumerateInstanceLayerProperties: {
@@ -1552,7 +1600,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkEnumerateDeviceLayerProperties: {
@@ -1658,7 +1706,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceQueue: {
@@ -1709,7 +1757,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueSubmit: {
@@ -1764,7 +1812,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueWaitIdle: {
@@ -1782,7 +1830,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                    (unsigned long long)queue);
                 }
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 VkResult vkQueueWaitIdle_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
                     vkQueueWaitIdle_VkResult_return =
@@ -1819,7 +1867,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                    (unsigned long long)device);
                 }
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 VkResult vkDeviceWaitIdle_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
                     vkDeviceWaitIdle_VkResult_return = vk->vkDeviceWaitIdle(unboxed_device);
@@ -1917,7 +1965,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkFreeMemory: {
@@ -1972,7 +2020,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkDeviceMemory(boxed_memory_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkMapMemory: {
@@ -2042,7 +2090,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkUnmapMemory: {
@@ -2074,7 +2122,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkFlushMappedMemoryRanges: {
@@ -2170,7 +2218,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkInvalidateMappedMemoryRanges: {
@@ -2252,7 +2300,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceMemoryCommitment: {
@@ -2300,7 +2348,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkBindBufferMemory: {
@@ -2351,7 +2399,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkBindImageMemory: {
@@ -2401,7 +2449,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetBufferMemoryRequirements: {
@@ -2455,7 +2503,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetImageMemoryRequirements: {
@@ -2509,7 +2557,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetImageSparseMemoryRequirements: {
@@ -2619,7 +2667,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceSparseImageFormatProperties: {
@@ -2734,7 +2782,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueBindSparse: {
@@ -2793,7 +2841,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateFence: {
@@ -2869,7 +2917,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyFence: {
@@ -2923,7 +2971,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkFence(boxed_fence_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkResetFences: {
@@ -2973,7 +3021,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetFenceStatus: {
@@ -3013,7 +3061,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkWaitForFences: {
@@ -3055,7 +3103,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         (unsigned long long)timeout);
                 }
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 VkResult vkWaitForFences_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
                     vkWaitForFences_VkResult_return =
@@ -3154,7 +3202,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroySemaphore: {
@@ -3209,7 +3257,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkSemaphore(boxed_semaphore_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateEvent: {
@@ -3285,7 +3333,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyEvent: {
@@ -3339,7 +3387,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkEvent(boxed_event_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetEventStatus: {
@@ -3380,7 +3428,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkSetEvent: {
@@ -3418,7 +3466,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkResetEvent: {
@@ -3457,7 +3505,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateQueryPool: {
@@ -3539,7 +3587,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyQueryPool: {
@@ -3595,7 +3643,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkQueryPool(boxed_queryPool_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetQueryPoolResults: {
@@ -3671,7 +3719,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateBuffer: {
@@ -3748,7 +3796,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyBuffer: {
@@ -3803,7 +3851,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkBuffer(boxed_buffer_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateBufferView: {
@@ -3884,7 +3932,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyBufferView: {
@@ -3941,7 +3989,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkBufferView(boxed_bufferView_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateImage: {
@@ -4018,7 +4066,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyImage: {
@@ -4072,7 +4120,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkImage(boxed_image_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetImageSubresourceLayout: {
@@ -4159,7 +4207,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateImageView: {
@@ -4237,7 +4285,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyImageView: {
@@ -4292,7 +4340,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkImageView(boxed_imageView_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateShaderModule: {
@@ -4374,7 +4422,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyShaderModule: {
@@ -4433,7 +4481,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delayed_delete_VkShaderModule(boxed_shaderModule_preserve, unboxed_device, nullptr);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreatePipelineCache: {
@@ -4516,7 +4564,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyPipelineCache: {
@@ -4573,7 +4621,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkPipelineCache(boxed_pipelineCache_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPipelineCacheData: {
@@ -4675,7 +4723,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkMergePipelineCaches: {
@@ -4739,7 +4787,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateGraphicsPipelines: {
@@ -4847,7 +4895,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateComputePipelines: {
@@ -4954,7 +5002,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyPipeline: {
@@ -5009,7 +5057,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkPipeline(boxed_pipeline_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreatePipelineLayout: {
@@ -5092,7 +5140,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyPipelineLayout: {
@@ -5156,7 +5204,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                 delayed_remove_callback);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateSampler: {
@@ -5234,7 +5282,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroySampler: {
@@ -5289,7 +5337,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkSampler(boxed_sampler_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateDescriptorSetLayout: {
@@ -5376,7 +5424,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyDescriptorSetLayout: {
@@ -5434,7 +5482,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkDescriptorSetLayout(boxed_descriptorSetLayout_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateDescriptorPool: {
@@ -5517,7 +5565,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyDescriptorPool: {
@@ -5574,7 +5622,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkDescriptorPool(boxed_descriptorPool_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkResetDescriptorPool: {
@@ -5621,7 +5669,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkAllocateDescriptorSets: {
@@ -5701,7 +5749,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkFreeDescriptorSets: {
@@ -5780,7 +5828,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 // Skipping handle cleanup for vkFreeDescriptorSets
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkUpdateDescriptorSets: {
@@ -5851,7 +5899,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateFramebuffer: {
@@ -5933,7 +5981,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyFramebuffer: {
@@ -5989,7 +6037,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkFramebuffer(boxed_framebuffer_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateRenderPass: {
@@ -6070,7 +6118,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyRenderPass: {
@@ -6126,7 +6174,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkRenderPass(boxed_renderPass_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetRenderAreaGranularity: {
@@ -6179,7 +6227,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateCommandPool: {
@@ -6261,7 +6309,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyCommandPool: {
@@ -6317,7 +6365,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkCommandPool(boxed_commandPool_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkResetCommandPool: {
@@ -6363,7 +6411,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkAllocateCommandBuffers: {
@@ -6439,7 +6487,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkFreeCommandBuffers: {
@@ -6515,7 +6563,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkBeginCommandBuffer: {
@@ -6561,7 +6609,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkEndCommandBuffer: {
@@ -6597,7 +6645,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkResetCommandBuffer: {
@@ -6637,7 +6685,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBindPipeline: {
@@ -6678,7 +6726,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetViewport: {
@@ -6729,7 +6777,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetScissor: {
@@ -6780,7 +6828,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetLineWidth: {
@@ -6814,7 +6862,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthBias: {
@@ -6858,7 +6906,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetBlendConstants: {
@@ -6893,7 +6941,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthBounds: {
@@ -6932,7 +6980,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetStencilCompareMask: {
@@ -6972,7 +7020,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetStencilWriteMask: {
@@ -7011,7 +7059,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetStencilReference: {
@@ -7050,7 +7098,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBindDescriptorSets: {
@@ -7130,7 +7178,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBindIndexBuffer: {
@@ -7174,7 +7222,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBindVertexBuffers: {
@@ -7235,7 +7283,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdDraw: {
@@ -7281,7 +7329,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdDrawIndexed: {
@@ -7332,7 +7380,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdDrawIndirect: {
@@ -7380,7 +7428,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdDrawIndexedIndirect: {
@@ -7430,7 +7478,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdDispatch: {
@@ -7471,7 +7519,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdDispatchIndirect: {
@@ -7511,7 +7559,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyBuffer: {
@@ -7570,7 +7618,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyImage: {
@@ -7635,7 +7683,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBlitImage: {
@@ -7704,7 +7752,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyBufferToImage: {
@@ -7769,7 +7817,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyImageToBuffer: {
@@ -7834,7 +7882,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdUpdateBuffer: {
@@ -7886,7 +7934,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdFillBuffer: {
@@ -7934,7 +7982,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdClearColorImage: {
@@ -8002,7 +8050,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdClearDepthStencilImage: {
@@ -8072,7 +8120,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdClearAttachments: {
@@ -8138,7 +8186,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdResolveImage: {
@@ -8206,7 +8254,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetEvent: {
@@ -8245,7 +8293,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdResetEvent: {
@@ -8286,7 +8334,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdWaitEvents: {
@@ -8405,7 +8453,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdPipelineBarrier: {
@@ -8512,7 +8560,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBeginQuery: {
@@ -8558,7 +8606,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdEndQuery: {
@@ -8597,7 +8645,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdResetQueryPool: {
@@ -8643,7 +8691,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdWriteTimestamp: {
@@ -8690,7 +8738,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyQueryPoolResults: {
@@ -8753,7 +8801,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdPushConstants: {
@@ -8811,7 +8859,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBeginRenderPass: {
@@ -8855,7 +8903,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdNextSubpass: {
@@ -8888,7 +8936,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdEndRenderPass: {
@@ -8918,7 +8966,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdExecuteCommands: {
@@ -8967,7 +9015,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -9003,7 +9051,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkBindBufferMemory2: {
@@ -9057,7 +9105,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkBindImageMemory2: {
@@ -9111,7 +9159,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceGroupPeerMemoryFeatures: {
@@ -9166,7 +9214,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDeviceMask: {
@@ -9200,7 +9248,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdDispatchBase: {
@@ -9255,7 +9303,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkEnumeratePhysicalDeviceGroups: {
@@ -9369,7 +9417,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetImageMemoryRequirements2: {
@@ -9427,7 +9475,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetBufferMemoryRequirements2: {
@@ -9485,7 +9533,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetImageSparseMemoryRequirements2: {
@@ -9600,7 +9648,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceFeatures2: {
@@ -9649,7 +9697,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceProperties2: {
@@ -9698,7 +9746,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceFormatProperties2: {
@@ -9752,7 +9800,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceImageFormatProperties2: {
@@ -9828,7 +9876,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceQueueFamilyProperties2: {
@@ -9929,7 +9977,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceMemoryProperties2: {
@@ -9981,7 +10029,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceSparseImageFormatProperties2: {
@@ -10089,7 +10137,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkTrimCommandPool: {
@@ -10129,7 +10177,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceQueue2: {
@@ -10180,7 +10228,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateSamplerYcbcrConversion: {
@@ -10269,7 +10317,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroySamplerYcbcrConversion: {
@@ -10327,7 +10375,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkSamplerYcbcrConversion(boxed_ycbcrConversion_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateDescriptorUpdateTemplate: {
@@ -10419,7 +10467,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyDescriptorUpdateTemplate: {
@@ -10481,7 +10529,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkDescriptorUpdateTemplate(boxed_descriptorUpdateTemplate_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkUpdateDescriptorSetWithTemplate: {
@@ -10538,7 +10586,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceExternalBufferProperties: {
@@ -10610,7 +10658,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceExternalFenceProperties: {
@@ -10676,7 +10724,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceExternalSemaphoreProperties: {
@@ -10743,7 +10791,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDescriptorSetLayoutSupport: {
@@ -10803,7 +10851,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -10864,7 +10912,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdDrawIndexedIndirectCount: {
@@ -10924,7 +10972,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateRenderPass2: {
@@ -11005,7 +11053,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBeginRenderPass2: {
@@ -11055,7 +11103,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdNextSubpass2: {
@@ -11107,7 +11155,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdEndRenderPass2: {
@@ -11148,7 +11196,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkResetQueryPool: {
@@ -11192,7 +11240,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetSemaphoreCounterValue: {
@@ -11245,7 +11293,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkWaitSemaphores: {
@@ -11276,7 +11324,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                    (unsigned long long)pWaitInfo, (unsigned long long)timeout);
                 }
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 VkResult vkWaitSemaphores_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
                     vkWaitSemaphores_VkResult_return = m_state->on_vkWaitSemaphores(
@@ -11337,7 +11385,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetBufferDeviceAddress: {
@@ -11382,7 +11430,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetBufferOpaqueCaptureAddress: {
@@ -11425,7 +11473,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceMemoryOpaqueCaptureAddress: {
@@ -11471,7 +11519,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -11581,7 +11629,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreatePrivateDataSlot: {
@@ -11667,7 +11715,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyPrivateDataSlot: {
@@ -11725,7 +11773,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkPrivateDataSlot(boxed_privateDataSlot_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkSetPrivateData: {
@@ -11781,7 +11829,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPrivateData: {
@@ -11835,7 +11883,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetEvent2: {
@@ -11880,7 +11928,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdResetEvent2: {
@@ -11921,7 +11969,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdWaitEvents2: {
@@ -11984,7 +12032,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdPipelineBarrier2: {
@@ -12024,7 +12072,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdWriteTimestamp2: {
@@ -12070,7 +12118,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueSubmit2: {
@@ -12126,7 +12174,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyBuffer2: {
@@ -12167,7 +12215,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyImage2: {
@@ -12205,7 +12253,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyBufferToImage2: {
@@ -12247,7 +12295,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyImageToBuffer2: {
@@ -12288,7 +12336,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBlitImage2: {
@@ -12327,7 +12375,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdResolveImage2: {
@@ -12368,7 +12416,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBeginRendering: {
@@ -12408,7 +12456,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdEndRendering: {
@@ -12438,7 +12486,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetCullMode: {
@@ -12471,7 +12519,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetFrontFace: {
@@ -12505,7 +12553,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetPrimitiveTopology: {
@@ -12541,7 +12589,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetViewportWithCount: {
@@ -12588,7 +12636,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetScissorWithCount: {
@@ -12634,7 +12682,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBindVertexBuffers2: {
@@ -12730,7 +12778,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthTestEnable: {
@@ -12765,7 +12813,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthWriteEnable: {
@@ -12800,7 +12848,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthCompareOp: {
@@ -12835,7 +12883,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthBoundsTestEnable: {
@@ -12870,7 +12918,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetStencilTestEnable: {
@@ -12905,7 +12953,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetStencilOp: {
@@ -12957,7 +13005,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetRasterizerDiscardEnable: {
@@ -12993,7 +13041,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthBiasEnable: {
@@ -13028,7 +13076,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetPrimitiveRestartEnable: {
@@ -13064,7 +13112,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceBufferMemoryRequirements: {
@@ -13124,7 +13172,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceImageMemoryRequirements: {
@@ -13182,7 +13230,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceImageSparseMemoryRequirements: {
@@ -13296,7 +13344,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -13338,7 +13386,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkMapMemory2: {
@@ -13401,7 +13449,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkUnmapMemory2: {
@@ -13447,7 +13495,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBindIndexBuffer2: {
@@ -13496,7 +13544,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetRenderingAreaGranularity: {
@@ -13553,7 +13601,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceImageSubresourceLayout: {
@@ -13611,7 +13659,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetImageSubresourceLayout2: {
@@ -13683,7 +13731,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdPushDescriptorSet: {
@@ -13750,7 +13798,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdPushDescriptorSetWithTemplate: {
@@ -13812,7 +13860,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetRenderingAttachmentLocations: {
@@ -13855,7 +13903,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetRenderingInputAttachmentIndices: {
@@ -13900,7 +13948,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBindDescriptorSets2: {
@@ -13942,7 +13990,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdPushConstants2: {
@@ -13983,7 +14031,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdPushDescriptorSet2: {
@@ -14025,7 +14073,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdPushDescriptorSetWithTemplate2: {
@@ -14071,7 +14119,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCopyMemoryToImage: {
@@ -14119,7 +14167,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCopyImageToMemory: {
@@ -14167,7 +14215,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCopyImageToImage: {
@@ -14215,7 +14263,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkTransitionImageLayout: {
@@ -14274,7 +14322,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -14360,7 +14408,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroySwapchainKHR: {
@@ -14417,7 +14465,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkSwapchainKHR(boxed_swapchain_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetSwapchainImagesKHR: {
@@ -14518,7 +14566,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkAcquireNextImageKHR: {
@@ -14588,7 +14636,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueuePresentKHR: {
@@ -14631,7 +14679,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceGroupPresentCapabilitiesKHR: {
@@ -14698,7 +14746,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceGroupSurfacePresentModesKHR: {
@@ -14769,7 +14817,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDevicePresentRectanglesKHR: {
@@ -14879,7 +14927,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkAcquireNextImage2KHR: {
@@ -14935,7 +14983,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -14977,7 +15025,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdEndRenderingKHR: {
@@ -15007,7 +15055,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -15058,7 +15106,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceProperties2KHR: {
@@ -15108,7 +15156,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceFormatProperties2KHR: {
@@ -15162,7 +15210,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceImageFormatProperties2KHR: {
@@ -15238,7 +15286,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceQueueFamilyProperties2KHR: {
@@ -15340,7 +15388,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceMemoryProperties2KHR: {
@@ -15392,7 +15440,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPhysicalDeviceSparseImageFormatProperties2KHR: {
@@ -15501,7 +15549,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -15544,7 +15592,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -15618,7 +15666,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -15688,7 +15736,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -15737,7 +15785,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetSemaphoreFdKHR: {
@@ -15789,7 +15837,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -15883,7 +15931,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyDescriptorUpdateTemplateKHR: {
@@ -15946,7 +15994,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkDescriptorUpdateTemplate(boxed_descriptorUpdateTemplate_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkUpdateDescriptorSetWithTemplateKHR: {
@@ -16003,7 +16051,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -16087,7 +16135,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBeginRenderPass2KHR: {
@@ -16138,7 +16186,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdNextSubpass2KHR: {
@@ -16190,7 +16238,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdEndRenderPass2KHR: {
@@ -16231,7 +16279,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -16299,7 +16347,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -16349,7 +16397,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetFenceFdKHR: {
@@ -16403,7 +16451,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -16463,7 +16511,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetBufferMemoryRequirements2KHR: {
@@ -16521,7 +16569,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetImageSparseMemoryRequirements2KHR: {
@@ -16636,7 +16684,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -16728,7 +16776,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroySamplerYcbcrConversionKHR: {
@@ -16786,7 +16834,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkSamplerYcbcrConversion(boxed_ycbcrConversion_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -16843,7 +16891,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkBindImageMemory2KHR: {
@@ -16898,7 +16946,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -16960,7 +17008,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -17007,7 +17055,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetBufferOpaqueCaptureAddressKHR: {
@@ -17052,7 +17100,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceMemoryOpaqueCaptureAddressKHR: {
@@ -17098,7 +17146,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -17218,7 +17266,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPipelineExecutableStatisticsKHR: {
@@ -17336,7 +17384,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPipelineExecutableInternalRepresentationsKHR: {
@@ -17468,7 +17516,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -17516,7 +17564,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdResetEvent2KHR: {
@@ -17557,7 +17605,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdWaitEvents2KHR: {
@@ -17620,7 +17668,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdPipelineBarrier2KHR: {
@@ -17661,7 +17709,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdWriteTimestamp2KHR: {
@@ -17707,7 +17755,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueSubmit2KHR: {
@@ -17766,7 +17814,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -17809,7 +17857,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyImage2KHR: {
@@ -17848,7 +17896,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyBufferToImage2KHR: {
@@ -17890,7 +17938,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdCopyImageToBuffer2KHR: {
@@ -17931,7 +17979,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBlitImage2KHR: {
@@ -17971,7 +18019,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdResolveImage2KHR: {
@@ -18012,7 +18060,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -18075,7 +18123,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceImageMemoryRequirementsKHR: {
@@ -18134,7 +18182,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceImageSparseMemoryRequirementsKHR: {
@@ -18248,7 +18296,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -18300,7 +18348,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetRenderingAreaGranularityKHR: {
@@ -18357,7 +18405,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetDeviceImageSubresourceLayoutKHR: {
@@ -18416,7 +18464,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetImageSubresourceLayout2KHR: {
@@ -18490,7 +18538,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -18532,7 +18580,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -18592,7 +18640,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkAcquireImageANDROID: {
@@ -18652,7 +18700,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueSignalReleaseImageANDROID: {
@@ -18732,7 +18780,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetSwapchainGrallocUsage2ANDROID: {
@@ -18804,7 +18852,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -18897,7 +18945,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyDebugReportCallbackEXT: {
@@ -18956,7 +19004,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkDebugReportCallbackEXT(boxed_callback_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDebugReportMessageEXT: {
@@ -19015,7 +19063,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -19093,7 +19141,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBeginTransformFeedbackEXT: {
@@ -19172,7 +19220,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdEndTransformFeedbackEXT: {
@@ -19251,7 +19299,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBeginQueryIndexedEXT: {
@@ -19303,7 +19351,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdEndQueryIndexedEXT: {
@@ -19348,7 +19396,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdDrawIndirectByteCountEXT: {
@@ -19408,7 +19456,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -19459,7 +19507,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkSetDebugUtilsObjectTagEXT: {
@@ -19507,7 +19555,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueBeginDebugUtilsLabelEXT: {
@@ -19546,7 +19594,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueEndDebugUtilsLabelEXT: {
@@ -19575,7 +19623,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueInsertDebugUtilsLabelEXT: {
@@ -19614,7 +19662,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBeginDebugUtilsLabelEXT: {
@@ -19655,7 +19703,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdEndDebugUtilsLabelEXT: {
@@ -19685,7 +19733,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdInsertDebugUtilsLabelEXT: {
@@ -19726,7 +19774,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateDebugUtilsMessengerEXT: {
@@ -19817,7 +19865,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyDebugUtilsMessengerEXT: {
@@ -19876,7 +19924,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkDebugUtilsMessengerEXT(boxed_messenger_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkSubmitDebugUtilsMessageEXT: {
@@ -19927,7 +19975,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -19999,7 +20047,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -20075,7 +20123,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -20186,7 +20234,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -20228,7 +20276,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -20263,7 +20311,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetFrontFaceEXT: {
@@ -20298,7 +20346,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetPrimitiveTopologyEXT: {
@@ -20334,7 +20382,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetViewportWithCountEXT: {
@@ -20382,7 +20430,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetScissorWithCountEXT: {
@@ -20429,7 +20477,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdBindVertexBuffers2EXT: {
@@ -20526,7 +20574,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthTestEnableEXT: {
@@ -20561,7 +20609,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthWriteEnableEXT: {
@@ -20596,7 +20644,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthCompareOpEXT: {
@@ -20631,7 +20679,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthBoundsTestEnableEXT: {
@@ -20668,7 +20716,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetStencilTestEnableEXT: {
@@ -20703,7 +20751,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetStencilOpEXT: {
@@ -20755,7 +20803,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -20806,7 +20854,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCopyImageToMemoryEXT: {
@@ -20855,7 +20903,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCopyImageToImageEXT: {
@@ -20904,7 +20952,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkTransitionImageLayoutEXT: {
@@ -20963,7 +21011,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetImageSubresourceLayout2EXT: {
@@ -21037,7 +21085,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -21088,7 +21136,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -21169,7 +21217,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkDestroyPrivateDataSlotEXT: {
@@ -21222,7 +21270,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkSetPrivateDataEXT: {
@@ -21278,7 +21326,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetPrivateDataEXT: {
@@ -21332,7 +21380,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -21369,7 +21417,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetRasterizerDiscardEnableEXT: {
@@ -21406,7 +21454,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetDepthBiasEnableEXT: {
@@ -21441,7 +21489,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetLogicOpEXT: {
@@ -21474,7 +21522,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCmdSetPrimitiveRestartEnableEXT: {
@@ -21511,7 +21559,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -21559,7 +21607,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
@@ -21627,7 +21675,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkUpdateDescriptorSetWithTemplateSizedGOOGLE: {
@@ -21796,7 +21844,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkBeginCommandBufferAsyncGOOGLE: {
@@ -21836,7 +21884,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkEndCommandBufferAsyncGOOGLE: {
@@ -21865,7 +21913,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkResetCommandBufferAsyncGOOGLE: {
@@ -21899,7 +21947,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCommandBufferHostSyncGOOGLE: {
@@ -21938,7 +21986,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateImageWithRequirementsGOOGLE: {
@@ -22041,7 +22089,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCreateBufferWithRequirementsGOOGLE: {
@@ -22144,7 +22192,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetMemoryHostAddressInfoGOOGLE: {
@@ -22249,7 +22297,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkFreeMemorySyncGOOGLE: {
@@ -22313,7 +22361,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delete_VkDeviceMemory(boxed_memory_preserve);
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueHostSyncGOOGLE: {
@@ -22350,7 +22398,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueSubmitAsyncGOOGLE: {
@@ -22402,7 +22450,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 decoderNoteSubmitHandled();
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueWaitIdleAsyncGOOGLE: {
@@ -22429,7 +22477,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueBindSparseAsyncGOOGLE: {
@@ -22482,7 +22530,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetLinearImageLayoutGOOGLE: {
@@ -22531,7 +22579,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetLinearImageLayout2GOOGLE: {
@@ -22588,7 +22636,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueFlushCommandsGOOGLE: {
@@ -22624,7 +22672,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         (unsigned long long)dataSize, (unsigned long long)pData);
                 }
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 if (CC_LIKELY(vk)) {
                     m_state->on_vkQueueFlushCommandsGOOGLE(&m_pool, snapshotApiCallHandle, queue,
                                                            commandBuffer, dataSize, pData, context);
@@ -22769,7 +22817,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkCollectDescriptorPoolIdsGOOGLE: {
@@ -22837,7 +22885,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueSignalReleaseImageANDROIDAsyncGOOGLE: {
@@ -22898,7 +22946,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueFlushCommandsFromAuxMemoryGOOGLE: {
@@ -22951,7 +22999,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetBlobGOOGLE: {
@@ -22992,7 +23040,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkUpdateDescriptorSetWithTemplateSized2GOOGLE: {
@@ -23182,7 +23230,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkQueueSubmitAsync2GOOGLE: {
@@ -23233,7 +23281,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkGetSemaphoreGOOGLE: {
@@ -23278,7 +23326,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
             case OP_vkTraceAsyncGOOGLE: {
@@ -23299,7 +23347,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 vkReadStream->clearPool();
                 if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
-                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                    advanceSeqno(seqnoPtr);
                 break;
             }
 #endif
