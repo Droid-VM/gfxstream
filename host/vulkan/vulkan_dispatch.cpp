@@ -391,6 +391,53 @@ static void* sVulkanDispatchDlSym(void* lib, const char* sym) {
     return sVulkanDispatchImpl()->dlsym(lib, sym);
 }
 
+static void ensureVulkanValidationLayersEnabled() {
+    GFXSTREAM_INFO("Enabling Vulkan validation layers.");
+
+    // Our VkLayer_khronos_validation.json expects the VVL .so file to be present in the same directory.
+    std::string vvlPath =
+        pj({gfxstream::base::getProgramDirectory(), "lib64", "vulkan", "layers"});
+    if (!pathExists(vvlPath.c_str())) {
+        vvlPath =
+            pj({gfxstream::base::getLauncherDirectory(), "lib64", "vulkan", "layers"});
+    }
+    if (!pathExists(vvlPath.c_str())) {
+        vvlPath =
+            pj({gfxstream::base::getProgramDirectory(), "testlib64", "layers"});
+    }
+    if (!pathExists(vvlPath.c_str())) {
+        vvlPath =
+            pj({gfxstream::base::getLauncherDirectory(), "testlib64", "layers"});
+    }
+
+    if (pathExists(vvlPath.c_str())) {
+#ifdef _WIN32
+        const char kPathSeparator = ';';
+#else
+        const char kPathSeparator = ':';
+#endif
+        const char* const kVkAddLayerPathEnvVar = "VK_ADD_LAYER_PATH";
+        const char* const kVkInstanceLayersEnvVar = "VK_INSTANCE_LAYERS";
+        const char* const kEnableVVLEnvVar = "VK_LAYER_KHRONOS_validation";
+
+        if (gfxstream::base::getEnvironmentVariable(kVkAddLayerPathEnvVar).empty()) {
+            gfxstream::base::setEnvironmentVariable(kVkAddLayerPathEnvVar, vvlPath);
+        }
+        auto layersEnvVar = gfxstream::base::getEnvironmentVariable(kVkInstanceLayersEnvVar);
+        if (layersEnvVar.empty()) {
+            gfxstream::base::setEnvironmentVariable(kVkInstanceLayersEnvVar, kEnableVVLEnvVar);
+        } else {
+            if (layersEnvVar.find(kEnableVVLEnvVar) == std::string::npos) {
+                std::stringstream ss;
+                ss << layersEnvVar << kPathSeparator << kEnableVVLEnvVar;
+                gfxstream::base::setEnvironmentVariable(kVkInstanceLayersEnvVar, ss.str());
+            }
+        }
+    } else {
+        GFXSTREAM_WARNING("Vulkan validation layer library path not found in %s. Skipping validation layer setup.", vvlPath.c_str());
+    }
+}
+
 void VulkanDispatchImpl::initialize(bool forTesting) {
     AutoLock lock(mLock);
 
@@ -438,44 +485,12 @@ void VulkanDispatchImpl::initialize(bool forTesting) {
         }
     }
 
-    if (!gfxstream::base::getEnvironmentVariable("GFXSTREAM_USE_TESTING_VALIDATION_LAYERS").empty()) {
-        GFXSTREAM_INFO("GFXSTREAM_USE_TESTING_VALIDATION_LAYERS set. Enabling Vulkan validation layers.");
+    bool vvlRequested =
+        !gfxstream::base::getEnvironmentVariable("GFXSTREAM_USE_TESTING_VALIDATION_LAYERS").empty() ||
+        !gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VVL_BEHAVIOR").empty();
 
-        // Our VkLayer_khronos_validation.json expects the VVL .so file to be present in the same directory.
-        std::string vvlPath =
-            pj({gfxstream::base::getProgramDirectory(), "testlib64", "layers"});
-        if (!pathExists(vvlPath.c_str())) {
-            vvlPath =
-                pj({gfxstream::base::getLauncherDirectory(), "testlib64", "layers"});
-        }
-
-        if (pathExists(vvlPath.c_str())) {
-#ifdef _WIN32
-            const char kPathSeparator = ';';
-#else
-            const char kPathSeparator = ':';
-#endif
-            const char* const kVkAddLayerPathEnvVar = "VK_ADD_LAYER_PATH";
-            const char* const kVkInstanceLayersEnvVar = "VK_INSTANCE_LAYERS";
-            const char* const kEnableVVLEnvVar = "VK_LAYER_KHRONOS_validation";
-
-            if (!gfxstream::base::getEnvironmentVariable(kVkAddLayerPathEnvVar).empty()) {
-                GFXSTREAM_WARNING("Overriding %s", kVkAddLayerPathEnvVar);
-            }
-            gfxstream::base::setEnvironmentVariable(kVkAddLayerPathEnvVar, vvlPath);
-            auto layersEnvVar = gfxstream::base::getEnvironmentVariable(kVkInstanceLayersEnvVar);
-            if (layersEnvVar.empty()) {
-                gfxstream::base::setEnvironmentVariable(kVkInstanceLayersEnvVar, kEnableVVLEnvVar);
-            } else {
-                if (layersEnvVar.find(kEnableVVLEnvVar) == std::string::npos) {
-                    std::stringstream ss;
-                    ss << layersEnvVar << kPathSeparator << kEnableVVLEnvVar;
-                    gfxstream::base::setEnvironmentVariable(kVkInstanceLayersEnvVar, ss.str());
-                }
-            }
-        } else {
-            GFXSTREAM_WARNING("Vulkan validation layer library path not found in %s. Skipping validation layer setup.", vvlPath.c_str());
-        }
+    if (vvlRequested) {
+        ensureVulkanValidationLayersEnabled();
     }
 
     init_vulkan_dispatch_from_system_loader(sVulkanDispatchDlOpen, sVulkanDispatchDlSym,

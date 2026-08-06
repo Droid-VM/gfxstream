@@ -23,7 +23,7 @@ namespace ClientAPIExts
 {
 
 //
-// define function pointer type for each extention function
+// define function pointer type for each extension function
 // typename has the form __egl_{funcname}_t
 //
 #define FUNC_TYPE(fname) __egl_ ## fname ## _t
@@ -60,7 +60,7 @@ static struct _ext_table
 
 //
 // This function initialized each entry in the s_client_extensions
-// struct at the givven index using the givven client interface
+// struct at the given index using the given client interface
 //
 void initClientFuncs(const EGLClient_glesInterface *iface, int idx)
 {
@@ -112,7 +112,7 @@ void initClientFuncs(const EGLClient_glesInterface *iface, int idx)
         if (!thread->currentContext) { \
             return (rtype)0; \
         } \
-        int idx = (int)thread->currentContext->majorVersion - 1; \
+        int idx = thread->currentContext->majorVersion == 1 ? 0 : 1; \
         if (!s_client_extensions[idx].fname) { \
             return (rtype)0; \
         } \
@@ -145,7 +145,7 @@ static const int numExtFuncs = sizeof(s_client_ext_funcs) /
 #undef API_ENTRY_RET
 
 //
-// returns the __egl_ version of the givven extension function name.
+// returns the __egl_ version of the given extension function name.
 //
 void* getProcAddress(const char *fname)
 {
