@@ -600,7 +600,7 @@ bool ColorBufferGl::readPixelsScaled(int width, int height, int rotation, const 
         GFXSTREAM_ERROR(
             "readPixelsScaled failed. Out-of-bound rectangle: (%d, %d) [%d x %d]"
             " with screen [%d x %d]",
-            rect.pos.x, rect.pos.y, rect.size.w, rect.size.h);
+            rect.pos.x, rect.pos.y, rect.size.w, rect.size.h, width, height);
         return false;
     }
 

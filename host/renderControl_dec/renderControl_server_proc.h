@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -98,8 +98,10 @@ typedef int (renderControl_APIENTRY *rcGetFBDisplayConfigsParam_server_proc_t) (
 typedef int (renderControl_APIENTRY *rcGetFBDisplayActiveConfig_server_proc_t) ();
 typedef void (renderControl_APIENTRY *rcSetProcessMetadata_server_proc_t) (char*, RenderControlByte*, uint32_t);
 typedef int (renderControl_APIENTRY *rcGetHostExtensionsString_server_proc_t) (uint32_t, void*);
-typedef int (renderControl_APIENTRY *rcGetDisplayColorTransform_server_proc_t) (uint32_t, mat4x4_ptr);
-typedef int (renderControl_APIENTRY *rcSetDisplayColorTransform_server_proc_t) (uint32_t, const mat4x4_ptr);
-
+typedef int(renderControl_APIENTRY* rcGetDisplayColorTransform_server_proc_t)(uint32_t, mat4x4_ptr,
+                                                                              uint32_t);
+typedef int(renderControl_APIENTRY* rcSetDisplayColorTransform_server_proc_t)(uint32_t,
+                                                                              const mat4x4_ptr,
+                                                                              uint32_t);
 
 #endif

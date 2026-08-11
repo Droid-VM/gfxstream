@@ -113,6 +113,22 @@ void loadCollection(Stream* stream, Collection* c, LoadFunc&& loader) {
     }
 }
 
+template <class Collection, class LoadFunc>
+bool tryLoadCollection(Stream* stream, Collection* c, const size_t maxSize, LoadFunc&& loader) {
+    const uint32_t size = stream->getBe32();
+    if (size > maxSize) {
+        return false;
+    }
+    for (uint32_t i = 0; i < size; ++i) {
+        auto loadedVal = loader(stream);
+        if (!loadedVal.has_value()) {
+            return false;
+        }
+        c->emplace(std::move(*loadedVal));
+    }
+    return true;
+}
+
 void saveStringArray(Stream* stream, const char* const* strings, uint32_t count);
 std::vector<std::string> loadStringArray(Stream* stream);
 

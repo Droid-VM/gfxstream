@@ -31,6 +31,10 @@
 #endif
 #include <hardware/gralloc.h>
 
+#ifndef HAL_PIXEL_FORMAT_YCBCR_P210
+#define HAL_PIXEL_FORMAT_YCBCR_P210 60
+#endif
+
 #include "ClientAPIExts.h"
 #include "EGLImage.h"
 #include "GL2Encoder.h"
@@ -650,10 +654,9 @@ static uint64_t createNativeSync_virtioGpu(
             GFXSTREAM_ERROR("Failed to execbuffer to create sync.");
             return 0;
         }
-        *fd_out = exec.handle.osHandle
+        *fd_out = exec.handle.osHandle;
 
-        DPRINT("virtio-gpu: got native fence fd=%d queue_work_err=%d",
-               *fd_out, queue_work_err);
+        DPRINT("virtio-gpu: got native fence fd=%d", *fd_out);
     }
 
     return sync_handle;
@@ -1808,7 +1811,7 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_c
         }
         break;
     default:
-        GFXSTREAM_ERROR("%s:%d EGL_BAD_CONFIG: invalid major GLES version: %d", majorVersion);
+        GFXSTREAM_ERROR("EGL_BAD_CONFIG: invalid major GLES version: %d", majorVersion);
         setErrorReturn(EGL_BAD_CONFIG, EGL_NO_CONTEXT);
     }
 
@@ -2235,6 +2238,7 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target, EG
             case HAL_PIXEL_FORMAT_RGBA_1010102:
             case HAL_PIXEL_FORMAT_YCBCR_420_888:
             case HAL_PIXEL_FORMAT_YCBCR_P010:
+            case HAL_PIXEL_FORMAT_YCBCR_P210:
             case HAL_PIXEL_FORMAT_DEPTH_16:
             case HAL_PIXEL_FORMAT_DEPTH_24:
             case HAL_PIXEL_FORMAT_DEPTH_24_STENCIL_8:

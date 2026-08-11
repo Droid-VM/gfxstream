@@ -104,7 +104,7 @@ int VirtioGpuContext::CreateAddressSpaceGraphicsInstance(
     void* resourceHva = nullptr;
     uint64_t resourceHvaSize = 0;
     if (resource.Map(&resourceHva, &resourceHvaSize) != 0) {
-        GFXSTREAM_ERROR("failed to create ASG instance on context %d: failed to map resource %u",
+        GFXSTREAM_ERROR("failed to create ASG instance on context %u: failed to map resource %u",
                         mId, resourceId);
         return -EINVAL;
     }

@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "vk_common_operations.h"
@@ -785,6 +785,10 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     emulation->mCallbacks = callbacks;
     emulation->mGvk = gvk;
     emulation->setFeatures(features);
+    auto vvlConfig = VVLConfiguration::parse(features);
+    if (vvlConfig.getBehavior() != VVLBehavior::None) {
+        emulation->mVVLConfig.emplace(std::move(vvlConfig));
+    }
 
     std::vector<const char*> getPhysicalDeviceProperties2InstanceExtNames = {
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
@@ -1809,6 +1813,15 @@ uint32_t VkEmulation::vulkanInstanceVersion() const { return mVulkanInstanceVers
 
 bool VkEmulation::createResourcesWithRequirementsEnabled() const {
     return mUseCreateResourcesWithRequirements;
+}
+
+std::unique_ptr<VVLContext> VkEmulation::createVVLContext(
+    const std::string& appName, const std::string& engineName,
+    VkDebugUtilsMessengerCreateInfoEXT* outCreateInfo) const {
+    if (!mVVLConfig.has_value()) {
+        return nullptr;
+    }
+    return mVVLConfig->createDebugContext(appName, engineName, outCreateInfo);
 }
 
 bool VkEmulation::supportsGetPhysicalDeviceProperties2() const {
@@ -3580,6 +3593,16 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
     }
 
     if (transferInfo.unpackFunction) {
+        // The unpacked output never exceeds the staging copy size (the std::vector overload above
+        // sizes its destination to exactly bufferCopySize). outPixelsSize is guest-controlled, so
+        // reject a destination that is too small rather than letting unpackFunction write past it.
+        if (bufferCopySize > outPixelsSize) {
+            GFXSTREAM_ERROR(
+                "Failed to read from ColorBuffer:%d, output buffer too small. Required: %llu, "
+                "Actual: %llu",
+                colorBufferHandle, bufferCopySize, outPixelsSize);
+            return false;
+        }
         transferInfo.unpackFunction(colorBufferInfo->imageCreateInfoShallow.extent,
                                     (const uint8_t*)mStaging.mMappedPtr, (uint8_t*)outPixels);
     } else {
@@ -4127,6 +4150,16 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
             return false;
         }
     } else if (transferInfo.packFunction) {
+        // packFunction reads the natural-format pixels, which never exceed dstBufferSize. pixels is
+        // guest-controlled, so reject an input smaller than that to avoid an out-of-bounds read
+        // (mirrors the size checks in the sibling branches).
+        if (inputPixelsSize != 0 && inputPixelsSize < dstBufferSize) {
+            GFXSTREAM_ERROR(
+                "Unexpected contents size when trying to update ColorBuffer:%d, provided:%zu "
+                "expected at least:%" PRIu64,
+                colorBufferHandle, inputPixelsSize, dstBufferSize);
+            return false;
+        }
         transferInfo.packFunction(colorBufferInfo->imageCreateInfoShallow.extent,
                                   (const uint8_t*)pixels, (uint8_t*)stagingBufferPtr);
     } else {
@@ -4645,6 +4678,12 @@ bool VkEmulation::readBufferToBytes(uint32_t bufferHandle, uint64_t offset, uint
         return false;
     }
 
+    // Nothing to transfer. Recording a zero-size copy is not allowed
+    // (VUID-VkBufferCopy-size-01988).
+    if (size == 0) {
+        return true;
+    }
+
     const auto& stagingBufferInfo = mStaging;
     if (size > stagingBufferInfo.mAllocationSize) {
         GFXSTREAM_ERROR("Failed to read from Buffer:%d, staging buffer too small.", bufferHandle);
@@ -4736,6 +4775,12 @@ bool VkEmulation::updateBufferFromBytes(uint32_t bufferHandle, uint64_t offset, 
                         "] out of range of buffer size %" PRIu64 ".",
                         bufferHandle, offset, size, bufferInfo->size);
         return false;
+    }
+
+    // Nothing to transfer. Recording a zero-size copy is not allowed
+    // (VUID-VkBufferCopy-size-01988).
+    if (size == 0) {
+        return true;
     }
 
     const auto& stagingBufferInfo = mStaging;

@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -356,13 +356,17 @@ bool loadImageContent(gfxstream::Stream* stream, StateBlock* stateBlock, VkImage
             }
 
             VkExtent3D mipmapExtent = getMipmapExtent(imageCreateInfo.extent, mipLevel);
-            size_t bytes = stream->getBe64();
-            stream->read(mapped, bytes);
-
             if (!getFormatTransferInfo(imageCreateInfo.format, mipmapExtent, &transferInfo)) {
                 GFXSTREAM_ERROR("Failed to get transfer info for snapshot load");
                 return false;
             }
+
+            // Require the serialized size to match the expected per-mip transfer size.
+            size_t bytes = stream->getBe64();
+            if (bytes != transferInfo.stagingBufferCopySize) {
+                GFXSTREAM_FATAL("Unexpected image content size on snapshot load");
+            }
+            stream->read(mapped, bytes);
             std::vector<VkBufferImageCopy>& bufferImageCopies = transferInfo.bufferImageCopies;
             VkImageAspectFlags aspects = 0;
             for (const auto& copy : bufferImageCopies) {

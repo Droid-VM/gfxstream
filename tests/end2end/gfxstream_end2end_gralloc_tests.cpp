@@ -34,6 +34,13 @@ TEST_P(GfxstreamEnd2EndGrallocTests, Allocate_YV12) {
         *mGralloc, 32, 32, GFXSTREAM_AHB_FORMAT_YV12));
 }
 
+TEST_P(GfxstreamEnd2EndGrallocTests, Allocate_YCbCr888420) {
+    ASSERT_THAT(false, Eq(true));
+
+    auto ahb = GFXSTREAM_ASSERT(ScopedAHardwareBuffer::Allocate(
+        *mGralloc, 32, 32, GFXSTREAM_AHB_FORMAT_Y8Cb8Cr8_420));
+}
+
 TEST_P(GfxstreamEnd2EndGrallocTests, AllocateTransfer_RGBA8888) {
     constexpr const uint32_t kWidth = 32;
     constexpr const uint32_t kHeight = 32;
@@ -79,6 +86,82 @@ TEST_P(GfxstreamEnd2EndGrallocTests, AllocateTransfer_YV12) {
 
     auto ahb = GFXSTREAM_ASSERT(ScopedAHardwareBuffer::Allocate(
         *mGralloc, kWidth, kHeight, GFXSTREAM_AHB_FORMAT_YV12));
+
+    const PixelR8G8B8A8 color = PixelR8G8B8A8(11, 22, 33, 44);
+
+    uint8_t colorY;
+    uint8_t colorU;
+    uint8_t colorV;
+    RGBToYUV(color.r, color.g, color.b, &colorY, &colorU, &colorV);
+
+    {
+        std::vector<Gralloc::LockedPlane> ahbPlanes =
+            GFXSTREAM_ASSERT(ahb.LockPlanes());
+        const Gralloc::LockedPlane& yPlane = ahbPlanes[0];
+        const Gralloc::LockedPlane& uPlane = ahbPlanes[1];
+        const Gralloc::LockedPlane& vPlane = ahbPlanes[2];
+
+        for (uint32_t y = 0; y < kHeight; y++) {
+            for (uint32_t x = 0; x < kWidth; x++) {
+                uint8_t* dstY = yPlane.data +
+                                (y * yPlane.rowStrideBytes) +
+                                (x * yPlane.pixelStrideBytes);
+                *dstY = colorY;
+            }
+        }
+        for (uint32_t y = 0; y < kHeight / 2; y++) {
+            for (uint32_t x = 0; x < kWidth / 2; x++) {
+                uint8_t* dstU = uPlane.data +
+                                (y * uPlane.rowStrideBytes) +
+                                (x * uPlane.pixelStrideBytes);
+                uint8_t* dstV = vPlane.data +
+                                (y * vPlane.rowStrideBytes) +
+                                (x * vPlane.pixelStrideBytes);
+                *dstU = colorU;
+                *dstV = colorV;
+            }
+        }
+
+        ahb.Unlock();
+    }
+    {
+        std::vector<Gralloc::LockedPlane> ahbPlanes =
+            GFXSTREAM_ASSERT(ahb.LockPlanes());
+        const Gralloc::LockedPlane& yPlane = ahbPlanes[0];
+        const Gralloc::LockedPlane& uPlane = ahbPlanes[1];
+        const Gralloc::LockedPlane& vPlane = ahbPlanes[2];
+
+        for (uint32_t y = 0; y < kHeight; y++) {
+            for (uint32_t x = 0; x < kWidth; x++) {
+                const uint8_t* actualY = yPlane.data +
+                                     (y * yPlane.rowStrideBytes) +
+                                     (x * yPlane.pixelStrideBytes);
+                ASSERT_THAT(*actualY, Eq(colorY));
+            }
+        }
+        for (uint32_t y = 0; y < kHeight / 2; y++) {
+            for (uint32_t x = 0; x < kWidth / 2; x++) {
+                const uint8_t* actualU = uPlane.data +
+                                        (y * uPlane.rowStrideBytes) +
+                                        (x * uPlane.pixelStrideBytes);
+                const uint8_t* actualV = vPlane.data +
+                                        (y * vPlane.rowStrideBytes) +
+                                        (x * vPlane.pixelStrideBytes);
+                ASSERT_THAT(*actualU, Eq(colorU));
+                ASSERT_THAT(*actualV, Eq(colorV));
+            }
+        }
+
+        ahb.Unlock();
+    }
+}
+
+TEST_P(GfxstreamEnd2EndGrallocTests, AllocateTransfer_YCbCr888420) {
+    constexpr const uint32_t kWidth = 32;
+    constexpr const uint32_t kHeight = 32;
+
+    auto ahb = GFXSTREAM_ASSERT(ScopedAHardwareBuffer::Allocate(
+        *mGralloc, kWidth, kHeight, GFXSTREAM_AHB_FORMAT_Y8Cb8Cr8_420));
 
     const PixelR8G8B8A8 color = PixelR8G8B8A8(11, 22, 33, 44);
 

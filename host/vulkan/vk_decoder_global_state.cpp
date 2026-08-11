@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "vk_decoder_global_state.h"
@@ -1165,6 +1165,38 @@ class VkDecoderGlobalState::Impl {
         deepcopy_VkInstanceCreateInfo(pool, VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, pCreateInfo,
                                       &createInfoFiltered);
 
+        std::string vvlAppName = "";
+        std::string vvlEngineName = "";
+        if (pCreateInfo->pApplicationInfo) {
+            if (pCreateInfo->pApplicationInfo->pApplicationName) {
+                vvlAppName = pCreateInfo->pApplicationInfo->pApplicationName;
+            }
+            if (pCreateInfo->pApplicationInfo->pEngineName) {
+                vvlEngineName = pCreateInfo->pApplicationInfo->pEngineName;
+            }
+        }
+
+        VkDebugUtilsMessengerCreateInfoEXT debugInfo = {};
+        std::unique_ptr<VVLContext> debugContext =
+            m_vkEmulation->createVVLContext(vvlAppName, vvlEngineName, &debugInfo);
+
+        if (debugContext) {
+            GFXSTREAM_INFO("Enabling VVL for %s %s", vvlAppName.c_str(), vvlEngineName.c_str());
+
+            bool hasDebugUtils = false;
+            for (const char* ext : finalExts) {
+                if (ext && strcmp(ext, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) {
+                    hasDebugUtils = true;
+                    break;
+                }
+            }
+            if (!hasDebugUtils) {
+                finalExts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            }
+        } else {
+            GFXSTREAM_VERBOSE("Not enabling VVL for %s %s", vvlAppName.c_str(), vvlEngineName.c_str());
+        }
+
         createInfoFiltered.enabledExtensionCount = static_cast<uint32_t>(finalExts.size());
         createInfoFiltered.ppEnabledExtensionNames = finalExts.data();
         if (createInfoFiltered.pApplicationInfo != nullptr) {
@@ -1175,6 +1207,11 @@ class VkDecoderGlobalState::Impl {
 
         vk_struct_chain_filter<VkDebugReportCallbackCreateInfoEXT>(&createInfoFiltered);
         vk_struct_chain_filter<VkDebugUtilsMessengerCreateInfoEXT>(&createInfoFiltered);
+
+        if (debugContext) {
+            auto chainIter = vk_make_chain_iterator(&createInfoFiltered);
+            vk_append_struct(&chainIter, &debugInfo);
+        }
 
 #if defined(__APPLE__)
         if (m_vkEmulation->supportsPortabilityEnumeration()) {
@@ -1235,14 +1272,30 @@ class VkDecoderGlobalState::Impl {
             info.contextId = renderThreadInfo->ctx_id;
         }
 
-        VALIDATE_NEW_HANDLE_INFO_ENTRY(mInstanceInfo, *pInstance);
-        mInstanceInfo[*pInstance] = info;
+        if (debugContext) {
+            auto vk = dispatch_VkInstance(boxed);
+            if (vk && vk->vkCreateDebugUtilsMessengerEXT && vk->vkDestroyDebugUtilsMessengerEXT) {
+                VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
+                VkResult messengerRes = vk->vkCreateDebugUtilsMessengerEXT(*pInstance, &debugInfo, nullptr, &messenger);
+                if (messengerRes == VK_SUCCESS) {
+                    info.debugMessenger = messenger;
+                } else {
+                    GFXSTREAM_WARNING("Failed to create Vulkan debug utils messenger: %s", string_VkResult(messengerRes));
+                }
+            }
+        }
 
-        *pInstance = (VkInstance)info.boxed;
+        uint64_t contextId = info.contextId;
+        info.debugContext = std::move(debugContext);
+
+        VALIDATE_NEW_HANDLE_INFO_ENTRY(mInstanceInfo, *pInstance);
+        mInstanceInfo[*pInstance] = std::move(info);
+
+        *pInstance = (VkInstance)boxed;
 
         if (vkCleanupEnabled()) {
             m_vkEmulation->getCallbacks().registerProcessCleanupCallback(
-                unbox_VkInstance(boxed), info.contextId, [this, boxed] {
+                unbox_VkInstance(boxed), contextId, [this, boxed] {
                     if (snapshotsEnabled()) {
                         snapshot()->vkDestroyInstance(nullptr, kInvalidSnapshotApiCallHandle, nullptr, 0, boxed, nullptr);
                     }
@@ -2403,6 +2456,7 @@ class VkDecoderGlobalState::Impl {
         VALIDATE_NEW_HANDLE_INFO_ENTRY(mDeviceInfo, *pDevice);
         auto& deviceInfo = mDeviceInfo[*pDevice];
         deviceInfo.physicalDevice = physicalDevice;
+        deviceInfo.maxImageDimension2D = physicalDeviceInfo.props.limits.maxImageDimension2D;
         deviceInfo.emulateTextureEtc2 = emulateTextureEtc2;
         deviceInfo.emulateTextureAstc = emulateTextureAstc;
         deviceInfo.emulateProtectedMemory = emulateProtectedMemory;
@@ -3071,49 +3125,16 @@ class VkDecoderGlobalState::Impl {
         }
 
 #ifdef __APPLE__
-        // TODO(b/438924843) this is probably not optimal as it might slow down image creation a
-        // bit. Not validating the dimensions seems to be only fatal on macOS, and can create false
-        // positives on desktop GPUs with the format's support, so it's only checked on macOS.
-        {
-            auto physicalDevice = deviceInfo->physicalDevice;
-            auto* physdevInfo = gfxstream::base::find(mPhysdevInfo, physicalDevice);
-            if (!physdevInfo) {
-                GFXSTREAM_ERROR("vkCreateImage: Could not find physical device info.");
-                return VK_ERROR_OUT_OF_HOST_MEMORY;
-            }
-
-            auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
-            if (!instanceInfo) {
-                GFXSTREAM_ERROR("vkCreateImage: Could not find instance info.");
-                return VK_ERROR_OUT_OF_HOST_MEMORY;
-            }
-
-            auto ivk = dispatch_VkInstance(instanceInfo->boxed);
-            VkImageFormatProperties imageFormatProperties;
-            VkResult res = ivk->vkGetPhysicalDeviceImageFormatProperties(
-                physicalDevice, pCreateInfo->format, pCreateInfo->imageType, pCreateInfo->tiling,
-                pCreateInfo->usage, pCreateInfo->flags, &imageFormatProperties);
-
-            if (res != VK_SUCCESS) {
-                GFXSTREAM_WARNING(
-                    "vkCreateImage: vkGetPhysicalDeviceImageFormatProperties failed with %s on "
-                    "format %s[%d]",
-                    string_VkResult(res), string_VkFormat(pCreateInfo->format),
-                    pCreateInfo->format);
-                return VK_ERROR_VALIDATION_FAILED_EXT;
-            }
-
-            if (pCreateInfo->extent.width > imageFormatProperties.maxExtent.width ||
-                pCreateInfo->extent.height > imageFormatProperties.maxExtent.height ||
-                pCreateInfo->extent.depth > imageFormatProperties.maxExtent.depth) {
-                GFXSTREAM_WARNING(
-                    "vkCreateImage: requested image dimensions (%u x %u x %u) "
-                    "exceeds device limits (%u x %u x %u).",
-                    pCreateInfo->extent.width, pCreateInfo->extent.height,
-                    pCreateInfo->extent.depth, imageFormatProperties.maxExtent.width,
-                    imageFormatProperties.maxExtent.height, imageFormatProperties.maxExtent.depth);
-                return VK_ERROR_VALIDATION_FAILED_EXT;
-            }
+        // We do some validation on macOS, because it can crash the whole app if exceeded.
+        if (pCreateInfo->imageType == VK_IMAGE_TYPE_2D &&
+            (pCreateInfo->extent.width > deviceInfo->maxImageDimension2D ||
+             pCreateInfo->extent.height > deviceInfo->maxImageDimension2D)) {
+            GFXSTREAM_WARNING(
+                "vkCreateImage: requested image dimensions (%u x %u) "
+                "exceeds maxImageDimension2D limit (%u).",
+                pCreateInfo->extent.width, pCreateInfo->extent.height,
+                deviceInfo->maxImageDimension2D);
+            return VK_ERROR_VALIDATION_FAILED;
         }
 #endif
 
@@ -5635,6 +5656,17 @@ class VkDecoderGlobalState::Impl {
                 GFXSTREAM_WARNING("ASTC CPU decompression: VkBuffer memory isn't host-visible");
                 return;
             }
+            // memoryOffset and the buffer size are guest-controlled; make sure the buffer's range
+            // actually lies within the mapped allocation before the CPU decompressor reads from it.
+            if (bufferInfo->memoryOffset > memoryInfo->size ||
+                bufferInfo->size > memoryInfo->size - bufferInfo->memoryOffset) {
+                GFXSTREAM_WARNING(
+                    "ASTC CPU decompression: buffer range [offset %llu, size %llu] out of bounds of "
+                    "mapped memory size %llu.",
+                    (unsigned long long)bufferInfo->memoryOffset,
+                    (unsigned long long)bufferInfo->size, (unsigned long long)memoryInfo->size);
+                return;
+            }
             uint8_t* astcData = (uint8_t*)(memoryInfo->ptr) + bufferInfo->memoryOffset;
             cmpInfo.decompressOnCpu(commandBuffer, astcData, bufferInfo->size, dstImage,
                                     dstImageLayout, regionCount, pRegions, context);
@@ -6884,6 +6916,9 @@ class VkDecoderGlobalState::Impl {
         REQUIRES(mMutex) {
         auto* info = gfxstream::base::find(mMemoryInfo, memory);
         if (!info || !info->ptr) return VK_ERROR_MEMORY_MAP_FAILED;  // Invalid usage.
+
+        // offset is guest-controlled; do not hand back a pointer past the end of the allocation.
+        if (offset > info->size) return VK_ERROR_MEMORY_MAP_FAILED;
 
         *ppData = (void*)((uint8_t*)info->ptr + offset);
         return VK_SUCCESS;
@@ -8820,7 +8855,12 @@ class VkDecoderGlobalState::Impl {
                 // Some drivers don't seem to handle stride==0 very well.
                 // In fact, the spec does not say what should happen with stride==0.
                 // So we just use the largest stride possible.
-                stride = mBufferInfo[dstBuffer].size - dstOffset;
+                // dstOffset is guest-controlled; look the buffer up without inserting a default
+                // entry and avoid an unsigned underflow if it points past the end of the buffer.
+                auto* dstBufferInfo = gfxstream::base::find(mBufferInfo, dstBuffer);
+                if (dstBufferInfo && dstOffset <= dstBufferInfo->size) {
+                    stride = dstBufferInfo->size - dstOffset;
+                }
             }
         }
 
@@ -10780,6 +10820,13 @@ class VkDecoderGlobalState::Impl {
 
         for (InstanceObjects::DeviceObjects& deviceObjects : objects.devices) {
             destroyDeviceObjects(deviceObjects);
+        }
+
+        if (instanceInfo.debugMessenger != VK_NULL_HANDLE) {
+            auto vk = dispatch_VkInstance(instanceInfo.boxed);
+            if (vk && vk->vkDestroyDebugUtilsMessengerEXT) {
+                vk->vkDestroyDebugUtilsMessengerEXT(instance, instanceInfo.debugMessenger, nullptr);
+            }
         }
 
         m_vk->vkDestroyInstance(instance, nullptr);
