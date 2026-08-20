@@ -9114,6 +9114,384 @@ void transform_fromhost_VkPhysicalDeviceImageCompressionControlSwapchainFeatures
 }
 
 #endif
+
+// DroidVM: pNext structs a mesa >= 26 guest encoder can send that this
+// (older) host codegen did not cover.  Spliced verbatim from the same
+// cerealgenerator run that produced the guest encoder; see
+// scripts/check-cereal-compat.py.
+
+#ifdef VK_EXT_frame_boundary
+void transform_tohost_VkFrameBoundaryEXT(VkDecoderGlobalState* resourceTracker,
+                                         VkFrameBoundaryEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void transform_fromhost_VkFrameBoundaryEXT(VkDecoderGlobalState* resourceTracker,
+                                           VkFrameBoundaryEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void transform_tohost_VkMemoryBarrierAccessFlags3KHR(VkDecoderGlobalState* resourceTracker,
+                                                     VkMemoryBarrierAccessFlags3KHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void transform_fromhost_VkMemoryBarrierAccessFlags3KHR(
+    VkDecoderGlobalState* resourceTracker, VkMemoryBarrierAccessFlags3KHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void transform_tohost_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void transform_fromhost_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void transform_tohost_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceFrameBoundaryFeaturesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void transform_fromhost_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceFrameBoundaryFeaturesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceLayeredApiPropertiesListKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+    if (toTransform) {
+        if (toTransform->pLayeredApis) {
+            for (uint32_t i = 0; i < (uint32_t)toTransform->layeredApiCount; ++i) {
+                transform_tohost_VkPhysicalDeviceLayeredApiPropertiesKHR(
+                    resourceTracker,
+                    (VkPhysicalDeviceLayeredApiPropertiesKHR*)(toTransform->pLayeredApis + i));
+            }
+        }
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceLayeredApiPropertiesListKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+    if (toTransform) {
+        if (toTransform->pLayeredApis) {
+            for (uint32_t i = 0; i < (uint32_t)toTransform->layeredApiCount; ++i) {
+                transform_fromhost_VkPhysicalDeviceLayeredApiPropertiesKHR(
+                    resourceTracker,
+                    (VkPhysicalDeviceLayeredApiPropertiesKHR*)(toTransform->pLayeredApis + i));
+            }
+        }
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+    transform_tohost_VkPhysicalDeviceProperties2(
+        resourceTracker, (VkPhysicalDeviceProperties2*)(&toTransform->properties));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+    transform_fromhost_VkPhysicalDeviceProperties2(
+        resourceTracker, (VkPhysicalDeviceProperties2*)(&toTransform->properties));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance7FeaturesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance7FeaturesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance7PropertiesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance7PropertiesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void transform_tohost_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance8FeaturesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void transform_fromhost_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance8FeaturesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void transform_tohost_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void transform_fromhost_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_tohost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_fromhost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void transform_tohost_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkSamplerBorderColorComponentMappingCreateInfoEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+    transform_tohost_VkComponentMapping(resourceTracker,
+                                        (VkComponentMapping*)(&toTransform->components));
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void transform_fromhost_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkSamplerBorderColorComponentMappingCreateInfoEXT* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+    transform_fromhost_VkComponentMapping(resourceTracker,
+                                          (VkComponentMapping*)(&toTransform->components));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceLayeredApiPropertiesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceLayeredApiPropertiesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+#endif
+
 void transform_tohost_extension_struct(VkDecoderGlobalState* resourceTracker,
                                        void* structExtension_out) {
     if (!structExtension_out) {
@@ -10440,6 +10818,121 @@ void transform_tohost_extension_struct(VkDecoderGlobalState* resourceTracker,
             transform_tohost_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
                 resourceTracker,
                 reinterpret_cast<VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_FRAME_BOUNDARY_EXT: {
+            transform_tohost_VkFrameBoundaryEXT(
+                resourceTracker, reinterpret_cast<VkFrameBoundaryEXT*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_MEMORY_BARRIER_ACCESS_FLAGS_3_KHR: {
+            transform_tohost_VkMemoryBarrierAccessFlags3KHR(
+                resourceTracker,
+                reinterpret_cast<VkMemoryBarrierAccessFlags3KHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
+            transform_tohost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
+            transform_tohost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT: {
+            transform_tohost_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+                resourceTracker, reinterpret_cast<VkPhysicalDeviceBorderColorSwizzleFeaturesEXT*>(
+                                     structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT: {
+            transform_tohost_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceFrameBoundaryFeaturesEXT*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_PROPERTIES_LIST_KHR: {
+            transform_tohost_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+                resourceTracker, reinterpret_cast<VkPhysicalDeviceLayeredApiPropertiesListKHR*>(
+                                     structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_VULKAN_PROPERTIES_KHR: {
+            transform_tohost_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+                resourceTracker, reinterpret_cast<VkPhysicalDeviceLayeredApiVulkanPropertiesKHR*>(
+                                     structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR: {
+            transform_tohost_VkPhysicalDeviceMaintenance7FeaturesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceMaintenance7FeaturesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_PROPERTIES_KHR: {
+            transform_tohost_VkPhysicalDeviceMaintenance7PropertiesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceMaintenance7PropertiesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR: {
+            transform_tohost_VkPhysicalDeviceMaintenance8FeaturesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceMaintenance8FeaturesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_primitives_generated_query
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT: {
+            transform_tohost_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
+            transform_tohost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+                resourceTracker, reinterpret_cast<VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
+                                     structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT: {
+            transform_tohost_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+                resourceTracker,
+                reinterpret_cast<VkSamplerBorderColorComponentMappingCreateInfoEXT*>(
                     structExtension_out));
             break;
         }
@@ -11776,6 +12269,121 @@ void transform_fromhost_extension_struct(VkDecoderGlobalState* resourceTracker,
             transform_fromhost_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
                 resourceTracker,
                 reinterpret_cast<VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_FRAME_BOUNDARY_EXT: {
+            transform_fromhost_VkFrameBoundaryEXT(
+                resourceTracker, reinterpret_cast<VkFrameBoundaryEXT*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_MEMORY_BARRIER_ACCESS_FLAGS_3_KHR: {
+            transform_fromhost_VkMemoryBarrierAccessFlags3KHR(
+                resourceTracker,
+                reinterpret_cast<VkMemoryBarrierAccessFlags3KHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
+            transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
+            transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT: {
+            transform_fromhost_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+                resourceTracker, reinterpret_cast<VkPhysicalDeviceBorderColorSwizzleFeaturesEXT*>(
+                                     structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT: {
+            transform_fromhost_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceFrameBoundaryFeaturesEXT*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_PROPERTIES_LIST_KHR: {
+            transform_fromhost_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+                resourceTracker, reinterpret_cast<VkPhysicalDeviceLayeredApiPropertiesListKHR*>(
+                                     structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_VULKAN_PROPERTIES_KHR: {
+            transform_fromhost_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+                resourceTracker, reinterpret_cast<VkPhysicalDeviceLayeredApiVulkanPropertiesKHR*>(
+                                     structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR: {
+            transform_fromhost_VkPhysicalDeviceMaintenance7FeaturesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceMaintenance7FeaturesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_PROPERTIES_KHR: {
+            transform_fromhost_VkPhysicalDeviceMaintenance7PropertiesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceMaintenance7PropertiesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR: {
+            transform_fromhost_VkPhysicalDeviceMaintenance8FeaturesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceMaintenance8FeaturesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_primitives_generated_query
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT: {
+            transform_fromhost_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
+            transform_fromhost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+                resourceTracker, reinterpret_cast<VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
+                                     structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT: {
+            transform_fromhost_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+                resourceTracker,
+                reinterpret_cast<VkSamplerBorderColorComponentMappingCreateInfoEXT*>(
                     structExtension_out));
             break;
         }

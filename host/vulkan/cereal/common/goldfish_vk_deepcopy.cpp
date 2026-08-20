@@ -10055,6 +10055,413 @@ void deepcopy_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
 }
 
 #endif
+
+// DroidVM: pNext structs a mesa >= 26 guest encoder can send that this
+// (older) host codegen did not cover.  Spliced verbatim from the same
+// cerealgenerator run that produced the guest encoder; see
+// scripts/check-cereal-compat.py.
+
+#ifdef VK_EXT_frame_boundary
+void deepcopy_VkFrameBoundaryEXT(Allocator* alloc, VkStructureType rootType,
+                                 const VkFrameBoundaryEXT* from, VkFrameBoundaryEXT* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+    to->pImages = nullptr;
+    if (from->pImages) {
+        to->pImages =
+            (VkImage*)alloc->dupArray(from->pImages, from->imageCount * sizeof(const VkImage));
+    }
+    to->pBuffers = nullptr;
+    if (from->pBuffers) {
+        to->pBuffers =
+            (VkBuffer*)alloc->dupArray(from->pBuffers, from->bufferCount * sizeof(const VkBuffer));
+    }
+    to->pTag = nullptr;
+    if (from->pTag) {
+        to->pTag = (void*)alloc->dupArray(from->pTag, from->tagSize * sizeof(const uint8_t));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void deepcopy_VkMemoryBarrierAccessFlags3KHR(Allocator* alloc, VkStructureType rootType,
+                                             const VkMemoryBarrierAccessFlags3KHR* from,
+                                             VkMemoryBarrierAccessFlags3KHR* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void deepcopy_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* from,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void deepcopy_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* from,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void deepcopy_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* from,
+    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void deepcopy_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceFrameBoundaryFeaturesEXT* from,
+    VkPhysicalDeviceFrameBoundaryFeaturesEXT* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiPropertiesListKHR* from,
+    VkPhysicalDeviceLayeredApiPropertiesListKHR* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+    if (from) {
+        to->pLayeredApis = nullptr;
+        if (from->pLayeredApis) {
+            to->pLayeredApis = (VkPhysicalDeviceLayeredApiPropertiesKHR*)alloc->alloc(
+                from->layeredApiCount * sizeof(VkPhysicalDeviceLayeredApiPropertiesKHR));
+            to->layeredApiCount = from->layeredApiCount;
+            for (uint32_t i = 0; i < (uint32_t)from->layeredApiCount; ++i) {
+                deepcopy_VkPhysicalDeviceLayeredApiPropertiesKHR(
+                    alloc, rootType, from->pLayeredApis + i,
+                    (VkPhysicalDeviceLayeredApiPropertiesKHR*)(to->pLayeredApis + i));
+            }
+        }
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* from,
+    VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+    deepcopy_VkPhysicalDeviceProperties2(alloc, rootType, &from->properties,
+                                         (VkPhysicalDeviceProperties2*)(&to->properties));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    Allocator* alloc, VkStructureType rootType, const VkPhysicalDeviceMaintenance7FeaturesKHR* from,
+    VkPhysicalDeviceMaintenance7FeaturesKHR* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceMaintenance7PropertiesKHR* from,
+    VkPhysicalDeviceMaintenance7PropertiesKHR* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void deepcopy_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    Allocator* alloc, VkStructureType rootType, const VkPhysicalDeviceMaintenance8FeaturesKHR* from,
+    VkPhysicalDeviceMaintenance8FeaturesKHR* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void deepcopy_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* from,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void deepcopy_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPipelineColorBlendAdvancedStateCreateInfoEXT* from,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void deepcopy_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkSamplerBorderColorComponentMappingCreateInfoEXT* from,
+    VkSamplerBorderColorComponentMappingCreateInfoEXT* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+    deepcopy_VkComponentMapping(alloc, rootType, &from->components,
+                                (VkComponentMapping*)(&to->components));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    Allocator* alloc, VkStructureType rootType, const VkPhysicalDeviceLayeredApiPropertiesKHR* from,
+    VkPhysicalDeviceLayeredApiPropertiesKHR* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const VkBaseOutStructure*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+    memcpy(to->deviceName, from->deviceName, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE * sizeof(char));
+}
+#endif
+
 void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
                                const void* structExtension, void* structExtension_out) {
     if (!structExtension) {
@@ -11780,6 +12187,147 @@ void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
                     const VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT*>(
                     structExtension),
                 reinterpret_cast<VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_FRAME_BOUNDARY_EXT: {
+            deepcopy_VkFrameBoundaryEXT(
+                alloc, rootType, reinterpret_cast<const VkFrameBoundaryEXT*>(structExtension),
+                reinterpret_cast<VkFrameBoundaryEXT*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_MEMORY_BARRIER_ACCESS_FLAGS_3_KHR: {
+            deepcopy_VkMemoryBarrierAccessFlags3KHR(
+                alloc, rootType,
+                reinterpret_cast<const VkMemoryBarrierAccessFlags3KHR*>(structExtension),
+                reinterpret_cast<VkMemoryBarrierAccessFlags3KHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
+            deepcopy_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
+                    structExtension),
+                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
+            deepcopy_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
+                    structExtension),
+                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT: {
+            deepcopy_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDeviceBorderColorSwizzleFeaturesEXT*>(
+                    structExtension),
+                reinterpret_cast<VkPhysicalDeviceBorderColorSwizzleFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT: {
+            deepcopy_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDeviceFrameBoundaryFeaturesEXT*>(structExtension),
+                reinterpret_cast<VkPhysicalDeviceFrameBoundaryFeaturesEXT*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_PROPERTIES_LIST_KHR: {
+            deepcopy_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDeviceLayeredApiPropertiesListKHR*>(
+                    structExtension),
+                reinterpret_cast<VkPhysicalDeviceLayeredApiPropertiesListKHR*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_VULKAN_PROPERTIES_KHR: {
+            deepcopy_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDeviceLayeredApiVulkanPropertiesKHR*>(
+                    structExtension),
+                reinterpret_cast<VkPhysicalDeviceLayeredApiVulkanPropertiesKHR*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR: {
+            deepcopy_VkPhysicalDeviceMaintenance7FeaturesKHR(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDeviceMaintenance7FeaturesKHR*>(structExtension),
+                reinterpret_cast<VkPhysicalDeviceMaintenance7FeaturesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_PROPERTIES_KHR: {
+            deepcopy_VkPhysicalDeviceMaintenance7PropertiesKHR(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDeviceMaintenance7PropertiesKHR*>(structExtension),
+                reinterpret_cast<VkPhysicalDeviceMaintenance7PropertiesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR: {
+            deepcopy_VkPhysicalDeviceMaintenance8FeaturesKHR(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDeviceMaintenance8FeaturesKHR*>(structExtension),
+                reinterpret_cast<VkPhysicalDeviceMaintenance8FeaturesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_primitives_generated_query
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT: {
+            deepcopy_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+                alloc, rootType,
+                reinterpret_cast<const VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT*>(
+                    structExtension),
+                reinterpret_cast<VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
+            deepcopy_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+                alloc, rootType,
+                reinterpret_cast<const VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
+                    structExtension),
+                reinterpret_cast<VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT: {
+            deepcopy_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+                alloc, rootType,
+                reinterpret_cast<const VkSamplerBorderColorComponentMappingCreateInfoEXT*>(
+                    structExtension),
+                reinterpret_cast<VkSamplerBorderColorComponentMappingCreateInfoEXT*>(
                     structExtension_out));
             break;
         }

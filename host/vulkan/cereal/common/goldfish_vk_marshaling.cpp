@@ -19934,6 +19934,793 @@ void unmarshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
 }
 
 #endif
+
+// DroidVM: pNext structs a mesa >= 26 guest encoder can send that this
+// (older) host codegen did not cover.  Spliced verbatim from the same
+// cerealgenerator run that produced the guest encoder; see
+// scripts/check-cereal-compat.py.
+
+#ifdef VK_EXT_frame_boundary
+void marshal_VkFrameBoundaryEXT(VulkanStream* vkStream, VkStructureType rootType,
+                                const VkFrameBoundaryEXT* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkFrameBoundaryFlagsEXT*)&forMarshaling->flags,
+                    sizeof(VkFrameBoundaryFlagsEXT));
+    vkStream->write((uint64_t*)&forMarshaling->frameID, sizeof(uint64_t));
+    vkStream->write((uint32_t*)&forMarshaling->imageCount, sizeof(uint32_t));
+    // WARNING PTR CHECK
+    uint64_t cgen_var_0 = (uint64_t)(uintptr_t)forMarshaling->pImages;
+    vkStream->putBe64(cgen_var_0);
+    if (forMarshaling->pImages) {
+        if (forMarshaling->imageCount) {
+            uint64_t* cgen_var_0_0;
+            vkStream->alloc((void**)&cgen_var_0_0, forMarshaling->imageCount * 8);
+            vkStream->handleMapping()->mapHandles_VkImage_u64(forMarshaling->pImages, cgen_var_0_0,
+                                                              forMarshaling->imageCount);
+            vkStream->write((uint64_t*)cgen_var_0_0, forMarshaling->imageCount * 8);
+        }
+    }
+    vkStream->write((uint32_t*)&forMarshaling->bufferCount, sizeof(uint32_t));
+    // WARNING PTR CHECK
+    uint64_t cgen_var_1 = (uint64_t)(uintptr_t)forMarshaling->pBuffers;
+    vkStream->putBe64(cgen_var_1);
+    if (forMarshaling->pBuffers) {
+        if (forMarshaling->bufferCount) {
+            uint64_t* cgen_var_1_0;
+            vkStream->alloc((void**)&cgen_var_1_0, forMarshaling->bufferCount * 8);
+            vkStream->handleMapping()->mapHandles_VkBuffer_u64(
+                forMarshaling->pBuffers, cgen_var_1_0, forMarshaling->bufferCount);
+            vkStream->write((uint64_t*)cgen_var_1_0, forMarshaling->bufferCount * 8);
+        }
+    }
+    vkStream->write((uint64_t*)&forMarshaling->tagName, sizeof(uint64_t));
+    uint64_t cgen_var_2 = (uint64_t)forMarshaling->tagSize;
+    vkStream->putBe64(cgen_var_2);
+    // WARNING PTR CHECK
+    uint64_t cgen_var_3 = (uint64_t)(uintptr_t)forMarshaling->pTag;
+    vkStream->putBe64(cgen_var_3);
+    if (forMarshaling->pTag) {
+        vkStream->write((const void*)forMarshaling->pTag,
+                        forMarshaling->tagSize * sizeof(const uint8_t));
+    }
+}
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void unmarshal_VkFrameBoundaryEXT(VulkanStream* vkStream, VkStructureType rootType,
+                                  VkFrameBoundaryEXT* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkFrameBoundaryFlagsEXT*)&forUnmarshaling->flags,
+                   sizeof(VkFrameBoundaryFlagsEXT));
+    vkStream->read((uint64_t*)&forUnmarshaling->frameID, sizeof(uint64_t));
+    vkStream->read((uint32_t*)&forUnmarshaling->imageCount, sizeof(uint32_t));
+    // WARNING PTR CHECK
+    forUnmarshaling->pImages = (const VkImage*)(uintptr_t)vkStream->getBe64();
+    if (forUnmarshaling->pImages) {
+        vkStream->alloc((void**)&forUnmarshaling->pImages,
+                        forUnmarshaling->imageCount * sizeof(const VkImage));
+        if (forUnmarshaling->imageCount) {
+            uint64_t* cgen_var_0_0;
+            vkStream->alloc((void**)&cgen_var_0_0, forUnmarshaling->imageCount * 8);
+            vkStream->read((uint64_t*)cgen_var_0_0, forUnmarshaling->imageCount * 8);
+            vkStream->handleMapping()->mapHandles_u64_VkImage(
+                cgen_var_0_0, (VkImage*)forUnmarshaling->pImages, forUnmarshaling->imageCount);
+        }
+    }
+    vkStream->read((uint32_t*)&forUnmarshaling->bufferCount, sizeof(uint32_t));
+    // WARNING PTR CHECK
+    forUnmarshaling->pBuffers = (const VkBuffer*)(uintptr_t)vkStream->getBe64();
+    if (forUnmarshaling->pBuffers) {
+        vkStream->alloc((void**)&forUnmarshaling->pBuffers,
+                        forUnmarshaling->bufferCount * sizeof(const VkBuffer));
+        if (forUnmarshaling->bufferCount) {
+            uint64_t* cgen_var_1_0;
+            vkStream->alloc((void**)&cgen_var_1_0, forUnmarshaling->bufferCount * 8);
+            vkStream->read((uint64_t*)cgen_var_1_0, forUnmarshaling->bufferCount * 8);
+            vkStream->handleMapping()->mapHandles_u64_VkBuffer(
+                cgen_var_1_0, (VkBuffer*)forUnmarshaling->pBuffers, forUnmarshaling->bufferCount);
+        }
+    }
+    vkStream->read((uint64_t*)&forUnmarshaling->tagName, sizeof(uint64_t));
+    forUnmarshaling->tagSize = (size_t)vkStream->getBe64();
+    // WARNING PTR CHECK
+    forUnmarshaling->pTag = (const void*)(uintptr_t)vkStream->getBe64();
+    if (forUnmarshaling->pTag) {
+        vkStream->alloc((void**)&forUnmarshaling->pTag,
+                        forUnmarshaling->tagSize * sizeof(const uint8_t));
+        vkStream->read((void*)forUnmarshaling->pTag,
+                       forUnmarshaling->tagSize * sizeof(const uint8_t));
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void marshal_VkMemoryBarrierAccessFlags3KHR(VulkanStream* vkStream, VkStructureType rootType,
+                                            const VkMemoryBarrierAccessFlags3KHR* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkAccessFlags3KHR*)&forMarshaling->srcAccessMask3, sizeof(VkAccessFlags3KHR));
+    vkStream->write((VkAccessFlags3KHR*)&forMarshaling->dstAccessMask3, sizeof(VkAccessFlags3KHR));
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void unmarshal_VkMemoryBarrierAccessFlags3KHR(VulkanStream* vkStream, VkStructureType rootType,
+                                              VkMemoryBarrierAccessFlags3KHR* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkAccessFlags3KHR*)&forUnmarshaling->srcAccessMask3, sizeof(VkAccessFlags3KHR));
+    vkStream->read((VkAccessFlags3KHR*)&forUnmarshaling->dstAccessMask3, sizeof(VkAccessFlags3KHR));
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void marshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkBool32*)&forMarshaling->advancedBlendCoherentOperations, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void unmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendCoherentOperations, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void marshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((uint32_t*)&forMarshaling->advancedBlendMaxColorAttachments, sizeof(uint32_t));
+    vkStream->write((VkBool32*)&forMarshaling->advancedBlendIndependentBlend, sizeof(VkBool32));
+    vkStream->write((VkBool32*)&forMarshaling->advancedBlendNonPremultipliedSrcColor,
+                    sizeof(VkBool32));
+    vkStream->write((VkBool32*)&forMarshaling->advancedBlendNonPremultipliedDstColor,
+                    sizeof(VkBool32));
+    vkStream->write((VkBool32*)&forMarshaling->advancedBlendCorrelatedOverlap, sizeof(VkBool32));
+    vkStream->write((VkBool32*)&forMarshaling->advancedBlendAllOperations, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void unmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((uint32_t*)&forUnmarshaling->advancedBlendMaxColorAttachments, sizeof(uint32_t));
+    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendIndependentBlend, sizeof(VkBool32));
+    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendNonPremultipliedSrcColor,
+                   sizeof(VkBool32));
+    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendNonPremultipliedDstColor,
+                   sizeof(VkBool32));
+    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendCorrelatedOverlap, sizeof(VkBool32));
+    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendAllOperations, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void marshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkBool32*)&forMarshaling->borderColorSwizzle, sizeof(VkBool32));
+    vkStream->write((VkBool32*)&forMarshaling->borderColorSwizzleFromImage, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void unmarshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkBool32*)&forUnmarshaling->borderColorSwizzle, sizeof(VkBool32));
+    vkStream->read((VkBool32*)&forUnmarshaling->borderColorSwizzleFromImage, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void marshal_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceFrameBoundaryFeaturesEXT* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkBool32*)&forMarshaling->frameBoundary, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void unmarshal_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceFrameBoundaryFeaturesEXT* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkBool32*)&forUnmarshaling->frameBoundary, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiPropertiesListKHR* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((uint32_t*)&forMarshaling->layeredApiCount, sizeof(uint32_t));
+    // WARNING PTR CHECK
+    uint64_t cgen_var_0 = (uint64_t)(uintptr_t)forMarshaling->pLayeredApis;
+    vkStream->putBe64(cgen_var_0);
+    if (forMarshaling->pLayeredApis) {
+        if (forMarshaling) {
+            for (uint32_t i = 0; i < (uint32_t)forMarshaling->layeredApiCount; ++i) {
+                marshal_VkPhysicalDeviceLayeredApiPropertiesKHR(
+                    vkStream, rootType,
+                    (VkPhysicalDeviceLayeredApiPropertiesKHR*)(forMarshaling->pLayeredApis + i));
+            }
+        }
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceLayeredApiPropertiesListKHR* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((uint32_t*)&forUnmarshaling->layeredApiCount, sizeof(uint32_t));
+    // WARNING PTR CHECK
+    forUnmarshaling->pLayeredApis =
+        (VkPhysicalDeviceLayeredApiPropertiesKHR*)(uintptr_t)vkStream->getBe64();
+    if (forUnmarshaling->pLayeredApis) {
+        vkStream->alloc(
+            (void**)&forUnmarshaling->pLayeredApis,
+            forUnmarshaling->layeredApiCount * sizeof(VkPhysicalDeviceLayeredApiPropertiesKHR));
+        if (forUnmarshaling) {
+            for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->layeredApiCount; ++i) {
+                unmarshal_VkPhysicalDeviceLayeredApiPropertiesKHR(
+                    vkStream, rootType,
+                    (VkPhysicalDeviceLayeredApiPropertiesKHR*)(forUnmarshaling->pLayeredApis + i));
+            }
+        }
+    }
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    marshal_VkPhysicalDeviceProperties2(vkStream, rootType,
+                                        (VkPhysicalDeviceProperties2*)(&forMarshaling->properties));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    unmarshal_VkPhysicalDeviceProperties2(
+        vkStream, rootType, (VkPhysicalDeviceProperties2*)(&forUnmarshaling->properties));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceMaintenance7FeaturesKHR* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkBool32*)&forMarshaling->maintenance7, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceMaintenance7FeaturesKHR* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkBool32*)&forUnmarshaling->maintenance7, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceMaintenance7PropertiesKHR* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkBool32*)&forMarshaling->robustFragmentShadingRateAttachmentAccess,
+                    sizeof(VkBool32));
+    vkStream->write((VkBool32*)&forMarshaling->separateDepthStencilAttachmentAccess,
+                    sizeof(VkBool32));
+    vkStream->write((uint32_t*)&forMarshaling->maxDescriptorSetTotalUniformBuffersDynamic,
+                    sizeof(uint32_t));
+    vkStream->write((uint32_t*)&forMarshaling->maxDescriptorSetTotalStorageBuffersDynamic,
+                    sizeof(uint32_t));
+    vkStream->write((uint32_t*)&forMarshaling->maxDescriptorSetTotalBuffersDynamic,
+                    sizeof(uint32_t));
+    vkStream->write(
+        (uint32_t*)&forMarshaling->maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic,
+        sizeof(uint32_t));
+    vkStream->write(
+        (uint32_t*)&forMarshaling->maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic,
+        sizeof(uint32_t));
+    vkStream->write((uint32_t*)&forMarshaling->maxDescriptorSetUpdateAfterBindTotalBuffersDynamic,
+                    sizeof(uint32_t));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceMaintenance7PropertiesKHR* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkBool32*)&forUnmarshaling->robustFragmentShadingRateAttachmentAccess,
+                   sizeof(VkBool32));
+    vkStream->read((VkBool32*)&forUnmarshaling->separateDepthStencilAttachmentAccess,
+                   sizeof(VkBool32));
+    vkStream->read((uint32_t*)&forUnmarshaling->maxDescriptorSetTotalUniformBuffersDynamic,
+                   sizeof(uint32_t));
+    vkStream->read((uint32_t*)&forUnmarshaling->maxDescriptorSetTotalStorageBuffersDynamic,
+                   sizeof(uint32_t));
+    vkStream->read((uint32_t*)&forUnmarshaling->maxDescriptorSetTotalBuffersDynamic,
+                   sizeof(uint32_t));
+    vkStream->read(
+        (uint32_t*)&forUnmarshaling->maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic,
+        sizeof(uint32_t));
+    vkStream->read(
+        (uint32_t*)&forUnmarshaling->maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic,
+        sizeof(uint32_t));
+    vkStream->read((uint32_t*)&forUnmarshaling->maxDescriptorSetUpdateAfterBindTotalBuffersDynamic,
+                   sizeof(uint32_t));
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void marshal_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceMaintenance8FeaturesKHR* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkBool32*)&forMarshaling->maintenance8, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_KHR_maintenance8
+void unmarshal_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceMaintenance8FeaturesKHR* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkBool32*)&forUnmarshaling->maintenance8, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void marshal_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkBool32*)&forMarshaling->primitivesGeneratedQuery, sizeof(VkBool32));
+    vkStream->write((VkBool32*)&forMarshaling->primitivesGeneratedQueryWithRasterizerDiscard,
+                    sizeof(VkBool32));
+    vkStream->write((VkBool32*)&forMarshaling->primitivesGeneratedQueryWithNonZeroStreams,
+                    sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void unmarshal_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkBool32*)&forUnmarshaling->primitivesGeneratedQuery, sizeof(VkBool32));
+    vkStream->read((VkBool32*)&forUnmarshaling->primitivesGeneratedQueryWithRasterizerDiscard,
+                   sizeof(VkBool32));
+    vkStream->read((VkBool32*)&forUnmarshaling->primitivesGeneratedQueryWithNonZeroStreams,
+                   sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void marshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPipelineColorBlendAdvancedStateCreateInfoEXT* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((VkBool32*)&forMarshaling->srcPremultiplied, sizeof(VkBool32));
+    vkStream->write((VkBool32*)&forMarshaling->dstPremultiplied, sizeof(VkBool32));
+    vkStream->write((VkBlendOverlapEXT*)&forMarshaling->blendOverlap, sizeof(VkBlendOverlapEXT));
+}
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void unmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((VkBool32*)&forUnmarshaling->srcPremultiplied, sizeof(VkBool32));
+    vkStream->read((VkBool32*)&forUnmarshaling->dstPremultiplied, sizeof(VkBool32));
+    vkStream->read((VkBlendOverlapEXT*)&forUnmarshaling->blendOverlap, sizeof(VkBlendOverlapEXT));
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void marshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkSamplerBorderColorComponentMappingCreateInfoEXT* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    marshal_VkComponentMapping(vkStream, rootType,
+                               (VkComponentMapping*)(&forMarshaling->components));
+    vkStream->write((VkBool32*)&forMarshaling->srgb, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void unmarshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkSamplerBorderColorComponentMappingCreateInfoEXT* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    unmarshal_VkComponentMapping(vkStream, rootType,
+                                 (VkComponentMapping*)(&forUnmarshaling->components));
+    vkStream->read((VkBool32*)&forUnmarshaling->srgb, sizeof(VkBool32));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiPropertiesKHR* forMarshaling) {
+    (void)rootType;
+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+    vkStream->write((uint32_t*)&forMarshaling->vendorID, sizeof(uint32_t));
+    vkStream->write((uint32_t*)&forMarshaling->deviceID, sizeof(uint32_t));
+    vkStream->write((VkPhysicalDeviceLayeredApiKHR*)&forMarshaling->layeredAPI,
+                    sizeof(VkPhysicalDeviceLayeredApiKHR));
+    vkStream->write((char*)forMarshaling->deviceName,
+                    VK_MAX_PHYSICAL_DEVICE_NAME_SIZE * sizeof(char));
+}
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceLayeredApiPropertiesKHR* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    size_t pNext_size;
+    pNext_size = vkStream->getBe32();
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    }
+    vkStream->read((uint32_t*)&forUnmarshaling->vendorID, sizeof(uint32_t));
+    vkStream->read((uint32_t*)&forUnmarshaling->deviceID, sizeof(uint32_t));
+    vkStream->read((VkPhysicalDeviceLayeredApiKHR*)&forUnmarshaling->layeredAPI,
+                   sizeof(VkPhysicalDeviceLayeredApiKHR));
+    vkStream->read((char*)forUnmarshaling->deviceName,
+                   VK_MAX_PHYSICAL_DEVICE_NAME_SIZE * sizeof(char));
+}
+#endif
+
 void marshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType,
                               const void* structExtension) {
     VkInstanceCreateInfo* structAccess = (VkInstanceCreateInfo*)(structExtension);
@@ -21407,6 +22194,126 @@ void marshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType,
             break;
         }
 #endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_FRAME_BOUNDARY_EXT: {
+            marshal_VkFrameBoundaryEXT(
+                vkStream, rootType, reinterpret_cast<const VkFrameBoundaryEXT*>(structExtension));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_MEMORY_BARRIER_ACCESS_FLAGS_3_KHR: {
+            marshal_VkMemoryBarrierAccessFlags3KHR(
+                vkStream, rootType,
+                reinterpret_cast<const VkMemoryBarrierAccessFlags3KHR*>(structExtension));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
+            marshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
+                    structExtension));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
+            marshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
+                    structExtension));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT: {
+            marshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceBorderColorSwizzleFeaturesEXT*>(
+                    structExtension));
+            break;
+        }
+#endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT: {
+            marshal_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceFrameBoundaryFeaturesEXT*>(structExtension));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_PROPERTIES_LIST_KHR: {
+            marshal_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceLayeredApiPropertiesListKHR*>(
+                    structExtension));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_VULKAN_PROPERTIES_KHR: {
+            marshal_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceLayeredApiVulkanPropertiesKHR*>(
+                    structExtension));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR: {
+            marshal_VkPhysicalDeviceMaintenance7FeaturesKHR(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceMaintenance7FeaturesKHR*>(structExtension));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_PROPERTIES_KHR: {
+            marshal_VkPhysicalDeviceMaintenance7PropertiesKHR(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceMaintenance7PropertiesKHR*>(
+                    structExtension));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR: {
+            marshal_VkPhysicalDeviceMaintenance8FeaturesKHR(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceMaintenance8FeaturesKHR*>(structExtension));
+            break;
+        }
+#endif
+#ifdef VK_EXT_primitives_generated_query
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT: {
+            marshal_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT*>(
+                    structExtension));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
+            marshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+                vkStream, rootType,
+                reinterpret_cast<const VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
+                    structExtension));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT: {
+            marshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+                vkStream, rootType,
+                reinterpret_cast<const VkSamplerBorderColorComponentMappingCreateInfoEXT*>(
+                    structExtension));
+            break;
+        }
+#endif
         default: {
             // fatal; the switch is only taken if the extension struct is known
             // Print the raw sType first: string_VkStructureType() returns NULL for
@@ -22867,6 +23774,125 @@ void unmarshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType
             unmarshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
                 vkStream, rootType,
                 reinterpret_cast<VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_FRAME_BOUNDARY_EXT: {
+            unmarshal_VkFrameBoundaryEXT(
+                vkStream, rootType, reinterpret_cast<VkFrameBoundaryEXT*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_MEMORY_BARRIER_ACCESS_FLAGS_3_KHR: {
+            unmarshal_VkMemoryBarrierAccessFlags3KHR(
+                vkStream, rootType,
+                reinterpret_cast<VkMemoryBarrierAccessFlags3KHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
+            unmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
+            unmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT: {
+            unmarshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDeviceBorderColorSwizzleFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_frame_boundary
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT: {
+            unmarshal_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDeviceFrameBoundaryFeaturesEXT*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_PROPERTIES_LIST_KHR: {
+            unmarshal_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDeviceLayeredApiPropertiesListKHR*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_VULKAN_PROPERTIES_KHR: {
+            unmarshal_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDeviceLayeredApiVulkanPropertiesKHR*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR: {
+            unmarshal_VkPhysicalDeviceMaintenance7FeaturesKHR(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDeviceMaintenance7FeaturesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance7
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_PROPERTIES_KHR: {
+            unmarshal_VkPhysicalDeviceMaintenance7PropertiesKHR(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDeviceMaintenance7PropertiesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_KHR_maintenance8
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR: {
+            unmarshal_VkPhysicalDeviceMaintenance8FeaturesKHR(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDeviceMaintenance8FeaturesKHR*>(structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_primitives_generated_query
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT: {
+            unmarshal_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+                vkStream, rootType,
+                reinterpret_cast<VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_blend_operation_advanced
+        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
+            unmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+                vkStream, rootType,
+                reinterpret_cast<VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
+                    structExtension_out));
+            break;
+        }
+#endif
+#ifdef VK_EXT_border_color_swizzle
+        case VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT: {
+            unmarshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+                vkStream, rootType,
+                reinterpret_cast<VkSamplerBorderColorComponentMappingCreateInfoEXT*>(
                     structExtension_out));
             break;
         }

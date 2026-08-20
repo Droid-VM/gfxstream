@@ -2312,5 +2312,110 @@ void deepcopy_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
     VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT* to);
 
 #endif
+
+// DroidVM: pNext structs a mesa >= 26 guest encoder can send that this
+// (older) host codegen did not cover.  Spliced verbatim from the same
+// cerealgenerator run that produced the guest encoder; see
+// scripts/check-cereal-compat.py.
+
+#ifdef VK_EXT_frame_boundary
+void deepcopy_VkFrameBoundaryEXT(Allocator* alloc, VkStructureType rootType,
+                                 const VkFrameBoundaryEXT* from, VkFrameBoundaryEXT* to);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void deepcopy_VkMemoryBarrierAccessFlags3KHR(Allocator* alloc, VkStructureType rootType,
+                                             const VkMemoryBarrierAccessFlags3KHR* from,
+                                             VkMemoryBarrierAccessFlags3KHR* to);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void deepcopy_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* from,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* to);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void deepcopy_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* from,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* to);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void deepcopy_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* from,
+    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* to);
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void deepcopy_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceFrameBoundaryFeaturesEXT* from,
+    VkPhysicalDeviceFrameBoundaryFeaturesEXT* to);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiPropertiesListKHR* from,
+    VkPhysicalDeviceLayeredApiPropertiesListKHR* to);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* from,
+    VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* to);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    Allocator* alloc, VkStructureType rootType, const VkPhysicalDeviceMaintenance7FeaturesKHR* from,
+    VkPhysicalDeviceMaintenance7FeaturesKHR* to);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceMaintenance7PropertiesKHR* from,
+    VkPhysicalDeviceMaintenance7PropertiesKHR* to);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void deepcopy_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    Allocator* alloc, VkStructureType rootType, const VkPhysicalDeviceMaintenance8FeaturesKHR* from,
+    VkPhysicalDeviceMaintenance8FeaturesKHR* to);
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void deepcopy_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* from,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* to);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void deepcopy_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPipelineColorBlendAdvancedStateCreateInfoEXT* from,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* to);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void deepcopy_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    Allocator* alloc, VkStructureType rootType,
+    const VkSamplerBorderColorComponentMappingCreateInfoEXT* from,
+    VkSamplerBorderColorComponentMappingCreateInfoEXT* to);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void deepcopy_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    Allocator* alloc, VkStructureType rootType, const VkPhysicalDeviceLayeredApiPropertiesKHR* from,
+    VkPhysicalDeviceLayeredApiPropertiesKHR* to);
+#endif
+
 }  // namespace vk
 }  // namespace gfxstream

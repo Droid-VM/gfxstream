@@ -4369,5 +4369,187 @@ const char* api_opcode_to_string(const uint32_t opcode);
 #define OP_vkFirst 200000000
 #define OP_vkLast 300000000
 
+
+// DroidVM: pNext structs a mesa >= 26 guest encoder can send that this
+// (older) host codegen did not cover.  Spliced verbatim from the same
+// cerealgenerator run that produced the guest encoder; see
+// scripts/check-cereal-compat.py.
+
+#ifdef VK_EXT_frame_boundary
+void marshal_VkFrameBoundaryEXT(VulkanStream* vkStream, VkStructureType rootType,
+                                const VkFrameBoundaryEXT* forMarshaling);
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void unmarshal_VkFrameBoundaryEXT(VulkanStream* vkStream, VkStructureType rootType,
+                                  VkFrameBoundaryEXT* forUnmarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void marshal_VkMemoryBarrierAccessFlags3KHR(VulkanStream* vkStream, VkStructureType rootType,
+                                            const VkMemoryBarrierAccessFlags3KHR* forMarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void unmarshal_VkMemoryBarrierAccessFlags3KHR(VulkanStream* vkStream, VkStructureType rootType,
+                                              VkMemoryBarrierAccessFlags3KHR* forUnmarshaling);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void marshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forMarshaling);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void unmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forUnmarshaling);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void marshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forMarshaling);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void unmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forUnmarshaling);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void marshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* forMarshaling);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void unmarshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* forUnmarshaling);
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void marshal_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceFrameBoundaryFeaturesEXT* forMarshaling);
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void unmarshal_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceFrameBoundaryFeaturesEXT* forUnmarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiPropertiesListKHR* forMarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceLayeredApiPropertiesListKHR* forUnmarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* forMarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* forUnmarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceMaintenance7FeaturesKHR* forMarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceMaintenance7FeaturesKHR* forUnmarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceMaintenance7PropertiesKHR* forMarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceMaintenance7PropertiesKHR* forUnmarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void marshal_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceMaintenance8FeaturesKHR* forMarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void unmarshal_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceMaintenance8FeaturesKHR* forUnmarshaling);
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void marshal_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* forMarshaling);
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void unmarshal_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* forUnmarshaling);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void marshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPipelineColorBlendAdvancedStateCreateInfoEXT* forMarshaling);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void unmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* forUnmarshaling);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void marshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkSamplerBorderColorComponentMappingCreateInfoEXT* forMarshaling);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void unmarshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkSamplerBorderColorComponentMappingCreateInfoEXT* forUnmarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void marshal_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceLayeredApiPropertiesKHR* forMarshaling);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void unmarshal_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    VulkanStream* vkStream, VkStructureType rootType,
+    VkPhysicalDeviceLayeredApiPropertiesKHR* forUnmarshaling);
+#endif
+
 }  // namespace vk
 }  // namespace gfxstream

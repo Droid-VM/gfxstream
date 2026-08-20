@@ -3817,5 +3817,177 @@ void transform_fromhost_VkPhysicalDeviceImageCompressionControlSwapchainFeatures
     VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT* toTransform);
 
 #endif
+
+// DroidVM: pNext structs a mesa >= 26 guest encoder can send that this
+// (older) host codegen did not cover.  Spliced verbatim from the same
+// cerealgenerator run that produced the guest encoder; see
+// scripts/check-cereal-compat.py.
+
+#ifdef VK_EXT_frame_boundary
+void transform_tohost_VkFrameBoundaryEXT(VkDecoderGlobalState* resourceTracker,
+                                         VkFrameBoundaryEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void transform_fromhost_VkFrameBoundaryEXT(VkDecoderGlobalState* resourceTracker,
+                                           VkFrameBoundaryEXT* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void transform_tohost_VkMemoryBarrierAccessFlags3KHR(VkDecoderGlobalState* resourceTracker,
+                                                     VkMemoryBarrierAccessFlags3KHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void transform_fromhost_VkMemoryBarrierAccessFlags3KHR(VkDecoderGlobalState* resourceTracker,
+                                                       VkMemoryBarrierAccessFlags3KHR* toTransform);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void transform_tohost_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void transform_fromhost_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void transform_tohost_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceFrameBoundaryFeaturesEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_frame_boundary
+void transform_fromhost_VkPhysicalDeviceFrameBoundaryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceFrameBoundaryFeaturesEXT* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceLayeredApiPropertiesListKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceLayeredApiPropertiesListKHR(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceLayeredApiPropertiesListKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDeviceLayeredApiVulkanPropertiesKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance7FeaturesKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceMaintenance7FeaturesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance7FeaturesKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance7PropertiesKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceMaintenance7PropertiesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance7PropertiesKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void transform_tohost_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance8FeaturesKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance8
+void transform_fromhost_VkPhysicalDeviceMaintenance8FeaturesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMaintenance8FeaturesKHR* toTransform);
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void transform_tohost_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_primitives_generated_query
+void transform_fromhost_VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_tohost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_blend_operation_advanced
+void transform_fromhost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void transform_tohost_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkSamplerBorderColorComponentMappingCreateInfoEXT* toTransform);
+#endif
+
+#ifdef VK_EXT_border_color_swizzle
+void transform_fromhost_VkSamplerBorderColorComponentMappingCreateInfoEXT(
+    VkDecoderGlobalState* resourceTracker,
+    VkSamplerBorderColorComponentMappingCreateInfoEXT* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_tohost_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceLayeredApiPropertiesKHR* toTransform);
+#endif
+
+#ifdef VK_KHR_maintenance7
+void transform_fromhost_VkPhysicalDeviceLayeredApiPropertiesKHR(
+    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceLayeredApiPropertiesKHR* toTransform);
+#endif
+
 }  // namespace vk
 }  // namespace gfxstream
