@@ -17,11 +17,13 @@
 
 #include <drm/drm_fourcc.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -82,8 +84,17 @@ bool ShouldPinRingBlobsForGunyah() {
 
 struct GunyahRingBlobPool {
     std::mutex mutex;
-    // size -> stack of freed-but-still-alive RingBlobs available for reuse (LIFO).
-    std::unordered_map<uint64_t, std::vector<std::shared_ptr<RingBlob>>> freeBySize;
+    // size -> stack of released RingBlobs available for reuse (LIFO), held WEAKLY.
+    //
+    // Weakly, because `pinned` below already owns every blob forever, and the recycle test is
+    // "does anyone still hold this one" -- expressed as use_count() == 1, meaning `pinned` is the
+    // only owner left. A strong reference here would add a second owner and make that test
+    // permanently false: no blob would ever be handed back, every context would carve a fresh
+    // one, and the whole recycling mechanism would be dead code that silently leaks a ring per
+    // context. That is exactly what it was doing -- a 64 MB gfx-host pool ran out after ~63
+    // contexts (RINGBLOB-POOL-MISS[exhausted] used=65244KB high=65244KB), after which every
+    // further ring fell back to a fresh mlocked 2 MB memfd + a runtime Gunyah SHARE.
+    std::unordered_map<uint64_t, std::vector<std::weak_ptr<RingBlob>>> freeBySize;
     // Permanent reference to every RingBlob ever created so its pages never free.
     std::vector<std::shared_ptr<RingBlob>> pinned;
 };
@@ -125,10 +136,11 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
         // use_count()==1 means this vector is the last owner, so the reader is gone. Anything else
         // stays where it is and is looked at again next time.
         auto idle = std::find_if(it->second.begin(), it->second.end(),
-                                 [](const std::shared_ptr<RingBlob>& b) { return b.use_count() == 1; });
+                                 [](const std::weak_ptr<RingBlob>& b) { return b.use_count() == 1; });
         if (idle == it->second.end()) return nullptr;
-        std::shared_ptr<RingBlob> blob = std::move(*idle);
+        std::shared_ptr<RingBlob> blob = idle->lock();
         it->second.erase(idle);
+        if (!blob) return nullptr;  // cannot happen while `pinned` owns it; not worth crashing on
 
         // Same physical pages as before, and that is the point -- but they still hold the previous
         // ring's header. A recycled blob arrives with the old write and read positions and the old
@@ -161,6 +173,7 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
     // entire footprint. `alignment` is the guest page size the caller already computed, which is
     // also the real floor: the guest maps the blob with io_remap_pfn_range at page granularity.
     if (auto* hvPool = gfxstream::vk::HostVisiblePool::get()) {
+        const char* poolMiss = nullptr;
         const uint64_t align = alignment ? alignment : 4096;
         const uint64_t poolSize = (size + align - 1) & ~(align - 1);
         if (auto reused = takeFree(poolSize)) return reused;
@@ -182,8 +195,34 @@ std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint
                 return pblob;
             }
             hvPool->free(chunks);
+            poolMiss = "create-from-pool-failed";
         } else if (!chunks.empty()) {
             hvPool->free(chunks);  // fragmented: fall back to fresh memfd + runtime SHARE
+            poolMiss = "fragmented";
+        } else {
+            poolMiss = "exhausted";
+        }
+        // One ASG ring per guest context, and the pool is the only thing standing between that
+        // ring and a runtime SHARE + guest MEM_ACCEPT -- which is where this route's accept
+        // failures live. A miss used to leave no trace at all: the success line is behind
+        // GFXSTREAM_DIAG and both failure branches just fell through silently, so the first
+        // evidence of one was a blob map failing several layers down with no hint that the pool
+        // had been asked and had said no. Say it once per kind, with the state that caused it:
+        // "exhausted" wants a bigger gfx-host-mb, "fragmented" wants the multi-chunk path.
+        if (poolMiss) {
+            static std::atomic<uint64_t> sRingPoolMisses{0};
+            const uint64_t n = ++sRingPoolMisses;
+            if ((n & (n - 1)) == 0) {
+                auto st = hvPool->stats();
+                fprintf(stderr,
+                        "RINGBLOB-POOL-MISS[%s] #%llu: req=%lluKB pool used=%lluKB high=%lluKB "
+                        "free=%lluKB largest=%lluKB blocks=%zu -> fresh memfd + runtime SHARE\n",
+                        poolMiss, (unsigned long long)n, (unsigned long long)(poolSize >> 10),
+                        (unsigned long long)(st.used >> 10), (unsigned long long)(st.highWater >> 10),
+                        (unsigned long long)(st.freeBytes >> 10),
+                        (unsigned long long)(st.largest >> 10), st.blocks);
+                fflush(stderr);
+            }
         }
     }
 
@@ -276,7 +315,7 @@ void ReleaseGunyahRingBlob(const std::shared_ptr<RingBlob>& blob) {
     }
     auto& pool = GetGunyahRingBlobPool();
     std::lock_guard<std::mutex> lock(pool.mutex);
-    pool.freeBySize[blob->size()].push_back(blob);
+    pool.freeBySize[blob->size()].push_back(std::weak_ptr<RingBlob>(blob));
 }
 
 enum pipe_texture_target {
