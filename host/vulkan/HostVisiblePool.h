@@ -160,6 +160,31 @@ class HostVisiblePool {
         return chunks;
     }
 
+    // What the pool holds right now, for a caller that has just been refused by it. The
+    // numbers are the same ones logAllocLocked() prints; they are worth reporting at the
+    // refusal because "nothing left" and "plenty left, none of it in one piece" send the
+    // pool size in opposite directions.
+    struct Stats {
+        uint64_t used;
+        uint64_t freeBytes;
+        uint64_t largest;
+        uint64_t highWater;
+        size_t blocks;
+    };
+
+    Stats stats() {
+        std::lock_guard<std::mutex> lk(mMu);
+        Stats st = {};
+        for (const auto& e : mFree) {
+            st.freeBytes += e.second;
+            st.largest = std::max(st.largest, e.second);
+        }
+        st.used = mSize - st.freeBytes;
+        st.highWater = mHighWater;
+        st.blocks = mFree.size();
+        return st;
+    }
+
     void free(const std::vector<HostVisiblePoolChunk>& chunks) {
         std::lock_guard<std::mutex> lk(mMu);
         for (const auto& c : chunks) {
