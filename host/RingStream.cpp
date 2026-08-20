@@ -72,14 +72,12 @@ struct asg_context CreateContext(const AsgConsumerCreateInfo& info) {
     // These are the numbers that say whether that is true: the storage base this side was handed,
     // the ring's own read and write positions as it sees them, and the state byte it is about to
     // write through.
-    if (::gfxstream::diagEnabled()) {
-        GFXSTREAM_DIAG_PRINT(
-                "RING-VIEW: storage=%p to_host=%p state=%p write=%u read=%u stateval=%u "
-                "buffer=%p size=%u\n",
-                (void*)info.ring_storage, (void*)context.to_host, (void*)context.host_state,
-                context.to_host->write_pos, context.to_host->read_pos,
-                (unsigned)*(context.host_state), (void*)context.buffer, info.buffer_size);
-    }
+    GFXSTREAM_STALL_PRINT(
+            "RING-VIEW: storage=%p to_host=%p state=%p write=%u read=%u stateval=%u "
+            "buffer=%p size=%u\n",
+            (void*)info.ring_storage, (void*)context.to_host, (void*)context.host_state,
+            context.to_host->write_pos, context.to_host->read_pos,
+            (unsigned)*(context.host_state), (void*)context.buffer, info.buffer_size);
 
     ring_buffer_init_view_only(&context.to_host_large_xfer.view, (uint8_t*)context.buffer,
                                info.buffer_size);
@@ -401,10 +399,17 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                     // A thread that parks once and stays there never reaches a periodic
                     // limit, so always report the first few.
                     if (++mParkReports <= 3 || (mParkReports & 0xFF) == 0) {
-                        GFXSTREAM_DIAG_PRINT(
+                        // write/read straight out of the shared header, not through the ring
+                        // helpers: "0 bytes available" is a conclusion, and the two numbers it is
+                        // computed from are what say whether the guest wrote something this side
+                        // cannot see (write_pos frozen while the guest goes on writing) or genuinely
+                        // wrote nothing (write_pos == read_pos and both sides agree).
+                        GFXSTREAM_STALL_PRINT(
                                 "PARK-STATE: decoded %llu packets, last opcode=%u, ring has %u "
-                                "bytes\n",
-                                (unsigned long long)mDecodedCount, mLastDecoded, availBeforePark);
+                                "bytes, write_pos=%u read_pos=%u state=%u\n",
+                                (unsigned long long)mDecodedCount, mLastDecoded, availBeforePark,
+                                mContext.to_host->write_pos, mContext.to_host->read_pos,
+                                (unsigned)*(mContext.host_state));
                     }
                     if (availBeforePark > 0) {
                         ++mParkSpins;

@@ -162,7 +162,7 @@ static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32
     if (!sSeen.insert({name, opcode}).second) return;
     // fprintf, not GFXSTREAM_ERROR: crosvm sets the gfxstream log level so that neither warnings
     // nor errors are emitted, and a diagnostic nobody can read is the same as no diagnostic.
-    GFXSTREAM_DIAG_PRINT(
+    GFXSTREAM_STALL_PRINT(
             "DECODE-UNKNOWN: process=%s opcode=%u packetLen=%u -- no case for this opcode, the "
             "stream stalls here permanently\n",
             name.c_str(), opcode, packetLen);

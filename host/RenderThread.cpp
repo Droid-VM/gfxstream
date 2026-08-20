@@ -303,7 +303,7 @@ intptr_t RenderThread::main() {
     }
 
     std::unique_ptr<RenderThreadInfo> tInfo = std::make_unique<RenderThreadInfo>();
-    GFXSTREAM_DIAG_PRINT( "RT-ENTER: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
+    GFXSTREAM_STALL_PRINT( "RT-ENTER: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
     ChecksumCalculatorThreadInfo tChecksumInfo;
     ChecksumCalculator& checksumCalc = tChecksumInfo.get();
     bool needRestoreFromSnapshot = false;
@@ -364,7 +364,7 @@ intptr_t RenderThread::main() {
         // then nothing at all -- no first header, no packet, no seqno wait -- so the thread never
         // receives the guest's opening bytes. These three markers say which side of the handshake
         // that happens on.
-        GFXSTREAM_DIAG_PRINT( "HS-BEGIN: ctx=%u ring=%d\n", mContextId, mRingStream ? 1 : 0);
+        GFXSTREAM_STALL_PRINT( "HS-BEGIN: ctx=%u ring=%d\n", mContextId, mRingStream ? 1 : 0);
         if (const unsigned d = startupDelayUs()) usleep(d);
         uint32_t flags = 0;
         struct FlagsOut { uint32_t& dst; uint32_t& src; ~FlagsOut() { dst = src; } }
@@ -387,14 +387,14 @@ intptr_t RenderThread::main() {
                 // with a drained ring and no error on either side. Say so, and say what the read
                 // returned, because the guest cannot tell this apart from a host that is merely
                 // slow.
-                GFXSTREAM_DIAG_PRINT(
+                GFXSTREAM_STALL_PRINT(
                         "HS-GIVEUP: ctx=%u gave up on the opening handshake after %u reads: last "
                         "returned %zu, have %zu of %zu bytes; this thread will never answer\n",
                         mContextId, flagsReads, got, flagsHave, sizeof(flags));
                 setFinished();
                 tInfo.reset();
                 waitForExitSignal();
-                GFXSTREAM_DIAG_PRINT( "RT-EXIT-EARLY: thread=%p\n", this);
+                GFXSTREAM_STALL_PRINT( "RT-EXIT-EARLY: thread=%p\n", this);
                 return 0;
             }
         }
@@ -411,7 +411,7 @@ intptr_t RenderThread::main() {
     GfxApiLogger gfxLogger;
     auto& metricsLogger = FrameBuffer::getFB()->getMetricsLogger();
 
-    GFXSTREAM_DIAG_PRINT( "HS-DONE: ctx=%u flags=0x%x\n", mContextId, flagsAfterHandshake);
+    GFXSTREAM_STALL_PRINT( "HS-DONE: ctx=%u flags=0x%x\n", mContextId, flagsAfterHandshake);
 
     const ProcessResources* processResources = nullptr;
     bool anyProgress = false;
@@ -779,7 +779,7 @@ intptr_t RenderThread::main() {
     tInfo.reset();
     waitForExitSignal();
 
-    GFXSTREAM_DIAG_PRINT( "RT-EXIT: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
+    GFXSTREAM_STALL_PRINT( "RT-EXIT: thread=%p ring=%d\n", this, mRingStream ? 1 : 0);
     return 0;
 }
 

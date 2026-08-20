@@ -49,6 +49,19 @@ inline bool diagEnabled() {
         }                                            \
     } while (0)
 
+// The states that mean a stream is finished or stuck: an opcode with no case, a thread giving
+// up, a consumer parked with a guest waiting on the other side. Every one of them is the answer
+// to "why did that guest hang", and each is rate-limited at its call site, so it is tempting to
+// print them unconditionally.
+//
+// It was tried, and measured: with these unconditional, vulkaninfo failed 0/6 on the gfxstream
+// route; with them behind the switch again, 6/6, same guest and same host otherwise. They sit in
+// the consumer's park path, and an fprintf+fflush there changes the timing of the very handshake
+// they are meant to describe. A diagnostic that alters what it measures is worse than a silent
+// one, so they stay behind GFXSTREAM_DIAG -- turn it on deliberately, and read the result knowing
+// the timing is no longer the timing of a normal run.
+#define GFXSTREAM_STALL_PRINT(...) GFXSTREAM_DIAG_PRINT(__VA_ARGS__)
+
 // A defensive guard firing is evidence, not safety. Each of these was added to stop a crash whose
 // cause was never established, so the tree cannot tell "the guard is insurance" from "the bug is
 // still live and the guard is hiding it". Say so, once per site, whether or not diagnostics are
