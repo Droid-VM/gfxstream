@@ -2126,11 +2126,20 @@ class VkDecoderGlobalState::Impl {
         //  (b) Extensions whose property/feature structs this host gfxstream codegen cannot
         //      (un)marshal. A newer guest mesa (>=26) queries those structs during device
         //      init; the host's reservedunmarshal_extension_struct then abort()s. Hiding the
-        //      extension stops the guest from advertising/querying it. Add names here as new
-        //      guest-vs-host version skews surface.
+        //      extension stops the guest from advertising/querying it.
+        //
+        //      The cereal tables now carry every struct a mesa 26.3 guest encoder can send
+        //      except the five below, whose C types do not exist in this tree's Vulkan headers
+        //      (VK_HEADER_VERSION 313): VkPhysicalDeviceMaintenance9{Features,Properties}KHR,
+        //      VkQueueFamilyOwnershipTransferPropertiesKHR and
+        //      VkPhysicalDeviceRobustness2{Features,Properties}KHR. Bumping third_party/vulkan
+        //      is what would let them be decoded; until then the two extensions that introduce
+        //      them stay hidden. Keep this list and capset.cerealStructSetVersion in step, and
+        //      re-run scripts/check-cereal-compat.py after any guest-encoder regeneration.
         static const char* const kHiddenDeviceExtensions[] = {
             VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
-            VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME,
+            "VK_KHR_maintenance9",
+            "VK_KHR_robustness2",
         };
         for (auto it = properties.begin(); it != properties.end();) {
             bool drop = false;
@@ -7188,10 +7197,27 @@ class VkDecoderGlobalState::Impl {
                     const char* s = getenv("GFXSTREAM_POOL_BLOB_MAX_KB");
                     return s ? strtoull(s, nullptr, 0) * 1024ull : 0ull;
                 }();
+                // Why this allocation did not come from the pool, if it did not. A miss is not
+                // an error -- the fresh-memfd path below is a working fallback -- but it costs a
+                // Gunyah SHARE and a guest MEM_ACCEPT per allocation, and it is where the accept
+                // failures live. Until now the only trace of one was the *absence* of a GFXPOOL
+                // line, which says nothing unless GFXSTREAM_DIAG is on, and nothing at all about
+                // whether the pool was empty or merely fragmented -- the two want opposite fixes.
+                const char* poolMiss = nullptr;
+                HostVisiblePool::Stats poolMissStats = {};
+                if (!udmabufEnabled) {
+                    poolMiss = "udmabuf-off";
+                } else if (kPoolBlobMaxBytes != 0 &&
+                           localAllocInfo.allocationSize > kPoolBlobMaxBytes) {
+                    poolMiss = "over-size-gate";
+                }
                 if (udmabufEnabled &&
                     (kPoolBlobMaxBytes == 0 ||
                      localAllocInfo.allocationSize <= kPoolBlobMaxBytes)) {
-                    if (auto* hvPool = HostVisiblePool::get()) {
+                    auto* hvPool = HostVisiblePool::get();
+                    if (!hvPool) {
+                        poolMiss = "no-pre-alloc-pool";
+                    } else {
                         auto chunks =
                             hvPool->alloc(localAllocInfo.allocationSize, kPageSizeforBlob);
                         if (chunks.size() == 1) {
@@ -7220,14 +7246,56 @@ class VkDecoderGlobalState::Impl {
                             } else {
                                 if (dmabuf.has_value()) close(dmabuf.value());
                                 hvPool->free(chunks);
+                                poolMiss = dmabuf.has_value() ? "no-dmabuf-import" : "udmabuf-failed";
                             }
 #else
                             hvPool->free(chunks);
+                            poolMiss = "not-linux";
 #endif
                         } else if (!chunks.empty()) {
                             // 3a: reject fragmented allocations; keep the pool intact.
                             hvPool->free(chunks);
+                            poolMiss = "fragmented";
+                        } else {
+                            poolMiss = "exhausted";
                         }
+                        if (poolMiss) poolMissStats = hvPool->stats();
+                    }
+                }
+
+                // Report the misses on a doubling schedule (1st, 2nd, 4th, 8th, ...): the first
+                // one is the whole answer when it is a configuration mistake, and the counter
+                // keeps a session that misses steadily from writing a line per allocation on the
+                // pipe crosvm's stderr is streamed over. Unconditional -- a run that prints none
+                // of these is the only version of "the pool is doing its job" worth believing.
+                if (poolOffset < 0 && poolMiss) {
+                    static std::atomic<uint64_t> sPoolMisses{0};
+                    const uint64_t n = ++sPoolMisses;
+                    if ((n & (n - 1)) == 0) {
+                        // The stats are only meaningful when the pool was consulted at all.
+                        // udmabuf-off, over-size-gate and no-pre-alloc-pool never reach it, and
+                        // printing an all-zero pool for those reads as "the pool is empty" --
+                        // the opposite of what happened.
+                        if (poolMissStats.blocks || poolMissStats.used || poolMissStats.freeBytes) {
+                            fprintf(stderr,
+                                    "GFXPOOL-MISS[%s] #%llu: req=%lluKB pool used=%lluKB "
+                                    "high=%lluKB free=%lluKB largest=%lluKB blocks=%zu "
+                                    "-> runtime SHARE\n",
+                                    poolMiss, (unsigned long long)n,
+                                    (unsigned long long)(localAllocInfo.allocationSize >> 10),
+                                    (unsigned long long)(poolMissStats.used >> 10),
+                                    (unsigned long long)(poolMissStats.highWater >> 10),
+                                    (unsigned long long)(poolMissStats.freeBytes >> 10),
+                                    (unsigned long long)(poolMissStats.largest >> 10),
+                                    poolMissStats.blocks);
+                        } else {
+                            fprintf(stderr,
+                                    "GFXPOOL-MISS[%s] #%llu: req=%lluKB (pool not consulted) "
+                                    "-> runtime SHARE\n",
+                                    poolMiss, (unsigned long long)n,
+                                    (unsigned long long)(localAllocInfo.allocationSize >> 10));
+                        }
+                        fflush(stderr);
                     }
                 }
 

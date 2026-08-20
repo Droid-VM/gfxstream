@@ -655,6 +655,7 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
             memset(capset, 0, sizeof(*capset));
 
             capset->protocolVersion = 1;
+            capset->cerealStructSetVersion = 1;
             capset->ringSize = 12288;
             // Must match the size RingStream is configured with: the guest allocates the ring
             // blob from this, and a mismatch has the host reading past the end of it.
