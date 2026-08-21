@@ -16,6 +16,14 @@
 
 #include <assert.h>
 #include <memory.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+
+#include <vector>
 
 #include "gfxstream/host/dma_device.h"
 #include "gfxstream/common/logging.h"
@@ -27,16 +35,48 @@
 namespace gfxstream {
 namespace {
 
+// Attach to the ring the guest has already set up, rather than setting it up again.
+//
+// Both sides used to call asg_context_create on the same shared memory, and that call ends with
+// ring_buffer_init, which rewinds the ring's shared read and write counters. Nothing orders the
+// two calls against each other: the guest maps the blob, initialises the ring and starts writing,
+// while this side runs when the guest pings ASG_SET_VERSION. When that landed after the guest had
+// already committed its first bytes -- the four-byte clientFlags word that opens every connection
+// is usually the first -- the counters went back to zero underneath it, and from then on this side
+// read from a position the guest had never written. Every packet after that was framed from the
+// wrong offset: an opcode read as a length, a wait for a body of some twenty thousand bytes nobody
+// would ever send, and a guest thread parked forever on a reply, with an empty ring and no error
+// on either side. It presented as a desktop that came up whole, or as a bare wallpaper, or not at
+// all, from one boot to the next, on the same binaries.
+//
+// So: the ring struct is shared and the guest owns its initialisation. The views are per-side --
+// host and guest hold different pointers to the same bytes -- and this side owns its own, which is
+// what ring_buffer_init_view_only is for. buffer_size and flush_interval stay the host's to
+// publish, because the guest reads flush_interval to size its writes and cannot know it first.
 struct asg_context CreateContext(const AsgConsumerCreateInfo& info) {
-    struct asg_context context = asg_context_create(info.ring_storage, info.buffer, info.buffer_size);
+    struct asg_context context;
+
+    context.to_host = reinterpret_cast<struct ring_buffer*>(
+        info.ring_storage + offsetof(struct asg_ring_storage, to_host));
+    context.to_host_large_xfer.ring = reinterpret_cast<struct ring_buffer*>(
+        info.ring_storage + offsetof(struct asg_ring_storage, to_host_large_xfer));
+    context.from_host_large_xfer.ring = reinterpret_cast<struct ring_buffer*>(
+        info.ring_storage + offsetof(struct asg_ring_storage, from_host_large_xfer));
+
+    context.buffer = info.buffer;
+    // asg_context carries buffer_size and type1Read validates the guest-supplied offset/size
+    // against it, so attaching instead of calling asg_context_create means setting it here.
+    context.buffer_size = info.buffer_size;
+    context.host_state = reinterpret_cast<asg_host_state*>(&context.to_host->state);
+    context.ring_config = reinterpret_cast<asg_ring_config*>(context.to_host->config);
+
+    ring_buffer_init_view_only(&context.to_host_large_xfer.view, (uint8_t*)context.buffer,
+                               info.buffer_size);
+    ring_buffer_init_view_only(&context.from_host_large_xfer.view, (uint8_t*)context.buffer,
+                               info.buffer_size);
 
     context.ring_config->buffer_size = info.buffer_size;
     context.ring_config->flush_interval = info.buffer_flush_interval;
-    context.ring_config->host_consumed_pos = 0;
-    context.ring_config->guest_write_pos = 0;
-    context.ring_config->transfer_mode = 1;
-    context.ring_config->transfer_size = 0;
-    context.ring_config->in_error = 0;
 
     return context;
 }
@@ -154,7 +194,81 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
     uint32_t ringAvailable = 0;
     uint32_t ringLargeXferAvailable = 0;
 
-    const uint32_t maxSpins = 30;
+    // What to do while the ring is empty. There are two costs, and a single flat spin count has to
+    // trade them against each other blind: parking needs a guest doorbell -- a virtio round trip --
+    // to come back, while yield-spinning contends with the guest's vCPU threads for the same
+    // physical cores. Backing off in stages separates them.
+    //
+    // Measured with Minecraft, GPU pinned at 734 MHz, one fixed scene, as guest submits/second:
+    //     flat 3000                        508
+    //     3000:0                           499   (this code, one stage -- the ladder is free)
+    //     500:0,5000:1,10000:10,30000:50   540
+    //     3000:0,20000:1,40000:10,80000:50 554
+    //     3000:0,50000:1                   558
+    //     3000:0,150000:1                  567
+    //     20000:0,150000:1                 494   (worse than no ladder at all)
+    //
+    // Two things fell out of that. Spinning past 3000 lands below the flat baseline, because that
+    // is expensive waiting on cores the guest needs. And the sleeping stage looked like where all
+    // the gain was -- parking seemed a loss, since the host consumer is ~99% idle anyway, so
+    // waiting cheaply appeared to cost nobody anything while a park has to be paid back with a VM
+    // exit.
+    //
+    // "Waiting cheaply" was the mistake, and one game was the wrong workload to find it on. Each
+    // sleepUs(1) programs a timer and takes an interrupt on expiry; one guest process has a couple
+    // of render threads doing that, and a desktop session has one per client. Measured on an idle
+    // KDE desktop -- nothing running, nothing moving -- as timer interrupts across the phone, how
+    // busy the phone was, and vkmark on the same boot:
+    //
+    //     3000:0,150000:1   289211 irq/s   100.0% busy   vkmark 1643
+    //     3000:0              1822 irq/s    21.1% busy   vkmark 3632   <- default
+    //     30:0                1133 irq/s    12.6% busy   vkmark  924   (the flat 30 this replaces)
+    //
+    // The sleeping stage does not merely spend CPU that was going spare: it saturates the phone
+    // with interrupt work and takes throughput down with it, to less than half of what the same
+    // build does without it. Spinning is what buys the handoff latency, and 30 iterations is too
+    // short to buy any, so it parks constantly. Keep the yield stage, park after it, and let a
+    // doorbell do the rest.
+    //
+    // GFXSTREAM_ASG_SPIN_LEVELS overrides the stages as ascending "iters:sleep_us" pairs; an
+    // empty-ring iteration past the last stage parks. One stage reproduces flat behaviour, which
+    // is what made the ladder measurable apart from the stage values.
+    struct SpinLevel {
+        uint32_t upToIter;
+        uint32_t sleepUs;
+    };
+    static const std::vector<SpinLevel> spinLevels = [] {
+        std::vector<SpinLevel> levels;
+        const char* env = getenv("GFXSTREAM_ASG_SPIN_LEVELS");
+        const char* spec = env ? env : "3000:0";
+        uint32_t prev = 0;
+        while (*spec) {
+            char* end = nullptr;
+            const unsigned long iters = strtoul(spec, &end, 10);
+            if (end == spec || *end != ':') break;
+            spec = end + 1;
+            const unsigned long us = strtoul(spec, &end, 10);
+            if (end == spec) break;
+            spec = *end == ',' ? end + 1 : end;
+            if (iters > prev) {
+                levels.push_back(
+                    SpinLevel{static_cast<uint32_t>(iters), static_cast<uint32_t>(us)});
+                prev = static_cast<uint32_t>(iters);
+            }
+        }
+        if (levels.empty()) levels.push_back(SpinLevel{3000, 0});
+        return levels;
+    }();
+    // Sleeping stages are only distinct from one another if a 1 us sleep is near 1 us: the default
+    // timer slack is 50 us, which collapses every stage below it into the same wait. Slack is
+    // per-thread, so each consumer sets its own once.
+    static thread_local const bool slackSet = [] {
+#if defined(__linux__) && defined(PR_SET_TIMERSLACK)
+        prctl(PR_SET_TIMERSLACK, 1000 /* ns */, 0, 0, 0);
+#endif
+        return true;
+    }();
+    (void)slackSet;
     uint32_t spins = 0;
     bool inLargeXfer = true;
 
@@ -232,12 +346,23 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                 inLargeXfer = false;
             }
 
-            if (++spins < maxSpins) {
-                ring_buffer_yield();
-                continue;
-            } else {
-                spins = 0;
+            ++spins;
+            uint32_t sleepUs = UINT32_MAX;  // past the last stage -> park
+            for (const SpinLevel& level : spinLevels) {
+                if (spins <= level.upToIter) {
+                    sleepUs = level.sleepUs;
+                    break;
+                }
             }
+            if (sleepUs != UINT32_MAX) {
+                if (sleepUs == 0) {
+                    ring_buffer_yield();
+                } else {
+                    gfxstream::base::sleepUs(sleepUs);
+                }
+                continue;
+            }
+            spins = 0;
 
             if (mShouldExit) {
                 return nullptr;
@@ -247,16 +372,29 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                 return nullptr;
             }
 
-            ++mUnavailableReadCount;
+            // The ladder ran dry, so park now rather than running it kMaxUnavailableReads more
+            // times: the stages already covered every latency worth spinning through.
+            mUnavailableReadCount = kMaxUnavailableReads;
             if (mUnavailableReadCount >= kMaxUnavailableReads) {
                 *(mContext.host_state) = ASG_HOST_STATE_NEED_NOTIFY;
 
                 bool sleeping = false;
                 do {
+                    // Whatever this loop does next, it is parked until the guest rings: say so
+                    // every time round. The state word is the only thing the guest has to decide
+                    // whether to ring at all -- it pings when this is neither CAN_CONSUME nor
+                    // RENDERING -- so a stale CAN_CONSUME here tells the guest the host is busy
+                    // and needs no doorbell, while the host waits for exactly that doorbell.
+                    *(mContext.host_state) = ASG_HOST_STATE_NEED_NOTIFY;
                     const AsgOnUnavailableReadStatus status = mCallbacks.onUnavailableRead();
                     switch (status) {
                         case AsgOnUnavailableReadStatus::kContinue: {
                             *(mContext.host_state) = ASG_HOST_STATE_CAN_CONSUME;
+                            // And stop sleeping. Without this the loop calls onUnavailableRead
+                            // forever once any call has returned kSleep: a later kContinue means
+                            // "go read again", but sleeping stays set, so the read never happens
+                            // and the state is left saying CAN_CONSUME.
+                            sleeping = false;
                             break;
                         }
                         case AsgOnUnavailableReadStatus::kExit: {
