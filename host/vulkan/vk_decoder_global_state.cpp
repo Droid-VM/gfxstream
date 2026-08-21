@@ -1792,6 +1792,33 @@ class VkDecoderGlobalState::Impl {
         return res;
     }
 
+    // gfxstream-zerocopy: a format the guest's getVirglFormat() cannot turn into a virtio-gpu
+    // resource cannot back a scanout or an exported dmabuf here, however well the host GPU
+    // supports it. mesa's WSI builds its surface-format list by filtering on
+    // optimalTilingFeatures & COLOR_ATTACHMENT, so clearing that bit is what keeps such a format
+    // out of the list -- otherwise an application that just takes surfaceFormats[0] (vkmark,
+    // vkcube) picks one the guest then fails to export, and the guest's clean
+    // VK_ERROR_FORMAT_NOT_SUPPORTED surfaces as a crash in applications that skip the check.
+    //
+    // Only the formats the guest cannot export are dropped. B8G8R8A8 and R8G8B8A8 are both
+    // exportable and both stay: stripping either would remove COLOR_ATTACHMENT system-wide and
+    // break every renderer that uses it, desktop components included.
+    static void maskFormatPropertiesForGuestExport(VkFormat format,
+                                                   VkFormatProperties* pFormatProperties) {
+        switch (format) {
+            case VK_FORMAT_R16G16B16A16_SFLOAT:
+            case VK_FORMAT_R16G16B16A16_UNORM:
+            case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+            case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+                pFormatProperties->optimalTilingFeatures &=
+                    ~(VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT);
+                break;
+            default:
+                break;
+        }
+    }
+
     void on_vkGetPhysicalDeviceFormatProperties(gfxstream::base::BumpPool* pool,
                                                 VkSnapshotApiCallHandle,
                                                 VkPhysicalDevice boxed_physicalDevice,
@@ -1805,6 +1832,8 @@ class VkDecoderGlobalState::Impl {
                 vk->vkGetPhysicalDeviceFormatProperties(physicalDevice, format, pFormatProperties);
             },
             vk, physicalDevice, format, pFormatProperties);
+
+        maskFormatPropertiesForGuestExport(format, pFormatProperties);
     }
 
     void on_vkGetPhysicalDeviceFormatProperties2(gfxstream::base::BumpPool* pool,
@@ -1882,6 +1911,8 @@ class VkDecoderGlobalState::Impl {
                 break;
             }
         }
+
+        maskFormatPropertiesForGuestExport(format, &pFormatProperties->formatProperties);
     }
 
     void on_vkGetPhysicalDeviceProperties(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
