@@ -14,6 +14,9 @@
 #pragma once
 
 #include <inttypes.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include <atomic>
 #include <mutex>
@@ -53,6 +56,8 @@ namespace host {
 #define STREAM_HANDLE_TYPE_MEM_OPAQUE_WIN32 0x3
 #define STREAM_HANDLE_TYPE_MEM_SHM 0x4
 #define STREAM_HANDLE_TYPE_MEM_ZIRCON 0x5
+/* DroidVM gfxstream pre-alloc; see virtio-gpu-gfxstream-renderer.h. 0x6 is retired (MEM_AHB). */
+#define STREAM_HANDLE_TYPE_MEM_POOL 0x7
 
 #define STREAM_HANDLE_TYPE_SIGNAL_OPAQUE_FD 0x10
 #define STREAM_HANDLE_TYPE_SIGNAL_SYNC_FD 0x20
@@ -78,11 +83,11 @@ struct ExternalHandleInfo {
     ManagedDescriptor toManagedDescriptor() const {
         return ManagedDescriptor(static_cast<DescriptorType>(handle));
     }
-// Android uses AHardwareBuffer* for external handle type, which is not a fd.
-#if !defined(__ANDROID__)
+// Android historically used AHardwareBuffer* here, which is not an fd. On a host whose driver
+// exports dma-buf (Turnip) the handle is a real fd on Android too, so these are available
+// everywhere; a caller must only use them when streamHandleType is an fd type.
     int getFd() const { return static_cast<int>(handle); }
     ExternalHandleType dupFd() const { return static_cast<ExternalHandleType>(dup(getFd())); }
-#endif
 #endif
 };
 
@@ -119,6 +124,10 @@ struct BlobDescriptorInfo {
     BlobDescriptorType descriptorInfo;
     uint32_t caching;
     std::optional<VulkanInfo> vulkanInfoOpt;
+    // DroidVM gfxstream pre-alloc: >=0 when this blob is backed by a GpuPool sub-allocation at
+    // that byte offset; the VMM maps the pool GPA directly, with no runtime SHARE. -1 = an
+    // ordinary fd/shm-backed blob.
+    int64_t poolOffset = -1;
 };
 
 using SyncDescriptorInfo = GenericDescriptorInfo;
@@ -134,7 +143,7 @@ class ExternalObjectManager {
 
     void addBlobDescriptorInfo(uint32_t ctx_id, uint64_t blobId, BlobDescriptorValueType descriptor,
                                uint32_t streamHandleType, uint32_t caching,
-                               std::optional<VulkanInfo> vulkanInfoOpt);
+                               std::optional<VulkanInfo> vulkanInfoOpt, int64_t poolOffset = -1);
     std::optional<BlobDescriptorInfo> removeBlobDescriptorInfo(uint32_t ctx_id, uint64_t blobId);
 
     void addSyncDescriptorInfo(uint32_t ctx_id, uint64_t syncId, ManagedDescriptor descriptor,

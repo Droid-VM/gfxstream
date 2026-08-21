@@ -15,6 +15,9 @@
 #include "virtio_gpu_resource.h"
 
 #include <drm/drm_fourcc.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include "frame_buffer.h"
 #include "virtio_gpu_format_utils.h"
@@ -818,6 +821,32 @@ int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
         return 0;
     } else if (std::holds_alternative<ExternalMemoryInfo>(*mBlobMemory)) {
         auto& memory = std::get<ExternalMemoryInfo>(*mBlobMemory);
+        // A GpuPool-resident blob: hand the VMM a dup of the pool memfd plus the offset, marked
+        // MEM_POOL, so it maps the pool GPA directly instead of runtime-SHARE'ing this blob.
+        if (memory->poolOffset >= 0) {
+#ifdef __ANDROID__
+            int rawDescriptor = dup(static_cast<int>(memory->descriptorInfo.handle));
+#else
+            auto rawDescriptorOpt = memory->descriptorInfo.descriptor.release();
+            int rawDescriptor = rawDescriptorOpt ? static_cast<int>(*rawDescriptorOpt) : -1;
+#endif
+            // Reporting the failure rather than a success carrying no handle: a pool-resident blob
+            // whose descriptor is not a live fd is a real condition -- guest-allocated memory
+            // reaches the host as pages, not as something dup() can copy -- and returning 0 with
+            // os_handle -1 leaves the caller unable to tell it from a real handle except by
+            // checking for a negative fd, which the VMM turns into an error that names no cause.
+            if (rawDescriptor < 0) {
+                GFXSTREAM_ERROR(
+                    "failed to export blob for resource %u: pool-resident at offset %lld but its "
+                    "descriptor (type %u) is not exportable",
+                    mId, (long long)memory->poolOffset, memory->descriptorInfo.streamHandleType);
+                return -EINVAL;
+            }
+            outHandle->os_handle = static_cast<int64_t>(rawDescriptor);
+            outHandle->handle_type = STREAM_HANDLE_TYPE_MEM_POOL;
+            outHandle->pool_offset = static_cast<uint64_t>(memory->poolOffset);
+            return 0;
+        }
         int ret = fillExportHandle(outHandle, memory->descriptorInfo);
         if (ret != 0) {
             GFXSTREAM_ERROR("failed to export blob for resource %u: failed to get raw handle.",

@@ -176,10 +176,24 @@ struct MemoryInfo {
     uint32_t memoryIndex = 0;
     // Set if the memory is backed by shared memory.
     std::optional<gfxstream::base::SharedMemory> sharedMemory;
+    // Bytes the VMM charged for folio-backing this blob; refunded when the memory is destroyed.
+    uint64_t folioBytes = 0;
+    // Byte offset within the boot-blessed GpuPool if this host-visible memory was sub-allocated
+    // from it; -1 = not pool-resident (the fresh-memfd / runtime-SHARE path). Carried to the blob
+    // export so the VMM reports the pool GPA to the guest and skips the SHARE.
+    int64_t poolOffset = -1;
+    // What the pool charged for that offset: the allocation size rounded up to the page size, NOT
+    // `size`, which is the guest-requested figure. Freeing anything but the charged size hands
+    // back a short extent -- the tail is lost for the VM's lifetime, and since the returned extent
+    // no longer abuts its neighbour it cannot coalesce either, so the free list fragments.
+    uint64_t poolSize = 0;
 
     std::shared_ptr<PrivateMemory> privateMemory;
     // virtio-gpu blobs
     uint64_t blobId = 0;
+    // Context the descriptor for `blobId` was filed under, so freeing this memory can drop a
+    // descriptor no RESOURCE_CREATE_BLOB ever picked up. Blob ids are recycled by the guest.
+    std::optional<uint32_t> blobCtxId;
 
     // Buffer, provided via vkAllocateMemory().
     std::optional<HandleType> boundBuffer;

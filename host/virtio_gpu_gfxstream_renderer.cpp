@@ -36,6 +36,7 @@ extern "C" {
 #include "render-utils/RenderLib.h"
 #include "render_thread.h"
 #include "virtio_gpu_frontend.h"
+#include "vulkan/host_visible_folio.h"
 #include "vulkan/vk_utils.h"
 #include "vulkan/vulkan_dispatch.h"
 
@@ -641,6 +642,8 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
     std::string renderer_features_str;
     stream_renderer_fence_callback fence_callback = nullptr;
     stream_renderer_debug_callback log_callback = nullptr;
+    stream_renderer_prepare_blob_backing_callback prepare_blob_backing_cb = nullptr;
+    stream_renderer_release_blob_backing_callback release_blob_backing_cb = nullptr;
     stream_renderer_debug_callback_ex log_callback_ex = nullptr;
     bool rendererInitializedExternally = false;
 
@@ -709,6 +712,18 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
                     std::string(reinterpret_cast<const char*>(static_cast<uintptr_t>(param.value)));
                 break;
             }
+            case STREAM_RENDERER_PARAM_PREPARE_BLOB_BACKING_CALLBACK: {
+                prepare_blob_backing_cb =
+                    reinterpret_cast<stream_renderer_prepare_blob_backing_callback>(
+                        static_cast<uintptr_t>(param.value));
+                break;
+            }
+            case STREAM_RENDERER_PARAM_RELEASE_BLOB_BACKING_CALLBACK: {
+                release_blob_backing_cb =
+                    reinterpret_cast<stream_renderer_release_blob_backing_callback>(
+                        static_cast<uintptr_t>(param.value));
+                break;
+            }
             default: {
                 // We skip any parameters we don't recognize.
                 GFXSTREAM_ERROR(
@@ -718,6 +733,10 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
             }
         }
     }
+
+    // The VMM owns how a host-visible blob's shmem is backed; gfxstream only hands it the fd.
+    gfxstream::host::HostVisibleBlobBacking::get().set(prepare_blob_backing_cb,
+                                                       release_blob_backing_cb, renderer_cookie);
 
     if (log_callback_ex) {
         gfxstream::host::SetGfxstreamLogCallback([log_callback_ex, log_user_data = renderer_cookie](

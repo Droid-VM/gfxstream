@@ -664,6 +664,24 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
             capset->noRenderControlEnc = 1;
             capset->blobAlignment = mPageSize;
 
+            // pVM guest-alloc pool partition: split the boot-blessed GpuPool into a host slice
+            // [0, GFXSTREAM_POOL_HOST_MB) that serves every host-alloc request (the ASG rings and
+            // the rest) and a guest slice [host_mb, pool_size) the guest ICD carves BLOB_MEM_GUEST
+            // from. The VMM sets GFXSTREAM_POOL_HOST_MB only when udmabuf backing is on, so these
+            // stay 0 -- host-alloc mode, which the guest ignores -- otherwise.
+            {
+                const char* hostMbS = getenv("GFXSTREAM_POOL_HOST_MB");
+                const char* poolSizeS = getenv("GFXSTREAM_POOL_SIZE");
+                if (hostMbS && poolSizeS) {
+                    uint64_t poolMb = strtoull(poolSizeS, nullptr, 0) >> 20;
+                    uint64_t hostMb = strtoull(hostMbS, nullptr, 0);
+                    if (hostMb < poolMb) {
+                        capset->guestAllocOffsetMb = (uint32_t)hostMb;
+                        capset->guestAllocSizeMb = (uint32_t)(poolMb - hostMb);
+                    }
+                }
+            }
+
 #if GFXSTREAM_UNSTABLE_VULKAN_BLOB_COLOR_BUFFER
             capset->alwaysBlob = 1;
 #endif
