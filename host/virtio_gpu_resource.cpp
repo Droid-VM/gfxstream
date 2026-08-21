@@ -477,6 +477,24 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
         }
         auto format = *formatOpt;
 
+        // The virgl format the guest asked this resource to be, per resource. This is the other
+        // half of the pairing that decides byte order: the guest's own image format says what it
+        // writes, and this says what the host thinks it is reading back.
+        {
+            static std::mutex sSeenMutex;
+            static std::set<uint32_t> sSeenResources;
+            bool firstTime = false;
+            {
+                std::lock_guard<std::mutex> lock(sSeenMutex);
+                firstTime =
+                    sSeenResources.size() < 24 && sSeenResources.insert(args->handle).second;
+            }
+            if (firstTime) {
+                GFXSTREAM_INFO("ColorBuffer resource %u: %ux%u virgl %u -> %s", args->handle,
+                               args->width, args->height, args->format, ToString(format).c_str());
+            }
+        }
+
         if (!FrameBuffer::getFB()->createColorBufferWithResourceHandle(args->width, args->height,
                                                                        format, args->handle)) {
             const std::string formatString = ToString(format);

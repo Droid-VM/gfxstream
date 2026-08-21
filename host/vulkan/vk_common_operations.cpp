@@ -3099,16 +3099,20 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
     // comes out with its channels exchanged and nothing else looks wrong. One line per distinct
     // format triple, so a session costs a handful.
     {
+        // Per colour buffer, not per format: deduplicating by format hides the interesting case,
+        // which is a buffer whose format happens to match one already seen. Capped so a long
+        // session cannot fill the log.
         static std::mutex sSeenMutex;
-        static std::set<std::tuple<GfxstreamFormat, GfxstreamFormat, VkFormat>> sSeen;
+        static std::set<uint32_t> sSeenHandles;
         bool firstTime = false;
         {
             std::lock_guard<std::mutex> lock(sSeenMutex);
-            firstTime = sSeen.insert({format, internalFormat, vkFormat}).second;
+            firstTime = sSeenHandles.size() < 24 && sSeenHandles.insert(colorBufferHandle).second;
         }
         if (firstTime) {
-            GFXSTREAM_INFO("ColorBuffer format: %s -> internal %s -> %s", ToString(format).c_str(),
-                           ToString(internalFormat).c_str(), string_VkFormat(vkFormat));
+            GFXSTREAM_INFO("ColorBuffer %u: %ux%u %s -> internal %s -> %s", colorBufferHandle, width,
+                           height, ToString(format).c_str(), ToString(internalFormat).c_str(),
+                           string_VkFormat(vkFormat));
         }
     }
 
