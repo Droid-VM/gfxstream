@@ -80,6 +80,7 @@ class VkDecoder::Impl {
           m_queueSubmitWithCommandsEnabled(
               m_state->getFeatures().VulkanQueueSubmitWithCommands.enabled()),
           m_snapshotsEnabled(m_state->snapshotsEnabled()) {}
+    uint32_t lastOpcode() const { return m_lastOpcode; }
     VulkanStream* stream() { return &m_vkStream; }
     VulkanMemReadingStream* readStream() { return &m_vkMemReadingStream; }
 
@@ -101,6 +102,10 @@ class VkDecoder::Impl {
     std::optional<uint32_t> m_prevSeqno;
     bool m_queueSubmitWithCommandsEnabled = false;
     const bool m_snapshotsEnabled = false;
+    // The last packet this decoder finished. The park path is the only place that can report what
+    // the guest was doing before it went quiet, and a decoder that is waiting never gets back to
+    // its own loop to say so. One store per packet.
+    uint32_t m_lastOpcode = 0;
 };
 
 // An opcode with no case falls to default:, which returns without consuming the packet and
@@ -124,6 +129,8 @@ static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32
 }
 
 VkDecoder::VkDecoder() : mImpl(new VkDecoder::Impl()) {}
+
+uint32_t VkDecoder::lastOpcode() const { return mImpl->lastOpcode(); }
 
 VkDecoder::~VkDecoder() = default;
 
@@ -23304,6 +23311,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         decoderProfileEnd(opcode, profileStart);
         ++profilePackets;
 
+        m_lastOpcode = opcode;
         ptr += packetLen;
         vkStream->clearPool();
     }

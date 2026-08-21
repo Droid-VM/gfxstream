@@ -30,6 +30,14 @@ namespace gfxstream {
 // the "to host" ring buffer.
 class RingStream final : public IOStream {
   public:
+    // The last packet this stream's decoder finished. A consumer that runs the ring dry has, by
+    // definition, nothing to say about why -- the answer is on the guest side, and the last thing
+    // the guest asked for before it went quiet is the only clue this side holds. One store per
+    // decode batch, read only by the stall probe.
+    void noteDecoded(uint32_t opcode) { mLastDecoded = opcode; }
+    uint32_t lastDecoded() const { return mLastDecoded; }
+    uint32_t mLastDecoded = 0;
+
     RingStream(const AsgConsumerCreateInfo& info, size_t bufsize);
     ~RingStream();
 

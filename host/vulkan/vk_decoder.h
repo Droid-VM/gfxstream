@@ -56,6 +56,7 @@ class VkDecoder {
     VkDecoder();
     ~VkDecoder();
     void setForSnapshotLoad(bool forSnapshotLoad);
+    uint32_t lastOpcode() const;
     size_t decode(void* buf, size_t bufsize, IOStream* stream,
                   const ProcessResources* processResources, const VkDecoderContext&);
 

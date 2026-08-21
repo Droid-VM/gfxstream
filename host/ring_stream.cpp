@@ -205,13 +205,15 @@ struct SpinCount {
     // budget, so a healthy consumer never reaches it and pays a compare per turn for the privilege.
     static constexpr uint32_t kStallSpins = 500;
     static void NoteStallBegin(uint32_t writePos, uint32_t readPos, uint32_t state, uint32_t avail,
-                               uint32_t largeAvail) {
+                               uint32_t largeAvail, uint32_t lastOpcode) {
         Counts& c = Mine();
         c.stallStartNs = NowNs();
         c.stallStartNotifies = asgNotifyCount().load(std::memory_order_relaxed);
         GFXSTREAM_WARNING(
-            "ASGSTALL[%s] begin: spins=%u write=%u read=%u state=%u avail=%u largeavail=%u",
-            c.name[0] ? c.name : "?", kStallSpins, writePos, readPos, state, avail, largeAvail);
+            "ASGSTALL[%s] begin: spins=%u write=%u read=%u state=%u avail=%u largeavail=%u "
+            "lastop=%u",
+            c.name[0] ? c.name : "?", kStallSpins, writePos, readPos, state, avail, largeAvail,
+            lastOpcode);
     }
     static void NoteStallEnd(uint32_t spins, uint32_t writePos, uint32_t readPos, uint32_t state,
                              uint32_t avail, uint32_t largeAvail, bool parked) {
@@ -499,7 +501,8 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                                               ring_buffer_available_read(mContext.to_host, 0),
                                               ring_buffer_available_read(
                                                   mContext.to_host_large_xfer.ring,
-                                                  &mContext.to_host_large_xfer.view));
+                                                  &mContext.to_host_large_xfer.view),
+                                              mLastDecoded);
                 }
             }
             uint32_t sleepUs = UINT32_MAX;  // past the last stage -> park
