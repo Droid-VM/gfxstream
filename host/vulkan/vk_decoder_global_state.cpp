@@ -3575,6 +3575,41 @@ class VkDecoderGlobalState::Impl {
         }
         imageInfo->memory = memory;
 
+        // Two images over the same bytes is the third way a declared format and an actual channel
+        // order come apart, and the only one the view and copy diagnostics cannot see: whichever
+        // image is rendered into decides the byte order, while the one the scanout is described
+        // by decides the label. The pool path makes this easy to do by accident, since a blob's
+        // memory is handed out by offset. Reported for scanout-sized images whether or not the
+        // formats differ -- a line saying two images agree is what proves the site ran.
+        {
+            const VkImageCreateInfo& ci = imageInfo->imageCreateInfoShallow;
+            if (ci.extent.width >= 1024) {
+                static std::mutex sAliasMutex;
+                static std::map<std::pair<VkDeviceMemory, VkDeviceSize>, VkFormat> sBoundAt;
+                VkFormat previous = VK_FORMAT_UNDEFINED;
+                bool firstAtOffset = false;
+                {
+                    std::lock_guard<std::mutex> aliasLock(sAliasMutex);
+                    auto [it, inserted] = sBoundAt.emplace(
+                        std::make_pair(memory, memoryOffset), ci.format);
+                    firstAtOffset = inserted;
+                    if (!inserted) previous = it->second;
+                }
+                if (!firstAtOffset) {
+                    GFXSTREAM_DIAG_PRINT(
+                        "BIND-ALIAS: %s mem=%p off=%llu first=%s now=%s %ux%u\n",
+                        previous != ci.format ? "MISMATCH" : "same", (void*)memory,
+                        (unsigned long long)memoryOffset, string_VkFormat(previous),
+                        string_VkFormat(ci.format), ci.extent.width, ci.extent.height);
+                } else {
+                    GFXSTREAM_DIAG_PRINT("BIND-ALIAS: first mem=%p off=%llu fmt=%s %ux%u\n",
+                                         (void*)memory, (unsigned long long)memoryOffset,
+                                         string_VkFormat(ci.format), ci.extent.width,
+                                         ci.extent.height);
+                }
+            }
+        }
+
         if (!imageInfo->compressInfo) {
             return VK_SUCCESS;
         }
