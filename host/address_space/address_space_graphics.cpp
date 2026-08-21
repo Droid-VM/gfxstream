@@ -19,6 +19,7 @@
 
 #include "gfxstream/AlignedBuf.h"
 #include "gfxstream/host/address_space_device.h"
+#include <atomic>
 #include <stdlib.h>
 
 #include "gfxstream/common/logging.h"
@@ -26,6 +27,14 @@
 #include "render-utils/address_space_operations.h"
 
 namespace gfxstream {
+
+// Wakeups delivered to consumers, process-wide. Read by the stall probe in the ring stream, which
+// is where the question "who woke this thread, and was there anything for it" gets asked.
+std::atomic<uint64_t>& asgNotifyCount() {
+    static std::atomic<uint64_t> count{0};
+    return count;
+}
+
 
 // How far ahead of this side the guest is allowed to get before it starts busy-waiting.
 //
@@ -638,6 +647,11 @@ void AddressSpaceGraphicsContext::perform(AddressSpaceDevicePingInfo* info) {
         break;
     }
     case ASG_NOTIFY_AVAILABLE:
+        // Every wakeup the consumer gets comes from here, so counting them is the only way to
+        // tell a consumer that woke because there was work from one that woke because it was
+        // told there was. A stall that spans several of these with the write position unmoved is
+        // the guest pinging a ring it has not written to.
+        asgNotifyCount().fetch_add(1, std::memory_order_relaxed);
         mConsumerMessages.trySend(ConsumerCommand::Wakeup);
         info->metadata = 0;
         break;

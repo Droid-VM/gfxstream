@@ -25,6 +25,7 @@
 
 #include <vector>
 
+#include "gfxstream/host/address_space_graphics.h"
 #include "gfxstream/host/dma_device.h"
 #include "gfxstream/common/logging.h"
 #include "gfxstream_diag.h"
@@ -173,6 +174,7 @@ struct SpinCount {
         uint64_t gaps[7] = {};
         uint64_t lastPacketNs = 0;
         uint64_t stallStartNs = 0;
+        uint64_t stallStartNotifies = 0;
         char name[20] = {};
     };
     static Counts& Mine() {
@@ -202,24 +204,28 @@ struct SpinCount {
     // The threshold sits far above a normal wait (a handful of turns) and far below the park
     // budget, so a healthy consumer never reaches it and pays a compare per turn for the privilege.
     static constexpr uint32_t kStallSpins = 500;
-    static void NoteStallBegin(uint32_t writePos, uint32_t readPos, uint32_t state,
-                               uint32_t avail) {
+    static void NoteStallBegin(uint32_t writePos, uint32_t readPos, uint32_t state, uint32_t avail,
+                               uint32_t largeAvail) {
         Counts& c = Mine();
         c.stallStartNs = NowNs();
+        c.stallStartNotifies = asgNotifyCount().load(std::memory_order_relaxed);
         GFXSTREAM_WARNING(
-            "ASGSTALL[%s] begin: spins=%u write=%u read=%u state=%u avail=%u",
-            c.name[0] ? c.name : "?", kStallSpins, writePos, readPos, state, avail);
+            "ASGSTALL[%s] begin: spins=%u write=%u read=%u state=%u avail=%u largeavail=%u",
+            c.name[0] ? c.name : "?", kStallSpins, writePos, readPos, state, avail, largeAvail);
     }
     static void NoteStallEnd(uint32_t spins, uint32_t writePos, uint32_t readPos, uint32_t state,
-                             uint32_t avail, bool parked) {
+                             uint32_t avail, uint32_t largeAvail, bool parked) {
         Counts& c = Mine();
         if (!c.stallStartNs) return;
         const uint64_t us = (NowNs() - c.stallStartNs) / 1000;
+        const uint64_t notifies =
+            asgNotifyCount().load(std::memory_order_relaxed) - c.stallStartNotifies;
         c.stallStartNs = 0;
         GFXSTREAM_WARNING(
-            "ASGSTALL[%s] end: %s after %uus, spins=%u write=%u read=%u state=%u avail=%u",
+            "ASGSTALL[%s] end: %s after %uus, spins=%u write=%u read=%u state=%u avail=%u "
+            "largeavail=%u wakeups=%llu",
             c.name[0] ? c.name : "?", parked ? "parked" : "got data", (unsigned)us, spins, writePos,
-            readPos, state, avail);
+            readPos, state, avail, largeAvail, (unsigned long long)notifies);
     }
     static void NotePacket() {
         Counts& c = Mine();
@@ -439,7 +445,7 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
         if (SpinCount::Enabled() && spins && (ringAvailable || ringLargeXferAvailable)) {
             SpinCount::NoteStallEnd(spins, mContext.to_host->write_pos, mContext.to_host->read_pos,
                                     (unsigned)*(mContext.host_state), ringAvailable,
-                                    /* parked */ false);
+                                    ringLargeXferAvailable, /* parked */ false);
         }
 
         auto current = dst + count;
@@ -490,7 +496,10 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                     SpinCount::NoteStallBegin(mContext.to_host->write_pos,
                                               mContext.to_host->read_pos,
                                               (unsigned)*(mContext.host_state),
-                                              ring_buffer_available_read(mContext.to_host, 0));
+                                              ring_buffer_available_read(mContext.to_host, 0),
+                                              ring_buffer_available_read(
+                                                  mContext.to_host_large_xfer.ring,
+                                                  &mContext.to_host_large_xfer.view));
                 }
             }
             uint32_t sleepUs = UINT32_MAX;  // past the last stage -> park
@@ -513,6 +522,9 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                                         mContext.to_host->read_pos,
                                         (unsigned)*(mContext.host_state),
                                         ring_buffer_available_read(mContext.to_host, 0),
+                                        ring_buffer_available_read(
+                                            mContext.to_host_large_xfer.ring,
+                                            &mContext.to_host_large_xfer.view),
                                         /* parked */ true);
             }
             spins = 0;

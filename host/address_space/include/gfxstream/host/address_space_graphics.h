@@ -13,6 +13,7 @@
 // limitations under the License.
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <vector>
@@ -25,6 +26,10 @@
 #include "render-utils/address_space_operations.h"
 
 namespace gfxstream {
+
+// See address_space_graphics.cpp: wakeups delivered to consumers, process-wide.
+std::atomic<uint64_t>& asgNotifyCount();
+
 namespace host {
 
 struct Allocation {
