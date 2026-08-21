@@ -152,67 +152,78 @@ RingStream::~RingStream() = default;
 // So count the spinning instead of timing it. Reported against packets consumed, so "spins per
 // packet" is comparable between two trees without either of them having to score the same.
 namespace {
+// Per consumer thread, because the aggregate is dominated by whichever thread has nothing to do.
+//
+// A consumer with no traffic sits inside one readRaw call forever: spin the budget, park on the
+// message queue, get woken, spin the budget again. It never returns, so it contributes no reads
+// and no packets, while producing far more spin events than a thread that is actually working --
+// which is why the summed counters read as "zero reads, zero packets" even though the system is
+// plainly running. Summed, the busy thread is invisible; split by thread, the two are obvious.
+//
+// Parking itself is cheap: onUnavailableRead blocks on a queue. What costs is the spin before it,
+// and with a zero sleep each turn is a sched_yield -- a syscall that hands the core away and takes
+// it back, thousands of times per wake, on a core every consumer shares.
 struct SpinCount {
     static bool Enabled() {
         static const bool on = getenv("GFXSTREAM_ASG_SPIN_TRACE") != nullptr;
         return on;
     }
-    // The gap between one packet arriving and the next, bucketed.
-    //
-    // Every count this session measured came out identical between the trees -- the same opcodes,
-    // batches and replays per frame -- so if a consumer here spins more, the work is not arriving
-    // differently in quantity but in time. Thirteen opcodes spread evenly across a frame and
-    // thirteen delivered in a burst followed by silence are the same count and a completely
-    // different amount of spinning, and nothing measured so far can tell them apart.
-    //
-    // Per-thread so two consumers do not interleave into a meaningless series.
-    static void NoteEntry() { sEntries.fetch_add(1, std::memory_order_relaxed); }
-    // One wait episode: the consumer found the ring empty and started spinning. Counting these
-    // apart from the iterations is what separates "many waits of one turn each" from "a few waits
-    // that spin until the budget runs out" -- two readings of the same spin total that mean
-    // opposite things, and which the iteration count alone cannot tell apart.
-    static void NoteEpisode() { sEpisodes.fetch_add(1, std::memory_order_relaxed); }
-    static void NotePacket() {
-        sPackets.fetch_add(1, std::memory_order_relaxed);
+    struct Counts {
+        uint64_t episodes = 0, spins = 0, parks = 0, reads = 0, packets = 0, events = 0;
+        uint64_t gaps[7] = {};
+        uint64_t lastPacketNs = 0;
+        char name[20] = {};
+    };
+    static Counts& Mine() {
+        static thread_local Counts c = [] {
+            Counts init;
+#if defined(__linux__)
+            prctl(PR_GET_NAME, init.name, 0, 0, 0);
+#endif
+            return init;
+        }();
+        return c;
+    }
+    static uint64_t NowNs() {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
-        const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
-        static thread_local uint64_t sLast = 0;
-        if (sLast) {
-            const uint64_t gapUs = (now - sLast) / 1000;
+        return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    }
+    static void NoteEntry() { ++Mine().reads; }
+    static void NoteEpisode() { ++Mine().episodes; }
+    static void NotePacket() {
+        Counts& c = Mine();
+        ++c.packets;
+        const uint64_t now = NowNs();
+        if (c.lastPacketNs) {
+            const uint64_t gapUs = (now - c.lastPacketNs) / 1000;
             static constexpr uint64_t kEdges[] = {10, 50, 100, 500, 1000, 5000};
             size_t i = 0;
             while (i < 6 && gapUs >= kEdges[i]) ++i;
-            sGaps[i].fetch_add(1, std::memory_order_relaxed);
+            ++c.gaps[i];
         }
-        sLast = now;
+        c.lastPacketNs = now;
     }
     static void NoteSpins(uint64_t n, bool parked) {
-        sSpins.fetch_add(n, std::memory_order_relaxed);
-        if (parked) sParks.fetch_add(1, std::memory_order_relaxed);
-        const uint64_t reports = sWaits.fetch_add(1, std::memory_order_relaxed) + 1;
+        Counts& c = Mine();
+        c.spins += n;
+        if (parked) ++c.parks;
         constexpr uint64_t kEvery = 2000;
-        if (reports % kEvery) return;
-        const uint64_t packets = sPackets.exchange(0, std::memory_order_relaxed);
-        const uint64_t entries = sEntries.exchange(0, std::memory_order_relaxed);
-        const uint64_t episodes = sEpisodes.exchange(0, std::memory_order_relaxed);
-        const uint64_t spins = sSpins.exchange(0, std::memory_order_relaxed);
-        const uint64_t parks = sParks.exchange(0, std::memory_order_relaxed);
-        uint64_t g[7];
-        for (size_t i = 0; i < 7; ++i) g[i] = sGaps[i].exchange(0, std::memory_order_relaxed);
+        if (++c.events % kEvery) return;
         // Raw counts only. A ratio computed here hides how its parts were counted, which has
-        // already produced two findings this session that were arithmetic rather than behaviour.
+        // already produced three findings this session that were arithmetic rather than behaviour.
         GFXSTREAM_WARNING(
-            "ASGSPIN raw: episodes=%llu spin_iters=%llu parks=%llu reads=%llu packets=%llu | gap "
-            "us <10:%llu <50:%llu <100:%llu <500:%llu <1k:%llu <5k:%llu 5k+:%llu",
-            (unsigned long long)episodes, (unsigned long long)spins, (unsigned long long)parks,
-            (unsigned long long)entries, (unsigned long long)packets, (unsigned long long)g[0],
-            (unsigned long long)g[1], (unsigned long long)g[2], (unsigned long long)g[3],
-            (unsigned long long)g[4], (unsigned long long)g[5], (unsigned long long)g[6]);
+            "ASGSPIN[%s] raw: episodes=%llu spin_iters=%llu parks=%llu reads=%llu packets=%llu | "
+            "gap us <10:%llu <50:%llu <100:%llu <500:%llu <1k:%llu <5k:%llu 5k+:%llu",
+            c.name[0] ? c.name : "?", (unsigned long long)c.episodes, (unsigned long long)c.spins,
+            (unsigned long long)c.parks, (unsigned long long)c.reads,
+            (unsigned long long)c.packets, (unsigned long long)c.gaps[0],
+            (unsigned long long)c.gaps[1], (unsigned long long)c.gaps[2],
+            (unsigned long long)c.gaps[3], (unsigned long long)c.gaps[4],
+            (unsigned long long)c.gaps[5], (unsigned long long)c.gaps[6]);
+        c.episodes = c.spins = c.parks = c.reads = c.packets = 0;
+        for (auto& g : c.gaps) g = 0;
     }
-    static inline std::atomic<uint64_t> sSpins{0}, sParks{0}, sPackets{0}, sWaits{0}, sEntries{0};
-    static inline std::atomic<uint64_t> sEpisodes{0};
-    static inline std::atomic<uint64_t> sGaps[7] = {};
 };
 }  // namespace
 
