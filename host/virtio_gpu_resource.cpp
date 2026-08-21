@@ -480,7 +480,7 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
         // The virgl format the guest asked this resource to be, per resource. This is the other
         // half of the pairing that decides byte order: the guest's own image format says what it
         // writes, and this says what the host thinks it is reading back.
-        {
+        if (::gfxstream::host::diagEnabled()) {
             static std::mutex sSeenMutex;
             static std::set<uint32_t> sSeenResources;
             bool firstTime = false;

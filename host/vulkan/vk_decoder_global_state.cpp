@@ -3349,7 +3349,8 @@ class VkDecoderGlobalState::Impl {
         // in that path to consult. When the picture comes out with red and blue exchanged, the
         // question is always whether this agrees with the DRM fourcc the guest declared for the
         // same buffer, and nothing recorded it. Bounded: one line per distinct format and usage.
-        if (pCreateInfo->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) {
+        if (::gfxstream::host::diagEnabled() &&
+            (pCreateInfo->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
             static std::mutex sSeenMutex;
             static std::set<std::pair<VkFormat, VkImageUsageFlags>> sSeen;
             bool firstTime = false;
@@ -3551,6 +3552,10 @@ class VkDecoderGlobalState::Impl {
     // structurally different from another when the only difference was which entry point was used.
     static void noteImageMemoryBind(const VkImageCreateInfo& ci, VkDeviceMemory memory,
                                     VkDeviceSize memoryOffset) {
+        // Nothing here runs unless the switch is on: the bookkeeping below takes a process-wide
+        // lock and grows a map that is never pruned, and a diagnostic that is off has to cost a
+        // load and a branch, not that.
+        if (!::gfxstream::host::diagEnabled()) return;
         if (ci.extent.width < 1024) return;
         static std::mutex sAliasMutex;
         static std::map<std::pair<VkDeviceMemory, VkDeviceSize>, VkFormat> sBoundAt;
@@ -3758,11 +3763,13 @@ class VkDecoderGlobalState::Impl {
             return ok(c.r, VK_COMPONENT_SWIZZLE_R) && ok(c.g, VK_COMPONENT_SWIZZLE_G) &&
                    ok(c.b, VK_COMPONENT_SWIZZLE_B) && ok(c.a, VK_COMPONENT_SWIZZLE_A);
         };
-        const bool viewSwizzled = !swizzleIsIdentity(pCreateInfo->components);
+        const bool viewSwizzled =
+            ::gfxstream::host::diagEnabled() && !swizzleIsIdentity(pCreateInfo->components);
         const bool viewFormatDiffers =
             imageInfo->imageCreateInfoShallow.format != pCreateInfo->format;
-        if (viewFormatDiffers || viewSwizzled ||
-            imageInfo->imageCreateInfoShallow.extent.width >= 1024) {
+        if (::gfxstream::host::diagEnabled() &&
+            (viewFormatDiffers || viewSwizzled ||
+             imageInfo->imageCreateInfoShallow.extent.width >= 1024)) {
             static std::mutex sViewSeenMutex;
             static std::set<std::tuple<VkFormat, VkFormat, bool>> sViewSeen;
             bool firstTime = false;
@@ -5651,7 +5658,8 @@ class VkDecoderGlobalState::Impl {
         // vkCmdCopyImage between two formats of the same block size moves the bytes verbatim --
         // no channel conversion. So a copy across formats is the other way the declared format
         // and the actual channel order can come apart. One line per distinct (src, dst) pair.
-        if (srcImg->imageCreateInfoShallow.format != dstImg->imageCreateInfoShallow.format) {
+        if (::gfxstream::host::diagEnabled() &&
+            srcImg->imageCreateInfoShallow.format != dstImg->imageCreateInfoShallow.format) {
             static std::mutex sCopySeenMutex;
             static std::set<std::pair<VkFormat, VkFormat>> sCopySeen;
             bool firstTime = false;
