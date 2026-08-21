@@ -144,6 +144,13 @@ ParseGfxstreamFeatures(const int rendererFlags,
         &features, VulkanQueueSubmitWithCommands, true);
     GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
         &features, VulkanShaderFloat16Int8, true);
+    // Upstream made the guest-visible heap clamp configurable and left it off by default; before
+    // that it was a hardcoded two gigabytes, and this stack was built against the clamped
+    // behaviour. Unclamped, the guest is told the phone GPU's whole heap while what actually backs
+    // its allocations is a fixed boot-time GpuPool, so it plans against a size that does not
+    // exist. Restore the old constant rather than the new default.
+    features.VulkanMaxSafeHeapSize.setValue(2ULL * 1024ULL * 1024ULL * 1024ULL);
+
     GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
         &features, VulkanSnapshots,
         gfxstream::base::getEnvironmentVariable("ANDROID_GFXSTREAM_CAPTURE_VK_SNAPSHOT") == "1");
