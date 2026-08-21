@@ -837,10 +837,60 @@ int VirtioGpuResource::GetCaching(uint32_t* outCaching) const {
 
 // Corresponds to Virtio GPU "TransferFromHost" commands and VMM requests to
 // copy into display buffers.
+
+// Where a scanout's readback time goes, split at the copy that is not a copy.
+//
+// This path is invisible to the decoder profiler: it arrives on the virtio-gpu control queue, not
+// on the ASG ring, so a per-frame cost here shows up nowhere in "host dispatch per frame". It is
+// also the path a fifo present waits on -- the compositor cannot release a buffer until the read
+// completes -- which makes it the one to look at when mailbox keeps up and fifo does not.
+//
+// Two halves, timed apart because they fail differently: pulling from the backend resource enters
+// the driver, while the copy out to the iov is memcpy against guest pages. GFXSTREAM_XFER_TRACE=1
+// turns it on; off, it costs a load and a branch. Reports every 120 reads, which is about a
+// second of a 120Hz display.
+namespace {
+struct XferProfile {
+    static bool Enabled() {
+        static const bool on = getenv("GFXSTREAM_XFER_TRACE") != nullptr;
+        return on;
+    }
+    static uint64_t NowNs() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    }
+    static void Record(uint64_t backendNs, uint64_t iovNs, uint32_t w, uint32_t h) {
+        static std::atomic<uint64_t> sBackend{0}, sIov{0}, sBackendMax{0}, sIovMax{0}, sCount{0};
+        sBackend += backendNs;
+        sIov += iovNs;
+        for (auto* slot : {&sBackendMax, &sIovMax}) {
+            const uint64_t v = (slot == &sBackendMax) ? backendNs : iovNs;
+            uint64_t prev = slot->load();
+            while (v > prev && !slot->compare_exchange_weak(prev, v)) {}
+        }
+        const uint64_t n = ++sCount;
+        constexpr uint64_t kEvery = 120;
+        if (n % kEvery) return;
+        GFXSTREAM_WARNING(
+            "XFERPROF n=%llu %ux%u avg(us): backend=%llu iov=%llu | max(us): backend=%llu "
+            "iov=%llu",
+            (unsigned long long)n, w, h,
+            (unsigned long long)(sBackend.exchange(0) / kEvery / 1000),
+            (unsigned long long)(sIov.exchange(0) / kEvery / 1000),
+            (unsigned long long)(sBackendMax.exchange(0) / 1000),
+            (unsigned long long)(sIovMax.exchange(0) / 1000));
+    }
+};
+}  // namespace
+
 int VirtioGpuResource::TransferRead(uint64_t offset, stream_renderer_box* box,
                                     std::optional<std::vector<struct iovec>> iovs) {
     // A blob-backed resource never had iovs attached, so it has no staging buffer yet.
     EnsureLinearAllocated();
+
+    const bool xprof = XferProfile::Enabled();
+    const uint64_t xT0 = xprof ? XferProfile::NowNs() : 0;
 
     // First, copy from the underlying backend resource to this resource's linear buffer:
     int ret = 0;
@@ -862,6 +912,8 @@ int VirtioGpuResource::TransferRead(uint64_t offset, stream_renderer_box* box,
         return ret;
     }
 
+    const uint64_t xBackendDoneNs = xprof ? XferProfile::NowNs() : 0;
+
     // Second, copy from this resource's linear buffer to the desired iov:
     if (iovs) {
         ret = TransferToIov(offset, box, *iovs);
@@ -870,6 +922,11 @@ int VirtioGpuResource::TransferRead(uint64_t offset, stream_renderer_box* box,
     }
     if (ret != 0) {
         GFXSTREAM_ERROR("Failed to transfer: failed to copy to iov.");
+    }
+    if (xprof) {
+        XferProfile::Record(xBackendDoneNs - xT0, XferProfile::NowNs() - xBackendDoneNs,
+                            mCreateArgs ? mCreateArgs->width : 0,
+                            mCreateArgs ? mCreateArgs->height : 0);
     }
     return ret;
 }
