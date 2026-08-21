@@ -171,6 +171,21 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         uint8_t** readStreamPtrPtr = &readStreamPtr;
         vkReadStream->setHandleMapping(&m_boxedHandleUnwrapMapping);
 
+        // NULL whenever the render thread has not resolved a ProcessResources for this context
+        // yet -- render_thread.cpp only looks one up once its puid is valid, calls decode()
+        // regardless, and then logs that it processed Vulkan packets without process resources.
+        // That message was unreachable as generated: every opcode epilogue did
+        // seqnoPtr->fetch_add() unconditionally, so the first packet decoded in that state
+        // dereferenced NULL and the host died before the check could be read. Seen as a crosvm
+        // SIGSEGV, fault_addr 0x0, pc in __aarch64_ldadd4_acq_rel called from decode().
+        //
+        // Every increment is therefore guarded, as the wait below already was. Skipping the
+        // increment is correct and not merely safe: the counter exists for the guest to wait on,
+        // and a guest with no ProcessResources has nothing to wait on.
+        //
+        // This file is generated and the generator is not vendored here, so the guards live in
+        // the generated source. A regeneration drops them -- reapply to every
+        // "if (m_queueSubmitWithCommandsEnabled)" that guards a seqnoPtr->fetch_add.
         std::atomic<uint32_t>* seqnoPtr =
             processResources ? processResources->getSequenceNumberPtr() : nullptr;
 
@@ -188,6 +203,24 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             }
             if (seqnoPtr && !m_forSnapshotLoad) {
                 {
+                    // Only shouldExit breaks this loop, and nothing sets it when a guest client
+                    // dies mid-stream -- render_thread.cpp raises mDecodersShouldStop only for a
+                    // pre-snapshot pause, waitForFinished and sendExitSignal. A client killed
+                    // after writing a packet header but before the host caught up leaves the
+                    // seqno it is waiting for unreachable and this thread spinning for the life of
+                    // the process. Observed exactly that: a render thread still named for a guest
+                    // eglinfo that had exited minutes earlier, pegged at 100% of a core, with the
+                    // desktop starved behind it.
+                    //
+                    // Two defects, two changes. The backoff below covers MSVC x86 and GCC
+                    // i386/x86_64 only, which leaves aarch64 -- every device this runs on --
+                    // executing a bare busy-wait; YIELD is the ARM counterpart of PAUSE and is
+                    // what belongs there. And the spin count is diagnostic only: it does not end
+                    // the wait, because letting the decoder run a packet out of order is worse
+                    // than hanging. It exists to make the hang say who is waiting on what.
+                    //
+                    // Generated file; a regeneration drops both.
+                    uint64_t spins = 0;
                     while ((seqno - seqnoPtr->load(std::memory_order_seq_cst) != 1)) {
                         if (shouldExit.load(std::memory_order_relaxed)) {
                             GFXSTREAM_WARNING(
@@ -200,7 +233,16 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         _mm_pause();
 #elif (defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)))
                         __asm__ __volatile__("pause;");
+#elif (defined(__GNUC__) && defined(__aarch64__))
+                        __asm__ __volatile__("yield");
 #endif
+                        if ((++spins & 0xFFFFFFull) == 0) {
+                            GFXSTREAM_STALL_PRINT(
+                                "SEQNO-STUCK: want=%u have=%u opcode=%u process=%s spins=%llu\n",
+                                seqno, seqnoPtr->load(std::memory_order_seq_cst), opcode,
+                                processName ? processName : "null",
+                                (unsigned long long)spins);
+                        }
                     }
                     m_prevSeqno = seqno;
                 }
@@ -275,7 +317,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkCreateInstance_VkResult_return, pCreateInfo, pAllocator, pInstance);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -318,7 +360,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            packetLen, instance, pAllocator);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -417,7 +459,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPhysicalDevices);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -466,7 +508,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                      physicalDevice, pFeatures);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -519,7 +561,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pFormatProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -598,7 +640,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         format, type, tiling, usage, flags, pImageFormatProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -647,7 +689,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -748,7 +790,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pQueueFamilyPropertyCount, pQueueFamilyProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -800,7 +842,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -837,7 +879,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetInstanceProcAddr_PFN_vkVoidFunction_return, instance, pName);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -873,7 +915,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetDeviceProcAddr_PFN_vkVoidFunction_return, device, pName);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -948,7 +990,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                         pDevice);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -990,7 +1032,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          packetLen, device, pAllocator);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1100,7 +1142,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPropertyCount, pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1221,7 +1263,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pLayerName, pPropertyCount, pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1312,7 +1354,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1416,7 +1458,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPropertyCount, pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1467,7 +1509,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           queueIndex, pQueue);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1521,7 +1563,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                        queue, submitCount, pSubmits, fence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1539,7 +1581,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                     GFXSTREAM_INFO("stream %p: call vkQueueWaitIdle 0x%llx ", ioStream,
                                    (unsigned long long)queue);
                 }
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 VkResult vkQueueWaitIdle_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
@@ -1575,7 +1617,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                     GFXSTREAM_INFO("stream %p: call vkDeviceWaitIdle 0x%llx ", ioStream,
                                    (unsigned long long)device);
                 }
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 VkResult vkDeviceWaitIdle_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
@@ -1669,7 +1711,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           pAllocateInfo, pAllocator, pMemory);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1724,7 +1766,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkDeviceMemory(boxed_memory_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1793,7 +1835,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                      memory, offset, size, flags, ppData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1825,7 +1867,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                        packetLen, device, memory);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1915,7 +1957,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRanges);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -1993,7 +2035,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRanges);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2041,7 +2083,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pCommittedMemoryInBytes);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2091,7 +2133,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkBindBufferMemory_VkResult_return, device, buffer, memory, memoryOffset);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2140,7 +2182,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkBindImageMemory_VkResult_return, device, image, memory, memoryOffset);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2194,7 +2236,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2248,7 +2290,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2358,7 +2400,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSparseMemoryRequirementCount, pSparseMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2473,7 +2515,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         type, samples, usage, tiling, pPropertyCount, pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2531,7 +2573,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkQueueBindSparse_VkResult_return, queue, bindInfoCount, pBindInfo, fence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2606,7 +2648,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                        device, pCreateInfo, pAllocator, pFence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2660,7 +2702,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkFence(boxed_fence_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2709,7 +2751,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                        device, fenceCount, pFences);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2748,7 +2790,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetFenceStatus_VkResult_return, device, fence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2790,7 +2832,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         (unsigned long long)pFences, (unsigned long long)waitAll,
                         (unsigned long long)timeout);
                 }
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 VkResult vkWaitForFences_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
@@ -2887,7 +2929,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSemaphore);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -2942,7 +2984,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkSemaphore(boxed_semaphore_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3023,7 +3065,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pQueryPool);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3079,7 +3121,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkQueryPool(boxed_queryPool_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3153,7 +3195,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         queryCount, dataSize, pData, stride, flags);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3229,7 +3271,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                         device, pCreateInfo, pAllocator, pBuffer);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3284,7 +3326,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkBuffer(boxed_buffer_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3360,7 +3402,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                        device, pCreateInfo, pAllocator, pImage);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3414,7 +3456,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkImage(boxed_image_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3477,7 +3519,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                      image, pSubresource, pLayout);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3554,7 +3596,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkCreateImageView_VkResult_return, device, pCreateInfo, pAllocator, pView);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3609,7 +3651,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkImageView(boxed_imageView_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3690,7 +3732,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pCommandPool);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3746,7 +3788,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkCommandPool(boxed_commandPool_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3791,7 +3833,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkResetCommandPool_VkResult_return, device, commandPool, flags);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3865,7 +3907,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pCommandBuffers);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3941,7 +3983,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                     }
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -3986,7 +4028,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkBeginCommandBuffer_VkResult_return, commandBuffer, pBeginInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4021,7 +4063,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkEndCommandBuffer_VkResult_return, commandBuffer);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4060,7 +4102,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkResetCommandBuffer_VkResult_return, commandBuffer, flags);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4119,7 +4161,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          dstBuffer, regionCount, pRegions);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4184,7 +4226,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4249,7 +4291,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         dstImage, dstImageLayout, regionCount, pRegions);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4314,7 +4356,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         srcImageLayout, dstBuffer, regionCount, pRegions);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4366,7 +4408,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            dstOffset, dataSize, pData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4414,7 +4456,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          dstOffset, size, data);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4521,7 +4563,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         imageMemoryBarrierCount, pImageMemoryBarriers);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4567,7 +4609,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          flags);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4606,7 +4648,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                        packetLen, commandBuffer, queryPool, query);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4652,7 +4694,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              firstQuery, queryCount);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4699,7 +4741,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              pipelineStage, queryPool, query);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4762,7 +4804,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         firstQuery, queryCount, dstBuffer, dstOffset, stride, flags);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4811,7 +4853,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                               commandBufferCount, pCommandBuffers);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4888,7 +4930,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                        device, pCreateInfo, pAllocator, pEvent);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4942,7 +4984,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkEvent(boxed_event_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -4982,7 +5024,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetEventStatus_VkResult_return, device, event);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5019,7 +5061,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                     event);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5057,7 +5099,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                       device, event);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5134,7 +5176,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkCreateBufferView_VkResult_return, device, pCreateInfo, pAllocator, pView);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5190,7 +5232,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkBufferView(boxed_bufferView_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5271,7 +5313,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pShaderModule);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5330,7 +5372,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delayed_delete_VkShaderModule(boxed_shaderModule_preserve, unboxed_device, nullptr);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5411,7 +5453,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPipelineCache);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5468,7 +5510,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkPipelineCache(boxed_pipelineCache_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5553,7 +5595,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5615,7 +5657,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSrcCaches);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5720,7 +5762,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         createInfoCount, pCreateInfos, pAllocator, pPipelines);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5775,7 +5817,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkPipeline(boxed_pipeline_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5856,7 +5898,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPipelineLayout);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5920,7 +5962,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 delayed_delete_VkPipelineLayout(boxed_pipelineLayout_preserve, unboxed_device,
                                                 delayed_remove_callback);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -5997,7 +6039,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          device, pCreateInfo, pAllocator, pSampler);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6052,7 +6094,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkSampler(boxed_sampler_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6137,7 +6179,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAllocator, pSetLayout);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6195,7 +6237,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkDescriptorSetLayout(boxed_descriptorSetLayout_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6276,7 +6318,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pDescriptorPool);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6333,7 +6375,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkDescriptorPool(boxed_descriptorPool_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6378,7 +6420,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkResetDescriptorPool_VkResult_return, device, descriptorPool, flags);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6456,7 +6498,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pDescriptorSets);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6534,7 +6576,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 // Skipping handle cleanup for vkFreeDescriptorSets
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6605,7 +6647,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pDescriptorCopies);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6646,7 +6688,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            pipelineBindPoint, pipeline);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6726,7 +6768,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         dynamicOffsetCount, pDynamicOffsets);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6794,7 +6836,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         imageLayout, pColor, rangeCount, pRanges);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6835,7 +6877,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                        groupCountY, groupCountZ);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6875,7 +6917,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                buffer, offset);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6914,7 +6956,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                        packetLen, commandBuffer, event, stageMask);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -6955,7 +6997,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          stageMask);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7073,7 +7115,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         imageMemoryBarrierCount, pImageMemoryBarriers);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7131,7 +7173,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                             stageFlags, offset, size, pValues);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7239,7 +7281,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         createInfoCount, pCreateInfos, pAllocator, pPipelines);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7320,7 +7362,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pFramebuffer);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7376,7 +7418,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkFramebuffer(boxed_framebuffer_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7456,7 +7498,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pRenderPass);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7512,7 +7554,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkRenderPass(boxed_renderPass_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7565,7 +7607,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                     renderPass, pGranularity);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7616,7 +7658,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           viewportCount, pViewports);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7667,7 +7709,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          scissorCount, pScissors);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7701,7 +7743,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            packetLen, commandBuffer, lineWidth);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7745,7 +7787,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         depthBiasConstantFactor, depthBiasClamp, depthBiasSlopeFactor);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7780,7 +7822,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                 blendConstants);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7819,7 +7861,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              minDepthBounds, maxDepthBounds);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7859,7 +7901,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         compareMask);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7898,7 +7940,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                   faceMask, writeMask);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7937,7 +7979,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                   faceMask, reference);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -7981,7 +8023,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                               buffer, offset, indexType);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8042,7 +8084,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         firstBinding, bindingCount, pBuffers, pOffsets);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8088,7 +8130,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                    instanceCount, firstVertex, firstInstance);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8139,7 +8181,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8187,7 +8229,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            drawCount, stride);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8237,7 +8279,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         offset, drawCount, stride);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8306,7 +8348,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions, filter);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8376,7 +8418,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         imageLayout, pDepthStencil, rangeCount, pRanges);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8442,7 +8484,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         attachmentCount, pAttachments, rectCount, pRects);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8510,7 +8552,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8554,7 +8596,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                               pRenderPassBegin, contents);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8587,7 +8629,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           packetLen, commandBuffer, contents);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8617,7 +8659,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                             packetLen, commandBuffer);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8651,7 +8693,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkEnumerateInstanceVersion_VkResult_return, pApiVersion);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8704,7 +8746,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkBindBufferMemory2_VkResult_return, device, bindInfoCount, pBindInfos);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8757,7 +8799,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkBindImageMemory2_VkResult_return, device, bindInfoCount, pBindInfos);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8812,7 +8854,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         localDeviceIndex, remoteDeviceIndex, pPeerMemoryFeatures);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8846,7 +8888,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                             packetLen, commandBuffer, deviceMask);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -8958,7 +9000,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9016,7 +9058,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9074,7 +9116,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9189,7 +9231,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSparseMemoryRequirementCount, pSparseMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9238,7 +9280,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pFeatures);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9287,7 +9329,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9341,7 +9383,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pFormatProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9415,7 +9457,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pImageFormatInfo, pImageFormatProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9516,7 +9558,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pQueueFamilyPropertyCount, pQueueFamilyProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9568,7 +9610,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9676,7 +9718,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pFormatInfo, pPropertyCount, pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9716,7 +9758,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            packetLen, device, commandPool, flags);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9767,7 +9809,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            packetLen, device, pQueueInfo, pQueue);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9839,7 +9881,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pExternalBufferInfo, pExternalBufferProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9905,7 +9947,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pExternalFenceInfo, pExternalFenceProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -9972,7 +10014,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pExternalSemaphoreInfo, pExternalSemaphoreProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10029,7 +10071,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         baseGroupX, baseGroupY, baseGroupZ, groupCountX, groupCountY, groupCountZ);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10119,7 +10161,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAllocator, pDescriptorUpdateTemplate);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10181,7 +10223,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkDescriptorUpdateTemplate(boxed_descriptorUpdateTemplate_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10238,7 +10280,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         descriptorUpdateTemplate, pData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10298,7 +10340,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSupport);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10385,7 +10427,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAllocator, pYcbcrConversion);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10443,7 +10485,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkSamplerYcbcrConversion(boxed_ycbcrConversion_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10489,7 +10531,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           queryCount);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10540,7 +10582,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetSemaphoreCounterValue_VkResult_return, device, semaphore, pValue);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10571,7 +10613,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                    ioStream, (unsigned long long)device,
                                    (unsigned long long)pWaitInfo, (unsigned long long)timeout);
                 }
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 VkResult vkWaitSemaphores_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
                 if (CC_LIKELY(vk)) {
@@ -10630,7 +10672,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkSignalSemaphore_VkResult_return, device, pSignalInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10675,7 +10717,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetBufferDeviceAddress_VkDeviceAddress_return, device, pInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10718,7 +10760,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetBufferOpaqueCaptureAddress_uint64_t_return, device, pInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10764,7 +10806,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetDeviceMemoryOpaqueCaptureAddress_uint64_t_return, device, pInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10825,7 +10867,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         offset, countBuffer, countBufferOffset, maxDrawCount, stride);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10885,7 +10927,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         offset, countBuffer, countBufferOffset, maxDrawCount, stride);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -10965,7 +11007,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pRenderPass);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11015,7 +11057,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                pRenderPassBegin, pSubpassBeginInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11067,7 +11109,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            pSubpassBeginInfo, pSubpassEndInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11108,7 +11150,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              pSubpassEndInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11216,7 +11258,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pToolCount, pToolProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11298,7 +11340,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPrivateDataSlot);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11355,7 +11397,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkPrivateDataSlot(boxed_privateDataSlot_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11409,7 +11451,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         privateDataSlot, data);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11461,7 +11503,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           objectHandle, privateDataSlot, pData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11501,7 +11543,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                pDependencyInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11547,7 +11589,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                               stage, queryPool, query);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11602,7 +11644,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                         queue, submitCount, pSubmits, fence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11643,7 +11685,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           pCopyBufferInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11681,7 +11723,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          packetLen, commandBuffer, pCopyImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11723,7 +11765,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                  pCopyBufferToImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11764,7 +11806,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                  pCopyImageToBufferInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11824,7 +11866,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11882,7 +11924,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -11996,7 +12038,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSparseMemoryRequirementCount, pSparseMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12043,7 +12085,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                         pDependencyInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12084,7 +12126,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           stageMask);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12145,7 +12187,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           pEvents, pDependencyInfos);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12186,7 +12228,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          packetLen, commandBuffer, pBlitImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12227,7 +12269,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                             pResolveImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12267,7 +12309,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              pRenderingInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12297,7 +12339,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            packetLen, commandBuffer);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12330,7 +12372,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                           packetLen, commandBuffer, cullMode);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12364,7 +12406,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            packetLen, commandBuffer, frontFace);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12400,7 +12442,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                    primitiveTopology);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12447,7 +12489,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                    viewportCount, pViewports);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12493,7 +12535,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                   scissorCount, pScissors);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12589,7 +12631,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12624,7 +12666,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                  depthTestEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12659,7 +12701,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                   depthWriteEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12694,7 +12736,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                 depthCompareOp);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12729,7 +12771,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         depthBoundsTestEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12764,7 +12806,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                    stencilTestEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12816,7 +12858,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            failOp, passOp, depthFailOp, compareOp);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12852,7 +12894,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         rasterizerDiscardEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12887,7 +12929,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                  depthBiasEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12923,7 +12965,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         primitiveRestartEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -12987,7 +13029,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                       device, pMemoryMapInfo, ppData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13032,7 +13074,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                         device, pMemoryUnmapInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13090,7 +13132,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         &m_pool, snapshotApiCallHandle, packet, packetLen, device, pInfo, pLayout);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13154,7 +13196,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSubresource, pLayout);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13201,7 +13243,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkCopyMemoryToImage_VkResult_return, device, pCopyMemoryToImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13248,7 +13290,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkCopyImageToMemory_VkResult_return, device, pCopyImageToMemoryInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13295,7 +13337,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkCopyImageToImage_VkResult_return, device, pCopyImageToImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13352,7 +13394,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pTransitions);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13421,7 +13463,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13483,7 +13525,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         descriptorUpdateTemplate, layout, set, pData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13525,7 +13567,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                   pBindDescriptorSetsInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13566,7 +13608,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              pPushConstantsInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13608,7 +13650,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                  pPushDescriptorSetInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13654,7 +13696,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPushDescriptorSetWithTemplateInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13696,7 +13738,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              lineStippleFactor, lineStipplePattern);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13745,7 +13787,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                buffer, offset, size, indexType);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13802,7 +13844,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pRenderingAreaInfo, pGranularity);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13845,7 +13887,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pLocationInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13890,7 +13932,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pInputAttachmentIndexInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -13975,7 +14017,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSwapchain);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14032,7 +14074,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkSwapchainKHR(boxed_swapchain_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14131,7 +14173,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSwapchainImageCount, pSwapchainImages);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14199,7 +14241,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         semaphore, fence, pImageIndex);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14241,7 +14283,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkQueuePresentKHR_VkResult_return, queue, pPresentInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14306,7 +14348,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pDeviceGroupPresentCapabilities);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14375,7 +14417,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pModes);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14483,7 +14525,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         surface, pRectCount, pRects);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14537,7 +14579,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkAcquireNextImage2KHR_VkResult_return, device, pAcquireInfo, pImageIndex);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14579,7 +14621,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                 pRenderingInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14609,7 +14651,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                               packet, packetLen, commandBuffer);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14660,7 +14702,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pFeatures);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14710,7 +14752,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14764,7 +14806,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pFormatProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14838,7 +14880,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         physicalDevice, pImageFormatInfo, pImageFormatProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14940,7 +14982,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pQueueFamilyPropertyCount, pQueueFamilyProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -14992,7 +15034,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15101,7 +15143,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pFormatInfo, pPropertyCount, pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15144,7 +15186,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                               commandPool, flags);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15218,7 +15260,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pExternalBufferInfo, pExternalBufferProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15288,7 +15330,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pExternalSemaphoreInfo, pExternalSemaphoreProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15335,7 +15377,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkImportSemaphoreFdKHR_VkResult_return, device, pImportSemaphoreFdInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15386,7 +15428,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetSemaphoreFdKHR_VkResult_return, device, pGetFdInfo, pFd);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15478,7 +15520,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAllocator, pDescriptorUpdateTemplate);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15541,7 +15583,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkDescriptorUpdateTemplate(boxed_descriptorUpdateTemplate_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15598,7 +15640,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         descriptorUpdateTemplate, pData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15660,7 +15702,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         descriptorUpdateTemplate, layout, set, pData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15742,7 +15784,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pRenderPass);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15793,7 +15835,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pRenderPassBegin, pSubpassBeginInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15845,7 +15887,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                               pSubpassBeginInfo, pSubpassEndInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15886,7 +15928,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                 pSubpassEndInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -15954,7 +15996,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pExternalFenceInfo, pExternalFenceProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16003,7 +16045,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkImportFenceFdKHR_VkResult_return, device, pImportFenceFdInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16056,7 +16098,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          device, pGetFdInfo, pFd);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16116,7 +16158,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16174,7 +16216,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16289,7 +16331,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSparseMemoryRequirementCount, pSparseMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16379,7 +16421,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAllocator, pYcbcrConversion);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16437,7 +16479,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkSamplerYcbcrConversion(boxed_ycbcrConversion_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16492,7 +16534,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkBindBufferMemory2KHR_VkResult_return, device, bindInfoCount, pBindInfos);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16545,7 +16587,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkBindImageMemory2KHR_VkResult_return, device, bindInfoCount, pBindInfos);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16607,7 +16649,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSupport);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16654,7 +16696,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetBufferDeviceAddressKHR_VkDeviceAddress_return, device, pInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16699,7 +16741,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetBufferOpaqueCaptureAddressKHR_uint64_t_return, device, pInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16745,7 +16787,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetDeviceMemoryOpaqueCaptureAddressKHR_uint64_t_return, device, pInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16863,7 +16905,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pExecutableCount, pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -16979,7 +17021,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pExecutableInfo, pStatisticCount, pStatistics);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17108,7 +17150,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pExecutableInfo, pInternalRepresentationCount, pInternalRepresentations);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17156,7 +17198,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                            pDependencyInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17197,7 +17239,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              stageMask);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17258,7 +17300,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              pEvents, pDependencyInfos);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17299,7 +17341,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                   pDependencyInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17345,7 +17387,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                  stage, queryPool, query);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17403,7 +17445,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkQueueSubmit2KHR_VkResult_return, queue, submitCount, pSubmits, fence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17446,7 +17488,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              pCopyBufferInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17485,7 +17527,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                             pCopyImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17527,7 +17569,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pCopyBufferToImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17568,7 +17610,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pCopyImageToBufferInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17608,7 +17650,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                             pBlitImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17649,7 +17691,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                pResolveImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17712,7 +17754,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17771,7 +17813,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17885,7 +17927,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSparseMemoryRequirementCount, pSparseMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17937,7 +17979,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                   buffer, offset, size, indexType);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -17994,7 +18036,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pRenderingAreaInfo, pGranularity);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18053,7 +18095,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         &m_pool, snapshotApiCallHandle, packet, packetLen, device, pInfo, pLayout);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18119,7 +18161,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSubresource, pLayout);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18168,7 +18210,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkReleaseSwapchainImagesKHR_VkResult_return, device, pReleaseInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18210,7 +18252,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         lineStippleFactor, lineStipplePattern);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18254,7 +18296,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pBindDescriptorSetsInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18295,7 +18337,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                 pPushConstantsInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18337,7 +18379,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPushDescriptorSetInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18383,7 +18425,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPushDescriptorSetWithTemplateInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18429,7 +18471,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSetDescriptorBufferOffsetsInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18477,7 +18519,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pBindDescriptorBufferEmbeddedSamplersInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18535,7 +18577,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         imageUsage, grallocUsage);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18593,7 +18635,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         semaphore, fence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18671,7 +18713,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pWaitSemaphores, image, pNativeFenceFd);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18741,7 +18783,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         grallocProducerUsage);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18832,7 +18874,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAllocator, pCallback);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18891,7 +18933,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkDebugReportCallbackEXT(boxed_callback_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -18950,7 +18992,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         objectType, object, location, messageCode, pLayerPrefix, pMessage);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19028,7 +19070,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         firstBinding, bindingCount, pBuffers, pOffsets, pSizes);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19107,7 +19149,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pCounterBufferOffsets);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19186,7 +19228,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pCounterBufferOffsets);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19238,7 +19280,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                    queryPool, query, flags, index);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19283,7 +19325,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                  queryPool, query, index);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19343,7 +19385,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         counterOffset, vertexStride);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19391,7 +19433,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkSetDebugUtilsObjectNameEXT_VkResult_return, device, pNameInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19436,7 +19478,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkSetDebugUtilsObjectTagEXT_VkResult_return, device, pTagInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19475,7 +19517,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         &m_pool, snapshotApiCallHandle, packet, packetLen, queue, pLabelInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19504,7 +19546,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         &m_pool, snapshotApiCallHandle, packet, packetLen, queue);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19543,7 +19585,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         &m_pool, snapshotApiCallHandle, packet, packetLen, queue, pLabelInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19584,7 +19626,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pLabelInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19614,7 +19656,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         &m_pool, snapshotApiCallHandle, packet, packetLen, commandBuffer);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19655,7 +19697,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pLabelInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19744,7 +19786,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAllocator, pMessenger);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19803,7 +19845,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkDebugUtilsMessengerEXT(boxed_messenger_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19854,7 +19896,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         messageSeverity, messageTypes, pCallbackData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19924,7 +19966,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -19998,7 +20040,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pHostPointer, pMemoryHostPointerProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20107,7 +20149,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pToolCount, pToolProperties);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20149,7 +20191,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         lineStippleFactor, lineStipplePattern);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20184,7 +20226,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              packetLen, commandBuffer, cullMode);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20219,7 +20261,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                               frontFace);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20255,7 +20297,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         primitiveTopology);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20303,7 +20345,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         viewportCount, pViewports);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20350,7 +20392,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         scissorCount, pScissors);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20447,7 +20489,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20482,7 +20524,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                     commandBuffer, depthTestEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20517,7 +20559,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         depthWriteEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20552,7 +20594,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                    depthCompareOp);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20589,7 +20631,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         depthBoundsTestEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20624,7 +20666,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         stencilTestEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20676,7 +20718,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         failOp, passOp, depthFailOp, compareOp);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20725,7 +20767,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkCopyMemoryToImageEXT_VkResult_return, device, pCopyMemoryToImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20772,7 +20814,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkCopyImageToMemoryEXT_VkResult_return, device, pCopyImageToMemoryInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20819,7 +20861,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkCopyImageToImageEXT_VkResult_return, device, pCopyImageToImageInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20876,7 +20918,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pTransitions);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20942,7 +20984,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSubresource, pLayout);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -20991,7 +21033,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkReleaseSwapchainImagesEXT_VkResult_return, device, pReleaseInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21076,7 +21118,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPrivateDataSlot);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21133,7 +21175,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkPrivateDataSlot(boxed_privateDataSlot_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21187,7 +21229,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         privateDataSlot, data);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21240,7 +21282,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                              objectHandle, privateDataSlot, pData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21277,7 +21319,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         patchControlPoints);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21314,7 +21356,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         rasterizerDiscardEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21349,7 +21391,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                     commandBuffer, depthBiasEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21382,7 +21424,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                             packetLen, commandBuffer, logicOp);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21419,7 +21461,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         primitiveRestartEnable);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21467,7 +21509,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         attachmentCount, pColorWriteEnables);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21533,7 +21575,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAddress);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21702,7 +21744,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pImageInfos, pBufferInfos, pBufferViews);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21742,7 +21784,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pBeginInfo);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21771,7 +21813,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         &m_pool, snapshotApiCallHandle, packet, packetLen, commandBuffer);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21805,7 +21847,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         &m_pool, snapshotApiCallHandle, packet, packetLen, commandBuffer, flags);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21844,7 +21886,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         needHostSync, sequenceNumber);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -21945,7 +21987,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAllocator, pImage, pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22046,7 +22088,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pAllocator, pBuffer, pMemoryRequirements);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22149,7 +22191,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pSize, pHostmemId);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22211,7 +22253,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 }
                 delete_VkDeviceMemory(boxed_memory_preserve);
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22248,7 +22290,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                needHostSync, sequenceNumber);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22298,7 +22340,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                   submitCount, pSubmits, fence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22325,7 +22367,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                     packet, packetLen, queue);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22378,7 +22420,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pBindInfo, fence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22427,7 +22469,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pRowPitchAlignment);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22484,7 +22526,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pOffset, pRowPitchAlignment);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22520,7 +22562,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         ioStream, (unsigned long long)queue, (unsigned long long)commandBuffer,
                         (unsigned long long)dataSize, (unsigned long long)pData);
                 }
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 if (CC_LIKELY(vk)) {
                     m_state->on_vkQueueFlushCommandsGOOGLE(&m_pool, snapshotApiCallHandle, queue,
@@ -22665,7 +22707,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pendingDescriptorWriteCount, pPendingDescriptorWrites);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22733,7 +22775,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pPoolIdCount, pPoolIds);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22794,7 +22836,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         waitSemaphoreCount, pWaitSemaphores, image);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22847,7 +22889,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         deviceMemory, dataOffset, dataSize);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -22887,7 +22929,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                          device, memory);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -23077,7 +23119,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         pInlineUniformBlockData);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -23128,7 +23170,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                                    submitCount, pSubmits, fence);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -23172,7 +23214,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         vkGetSemaphoreGOOGLE_VkResult_return, device, semaphore, syncId);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -23193,7 +23235,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                                                             packetLen, id);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
@@ -23219,7 +23261,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         &m_pool, snapshotApiCallHandle, packet, packetLen, pDebugMetadata);
                 }
                 vkReadStream->clearPool();
-                if (m_queueSubmitWithCommandsEnabled)
+                if (m_queueSubmitWithCommandsEnabled && seqnoPtr)
                     seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
                 break;
             }
