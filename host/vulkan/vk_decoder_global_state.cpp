@@ -48,6 +48,7 @@
 #include <vulkan/vulkan_beta.h> // for MoltenVK portability extensions
 #endif
 
+#include "decoder_profile.h"
 #include "common/goldfish_vk_deepcopy.h"
 #include "common/goldfish_vk_dispatch.h"
 #include "common/goldfish_vk_marshaling.h"
