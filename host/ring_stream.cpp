@@ -166,6 +166,12 @@ struct SpinCount {
     // different amount of spinning, and nothing measured so far can tell them apart.
     //
     // Per-thread so two consumers do not interleave into a meaningless series.
+    static void NoteEntry() { sEntries.fetch_add(1, std::memory_order_relaxed); }
+    // One wait episode: the consumer found the ring empty and started spinning. Counting these
+    // apart from the iterations is what separates "many waits of one turn each" from "a few waits
+    // that spin until the budget runs out" -- two readings of the same spin total that mean
+    // opposite things, and which the iteration count alone cannot tell apart.
+    static void NoteEpisode() { sEpisodes.fetch_add(1, std::memory_order_relaxed); }
     static void NotePacket() {
         sPackets.fetch_add(1, std::memory_order_relaxed);
         struct timespec ts;
@@ -188,21 +194,24 @@ struct SpinCount {
         constexpr uint64_t kEvery = 2000;
         if (reports % kEvery) return;
         const uint64_t packets = sPackets.exchange(0, std::memory_order_relaxed);
+        const uint64_t entries = sEntries.exchange(0, std::memory_order_relaxed);
+        const uint64_t episodes = sEpisodes.exchange(0, std::memory_order_relaxed);
         const uint64_t spins = sSpins.exchange(0, std::memory_order_relaxed);
         const uint64_t parks = sParks.exchange(0, std::memory_order_relaxed);
         uint64_t g[7];
         for (size_t i = 0; i < 7; ++i) g[i] = sGaps[i].exchange(0, std::memory_order_relaxed);
+        // Raw counts only. A ratio computed here hides how its parts were counted, which has
+        // already produced two findings this session that were arithmetic rather than behaviour.
         GFXSTREAM_WARNING(
-            "ASGSPIN over %llu waits: %llu spins, %llu parks, %llu packets -> %llu spins/packet, "
-            "%llu parks/100pkt | gap us <10:%llu <50:%llu <100:%llu <500:%llu <1k:%llu <5k:%llu "
-            "5k+:%llu",
-            (unsigned long long)kEvery, (unsigned long long)spins, (unsigned long long)parks,
-            (unsigned long long)packets, (unsigned long long)(packets ? spins / packets : 0),
-            (unsigned long long)(packets ? parks * 100 / packets : 0), (unsigned long long)g[0],
+            "ASGSPIN raw: episodes=%llu spin_iters=%llu parks=%llu reads=%llu packets=%llu | gap "
+            "us <10:%llu <50:%llu <100:%llu <500:%llu <1k:%llu <5k:%llu 5k+:%llu",
+            (unsigned long long)episodes, (unsigned long long)spins, (unsigned long long)parks,
+            (unsigned long long)entries, (unsigned long long)packets, (unsigned long long)g[0],
             (unsigned long long)g[1], (unsigned long long)g[2], (unsigned long long)g[3],
             (unsigned long long)g[4], (unsigned long long)g[5], (unsigned long long)g[6]);
     }
-    static inline std::atomic<uint64_t> sSpins{0}, sParks{0}, sPackets{0}, sWaits{0};
+    static inline std::atomic<uint64_t> sSpins{0}, sParks{0}, sPackets{0}, sWaits{0}, sEntries{0};
+    static inline std::atomic<uint64_t> sEpisodes{0};
     static inline std::atomic<uint64_t> sGaps[7] = {};
 };
 }  // namespace
@@ -266,6 +275,7 @@ int RingStream::commitBuffer(size_t size) {
 }
 
 const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
+    if (SpinCount::Enabled()) SpinCount::NoteEntry();
     size_t wanted = *inout_len;
     size_t count = 0U;
     auto dst = static_cast<char*>(buf);
@@ -426,7 +436,10 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
             }
 
             ++spins;
-            if (SpinCount::Enabled()) SpinCount::NoteSpins(1, /* parked */ false);
+            if (SpinCount::Enabled()) {
+                if (spins == 1) SpinCount::NoteEpisode();
+                SpinCount::NoteSpins(1, /* parked */ false);
+            }
             uint32_t sleepUs = UINT32_MAX;  // past the last stage -> park
             for (const SpinLevel& level : spinLevels) {
                 if (spins <= level.upToIter) {
