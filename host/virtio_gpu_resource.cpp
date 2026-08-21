@@ -490,8 +490,9 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
                     sSeenResources.size() < 24 && sSeenResources.insert(args->handle).second;
             }
             if (firstTime) {
-                GFXSTREAM_INFO("ColorBuffer resource %u: %ux%u virgl %u -> %s", args->handle,
-                               args->width, args->height, args->format, ToString(format).c_str());
+                GFXSTREAM_DIAG_PRINT("CB-RESOURCE: %u %ux%u virgl %u -> %s\n", args->handle,
+                                     args->width, args->height, args->format,
+                                     ToString(format).c_str());
             }
         }
 

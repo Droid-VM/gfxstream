@@ -3357,10 +3357,10 @@ class VkDecoderGlobalState::Impl {
                 firstTime = sSeen.insert({pCreateInfo->format, pCreateInfo->usage}).second;
             }
             if (firstTime) {
-                GFXSTREAM_INFO("Guest colour-attachment image: %s %ux%u usage=0x%x tiling=%d",
-                               string_VkFormat(pCreateInfo->format), pCreateInfo->extent.width,
-                               pCreateInfo->extent.height, pCreateInfo->usage,
-                               (int)pCreateInfo->tiling);
+                GFXSTREAM_DIAG_PRINT("GUEST-IMAGE: %s %ux%u usage=0x%x tiling=%d\n",
+                                     string_VkFormat(pCreateInfo->format),
+                                     pCreateInfo->extent.width, pCreateInfo->extent.height,
+                                     pCreateInfo->usage, (int)pCreateInfo->tiling);
             }
         }
 
