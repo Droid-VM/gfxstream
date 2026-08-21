@@ -63,6 +63,10 @@ class EmulatedPhysicalDeviceMemoryProperties {
     VkPhysicalDeviceMemoryProperties mHostMemoryProperties;
     uint32_t mGuestToHostMemoryTypeIndexMap[VK_MAX_MEMORY_TYPES];
     uint32_t mHostToGuestMemoryTypeIndexMap[VK_MAX_MEMORY_TYPES];
+    // Host memory type -> the device-local-only guest type synthesized for it, and which guest
+    // types those synthesized ones are. See the constructor.
+    uint32_t mHostToGuestDeviceLocalShadowMap[VK_MAX_MEMORY_TYPES];
+    bool mGuestMemoryTypeIsShadow[VK_MAX_MEMORY_TYPES];
 
     // The memory type index reported to the guest for VkDeviceMemory requirements which would
     // try to import host ColorBuffer allocations
