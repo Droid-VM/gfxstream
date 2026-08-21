@@ -2161,7 +2161,34 @@ class VkDecoderGlobalState::Impl {
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
 
+        // Hidden from the guest: VK_EXT_image_drm_format_modifier. Explicit DRM-modifier WSI
+        // negotiation cannot be satisfied on this stack -- the host Qualcomm driver exposes only
+        // a QCOM-tiled modifier, for BGRA8, and rejects it for COLOR_ATTACHMENT usage, while the
+        // compositor on the other side imports LINEAR/INVALID only. The two sets are disjoint, so
+        // a guest mesa that negotiates explicitly ends up with no agreeable modifier.
+        //
+        // Dropping the extension is what puts the guest ICD into its LINEAR modifier-emulation
+        // path (gfxstream_vk_physical_device_init(): absent host extension ->
+        // doImageDrmFormatModifierEmulation = true), which maps to plain VK_IMAGE_TILING_LINEAR --
+        // something the host driver does support and the compositor does import. The guest-side
+        // half of this pair is the zink change that lets gfxstream treat INVALID as linear; the
+        // two only work together.
+        //
+        // Note filteredDeviceExtensionNames() still force-enables the extension on the *host*
+        // VkDevice. That is independent of what the guest is told.
+        //
+        // Only this one extension. The old tree also hid VK_KHR_maintenance9 and
+        // VK_KHR_robustness2 because its cereal tables could not (un)marshal their structs; the
+        // upstream host decodes them, so they stay visible.
+        static const char* const kGuestHiddenDeviceExtensions[] = {
+            VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
+        };
+
         bool shouldPassthrough = !m_vkEmulation->isYcbcrEmulationEnabled();
+
+        // The filter runs on the vector below, so handing the driver's list straight back is only
+        // safe while there is nothing to hide.
+        shouldPassthrough = shouldPassthrough && (std::size(kGuestHiddenDeviceExtensions) == 0);
 #if defined(__APPLE__)
         shouldPassthrough = shouldPassthrough && !(m_vkEmulation->getExternalMemoryMode() ==
                                                    ExternalMemory::Mode::Metal);
@@ -2189,6 +2216,17 @@ class VkDecoderGlobalState::Impl {
             enumerateDeviceExtensionProperties(vk, physicalDevice, pLayerName, properties);
         if (result != VK_SUCCESS) {
             return result;
+        }
+
+        for (auto it = properties.begin(); it != properties.end();) {
+            bool drop = false;
+            for (const char* hidden : kGuestHiddenDeviceExtensions) {
+                if (strcmp(it->extensionName, hidden) == 0) {
+                    drop = true;
+                    break;
+                }
+            }
+            it = drop ? properties.erase(it) : std::next(it);
         }
 
 #if defined(__APPLE__) && defined(VK_MVK_moltenvk)
