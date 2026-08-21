@@ -27,6 +27,7 @@
 
 #include "gfxstream/host/dma_device.h"
 #include "gfxstream/common/logging.h"
+#include "gfxstream_diag.h"
 #include "gfxstream/host/stream_utils.h"
 #include "gfxstream/system/System.h"
 #include "render-utils/dma_device.h"
@@ -78,6 +79,18 @@ struct asg_context CreateContext(const AsgConsumerCreateInfo& info) {
     context.ring_config->buffer_size = info.buffer_size;
     context.ring_config->flush_interval = info.buffer_flush_interval;
 
+
+    // What the counters say at the moment this side attaches, which is the difference between a
+    // session that works and one that hangs with no error on either end. A ring the guest has not
+    // touched yet reads write=0 read=0 stateval=0; anything else means these pages still hold a
+    // previous session's header and the guest's own initialisation has not landed yet, so this
+    // side is about to frame packets from an offset the guest never wrote.
+    GFXSTREAM_STALL_PRINT(
+            "RING-VIEW: storage=%p to_host=%p state=%p write=%u read=%u stateval=%u "
+            "buffer=%p size=%u\n",
+            (void*)info.ring_storage, (void*)context.to_host, (void*)context.host_state,
+            context.to_host->write_pos, context.to_host->read_pos,
+            (unsigned)*(context.host_state), (void*)context.buffer, info.buffer_size);
     return context;
 }
 
