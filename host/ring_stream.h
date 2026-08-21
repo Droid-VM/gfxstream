@@ -34,9 +34,26 @@ class RingStream final : public IOStream {
     // definition, nothing to say about why -- the answer is on the guest side, and the last thing
     // the guest asked for before it went quiet is the only clue this side holds. One store per
     // decode batch, read only by the stall probe.
-    void noteDecoded(uint32_t opcode) { mLastDecoded = opcode; }
+    // Reject values that are not opcodes rather than record them, and count the rejections.
+    //
+    // The stall probe reported values far outside the opcode range on low-traffic rings -- 36% of
+    // ksplashqml's stalls -- while every other field on the same line was sane. Since this member
+    // is zero-initialised, a non-zero garbage value means something wrote it, and there are only
+    // two candidates: the decoder handed one over, or this memory was clobbered from outside.
+    // Splitting the count says which, and neither answer can be guessed at.
+    void noteDecoded(uint32_t opcode) {
+        if (opcode < kOpcodeMin || opcode > kOpcodeMax) {
+            ++mBadDecoded;
+            return;
+        }
+        mLastDecoded = opcode;
+    }
     uint32_t lastDecoded() const { return mLastDecoded; }
+
+    static constexpr uint32_t kOpcodeMin = 20000;
+    static constexpr uint32_t kOpcodeMax = 21000;
     uint32_t mLastDecoded = 0;
+    uint64_t mBadDecoded = 0;
 
     RingStream(const AsgConsumerCreateInfo& info, size_t bufsize);
     ~RingStream();
