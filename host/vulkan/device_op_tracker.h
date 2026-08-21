@@ -16,12 +16,15 @@
 
 #include <vulkan/vulkan.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <future>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <variant>
 
 #include "vulkan_dispatch.h"
@@ -46,6 +49,7 @@ enum class DeviceOpStatus { kPending, kDone, kFailure };
 class DeviceOpTracker {
    public:
     DeviceOpTracker(VkDevice device, VulkanDispatch* deviceDispatch);
+    ~DeviceOpTracker();
 
     DeviceOpTracker(const DeviceOpTracker& rhs) = delete;
     DeviceOpTracker& operator=(const DeviceOpTracker& rhs) = delete;
@@ -82,6 +86,21 @@ class DeviceOpTracker {
     };
     std::mutex mPollFunctionsMutex;
     std::deque<PollFunction> mPollFunctions GUARDED_BY(mPollFunctionsMutex);
+
+    // Reclaiming completed operations means asking the driver whether they are done, and
+    // vkGetFenceStatus is not the cheap non-blocking read its name suggests: on some drivers a
+    // single call averages milliseconds. Doing that from a guest-facing call -- which the submit
+    // path used to -- puts a multi-millisecond driver query in the middle of every submit, and the
+    // guest ends up spinning in the transport waiting for it. Sweep from a thread of our own
+    // instead, so the cost never lands on a path the guest is waiting on. Started lazily, on the
+    // first operation there is anything to reclaim.
+    void StartPollThreadIfNeeded();
+    void StopPollThread();
+    std::once_flag mPollThreadOnce;
+    std::thread mPollThread;
+    std::mutex mPollThreadMutex;
+    std::condition_variable mPollThreadCv;
+    std::atomic<bool> mPollThreadStopping{false};
 
     struct PendingGarbage {
         DeviceOpWaitable waitable;

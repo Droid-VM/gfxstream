@@ -4018,6 +4018,11 @@ class VkDecoderGlobalState::Impl {
         std::vector<VkFence> externalFences;
 
         std::vector<DeviceOpWaitable> pendingUses;
+        // The fences those pending uses were submitted with. A fence only acquires a latestUse
+        // from a submission made with that same fence, so waiting on these waits on exactly the
+        // host-side work that has to finish before the reset.
+        std::vector<VkFence> pendingUseFences;
+        DeviceOpTrackerPtr tracker;
 
         {
             std::lock_guard<std::mutex> lock(mMutex);
@@ -4036,6 +4041,7 @@ class VkDecoderGlobalState::Impl {
                 if (fenceInfo.latestUse) {
                     if (!IsDone(*fenceInfo.latestUse)) {
                         pendingUses.emplace_back(*fenceInfo.latestUse);
+                        pendingUseFences.push_back(fence);
                     }
                     fenceInfo.latestUse.reset();
                 }
@@ -4050,35 +4056,50 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
-        // Ensure that any host operations that reference this fence have completed
-        // before reseting.
-        while (!pendingUses.empty()) {
+        // Ensure that any host operations referencing these fences have completed before
+        // resetting. This used to be a spin: sweep the tracker under the global lock, re-test the
+        // waitables, yield, repeat. Three things were wrong with it. The sweep is where the driver
+        // is asked, and it was asked from inside mMutex, so every other decoder thread queued
+        // behind a call that can take milliseconds. The re-test only ever becomes true because a
+        // sweep made it true, so the loop's exit condition was its own side effect. And measuring
+        // it showed the wait was never the GPU: the work was finished long before the loop noticed.
+        //
+        // Ask the driver the question directly instead. vkWaitForFences on exactly these fences is
+        // one call, it blocks in the driver rather than spinning, and it holds no lock of ours.
+        // One sweep afterwards turns "the fence signalled" into "the tracked operation completed"
+        // for the bookkeeping.
+        if (!pendingUses.empty()) {
             {
                 std::lock_guard<std::mutex> lock(mMutex);
-
                 auto deviceInfoIt = mDeviceInfo.find(device);
                 if (deviceInfoIt == mDeviceInfo.end()) {
                     GFXSTREAM_ERROR("Invalid VkDevice:%p!", device);
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
-                DeviceInfo& deviceInfo = deviceInfoIt->second;
-
-                if (!deviceInfo.deviceOpTracker) {
+                tracker = deviceInfoIt->second.deviceOpTracker;
+                if (!tracker) {
                     GFXSTREAM_ERROR("VkDevice:%p missing op tracker?", device);
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
-                deviceInfo.deviceOpTracker->PollAndProcessGarbage();
             }
 
-            pendingUses.erase(
-                std::remove_if(pendingUses.begin(),
-                               pendingUses.end(),
-                               [](const DeviceOpWaitable& waitable) {
-                                    return IsDone(waitable);
-                               }),
-                pendingUses.end());
+            if (!pendingUseFences.empty()) {
+                static constexpr uint64_t kFenceWaitTimeoutNs = 5ULL * 1000 * 1000 * 1000;
+                const VkResult waitRes =
+                    vk->vkWaitForFences(device, (uint32_t)pendingUseFences.size(),
+                                        pendingUseFences.data(), VK_TRUE, kFenceWaitTimeoutNs);
+                if (waitRes != VK_SUCCESS) {
+                    // A fence that never signals must not hang the guest thread that reset it.
+                    // The tracker expires such an operation on its own after five seconds.
+                    GFXSTREAM_WARNING(
+                        "vkResetFences: waiting for %zu in-flight fence use(s) returned %s; "
+                        "resetting anyway.",
+                        pendingUseFences.size(), string_VkResult(waitRes));
+                }
+            }
 
-            std::this_thread::yield();
+            // Outside mMutex on purpose: this is the call that enters the driver.
+            tracker->PollAndProcessGarbage();
         }
 
         if (!cleanedFences.empty()) {
@@ -4264,7 +4285,6 @@ class VkDecoderGlobalState::Impl {
 
         if (deviceInfo.deviceOpTracker && semaphoreInfo.latestUse && !IsDone(*semaphoreInfo.latestUse)) {
             deviceInfo.deviceOpTracker->AddPendingGarbage(*semaphoreInfo.latestUse, semaphore);
-            deviceInfo.deviceOpTracker->PollAndProcessGarbage();
         } else {
             deviceDispatch->vkDestroySemaphore(device, semaphore, nullptr);
         }
@@ -4486,7 +4506,6 @@ class VkDecoderGlobalState::Impl {
 
         if (deviceInfo.deviceOpTracker && fenceInfo.latestUse && !IsDone(*fenceInfo.latestUse)) {
             deviceInfo.deviceOpTracker->AddPendingGarbage(*fenceInfo.latestUse, fence);
-            deviceInfo.deviceOpTracker->PollAndProcessGarbage();
         } else {
             deviceDispatch->vkDestroyFence(device, fence, nullptr);
         }
@@ -8507,7 +8526,10 @@ class VkDecoderGlobalState::Impl {
         if (!snapshotsEnabled()) {
             processDelayedRemovesForDevice(device);
         }
-        deviceOpTracker->PollAndProcessGarbage();
+        // No sweep here. This is the guest submit path, and a sweep enters the driver: on some
+        // drivers a single vkGetFenceStatus averages milliseconds, so reclaiming garbage from here
+        // put a multi-millisecond driver query in the middle of every submit and left the guest
+        // spinning in the transport waiting for it. The tracker sweeps from its own thread now.
 
         if (snapshotsEnabled()) {
             for (uint32_t i = 0; i < submitCount; ++i) {
