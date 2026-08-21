@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <unistd.h>
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -175,13 +176,20 @@ struct SpinCount {
         uint64_t lastPacketNs = 0;
         uint64_t stallStartNs = 0;
         uint64_t stallStartNotifies = 0;
-        char name[20] = {};
+        // Process name plus thread id. The name alone is not an identity: crosvm names each render
+        // thread after the guest process it serves, and a guest process gets one ring per thread
+        // that touches Vulkan -- eleven for plasmashell, eight for kwin_wayland on this device. A
+        // line labelled only "kwin_wayland" is therefore eight rings' worth of events tallied as
+        // one, which is not something the reader can undo afterwards.
+        char name[32] = {};
     };
     static Counts& Mine() {
         static thread_local Counts c = [] {
             Counts init;
 #if defined(__linux__)
-            prctl(PR_GET_NAME, init.name, 0, 0, 0);
+            char comm[16] = {};
+            prctl(PR_GET_NAME, comm, 0, 0, 0);
+            snprintf(init.name, sizeof(init.name), "%s/%d", comm, (int)gettid());
 #endif
             return init;
         }();
