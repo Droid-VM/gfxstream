@@ -56,6 +56,28 @@ static VirtioGpuFrontend* sFrontend() {
     return p;
 }
 
+// GFXSTREAM_LOG_LEVEL=error|warning|info|debug|verbose, or GFXSTREAM_LOG_VERBOSE=1.
+std::optional<LogLevel> GetGfxstreamLogLevelFromEnvironment() {
+    if (gfxstream::base::getEnvironmentVariable("GFXSTREAM_LOG_VERBOSE") == "1") {
+        return LogLevel::kVerbose;
+    }
+
+    const std::string logLevelStr = gfxstream::base::getEnvironmentVariable("GFXSTREAM_LOG_LEVEL");
+    if (logLevelStr.empty()) {
+        return std::nullopt;
+    }
+    if (logLevelStr == "error") return LogLevel::kError;
+    if (logLevelStr == "warning") return LogLevel::kWarning;
+    if (logLevelStr == "info") return LogLevel::kInfo;
+    if (logLevelStr == "debug") return LogLevel::kDebug;
+    if (logLevelStr == "verbose") return LogLevel::kVerbose;
+
+    GFXSTREAM_ERROR(
+        "Invalid GFXSTREAM_LOG_LEVEL '%s'; expected one of error, warning, info, debug, verbose.",
+        logLevelStr.c_str());
+    return std::nullopt;
+}
+
 std::optional<gfxstream::host::FeatureSet>
 ParseGfxstreamFeatures(const int rendererFlags,
                         const std::string& rendererFeatures) {
@@ -782,6 +804,14 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
     // The VMM owns how a host-visible blob's shmem is backed; gfxstream only hands it the fd.
     gfxstream::host::HostVisibleBlobBacking::get().set(prepare_blob_backing_cb,
                                                        release_blob_backing_cb, renderer_cookie);
+
+    // gfxstream's own log level, from the environment. Without this there is no way to raise it
+    // from outside the process, and every INFO and DEBUG line describing what the renderer decided
+    // -- which driver, which external memory mode, which formats -- is either always on or
+    // unreachable. On Android these go to logcat under the GFXSTREAM tag, not to stderr.
+    if (auto logLevel = GetGfxstreamLogLevelFromEnvironment()) {
+        gfxstream::host::SetGfxstreamLogLevel(*logLevel);
+    }
 
     if (log_callback_ex) {
         gfxstream::host::SetGfxstreamLogCallback([log_callback_ex, log_user_data = renderer_cookie](

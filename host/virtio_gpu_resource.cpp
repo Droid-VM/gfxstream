@@ -477,26 +477,6 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
         }
         auto format = *formatOpt;
 
-        // Which virgl format the guest asked for, and what it resolved to. One line per distinct
-        // pairing, so a whole session costs a handful. This is the pairing that decides the byte
-        // order of everything downstream -- the guest writes the bytes, the host reads them back
-        // unconverted, and the display consumer assumes an order -- so when colours come out with
-        // the channels exchanged, this is the first thing worth knowing and the hardest to
-        // reconstruct afterwards.
-        {
-            static std::mutex sSeenMutex;
-            static std::set<uint32_t> sSeenFormats;
-            bool firstTime = false;
-            {
-                std::lock_guard<std::mutex> lock(sSeenMutex);
-                firstTime = sSeenFormats.insert(args->format).second;
-            }
-            if (firstTime) {
-                GFXSTREAM_INFO("ColorBuffer format: virgl %u -> %s", args->format,
-                               ToString(format).c_str());
-            }
-        }
-
         if (!FrameBuffer::getFB()->createColorBufferWithResourceHandle(args->width, args->height,
                                                                        format, args->handle)) {
             const std::string formatString = ToString(format);
