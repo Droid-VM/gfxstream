@@ -157,7 +157,30 @@ struct SpinCount {
         static const bool on = getenv("GFXSTREAM_ASG_SPIN_TRACE") != nullptr;
         return on;
     }
-    static void NotePacket() { sPackets.fetch_add(1, std::memory_order_relaxed); }
+    // The gap between one packet arriving and the next, bucketed.
+    //
+    // Every count this session measured came out identical between the trees -- the same opcodes,
+    // batches and replays per frame -- so if a consumer here spins more, the work is not arriving
+    // differently in quantity but in time. Thirteen opcodes spread evenly across a frame and
+    // thirteen delivered in a burst followed by silence are the same count and a completely
+    // different amount of spinning, and nothing measured so far can tell them apart.
+    //
+    // Per-thread so two consumers do not interleave into a meaningless series.
+    static void NotePacket() {
+        sPackets.fetch_add(1, std::memory_order_relaxed);
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+        static thread_local uint64_t sLast = 0;
+        if (sLast) {
+            const uint64_t gapUs = (now - sLast) / 1000;
+            static constexpr uint64_t kEdges[] = {10, 50, 100, 500, 1000, 5000};
+            size_t i = 0;
+            while (i < 6 && gapUs >= kEdges[i]) ++i;
+            sGaps[i].fetch_add(1, std::memory_order_relaxed);
+        }
+        sLast = now;
+    }
     static void NoteSpins(uint64_t n, bool parked) {
         sSpins.fetch_add(n, std::memory_order_relaxed);
         if (parked) sParks.fetch_add(1, std::memory_order_relaxed);
@@ -167,14 +190,20 @@ struct SpinCount {
         const uint64_t packets = sPackets.exchange(0, std::memory_order_relaxed);
         const uint64_t spins = sSpins.exchange(0, std::memory_order_relaxed);
         const uint64_t parks = sParks.exchange(0, std::memory_order_relaxed);
+        uint64_t g[7];
+        for (size_t i = 0; i < 7; ++i) g[i] = sGaps[i].exchange(0, std::memory_order_relaxed);
         GFXSTREAM_WARNING(
             "ASGSPIN over %llu waits: %llu spins, %llu parks, %llu packets -> %llu spins/packet, "
-            "%llu parks/packet",
+            "%llu parks/100pkt | gap us <10:%llu <50:%llu <100:%llu <500:%llu <1k:%llu <5k:%llu "
+            "5k+:%llu",
             (unsigned long long)kEvery, (unsigned long long)spins, (unsigned long long)parks,
             (unsigned long long)packets, (unsigned long long)(packets ? spins / packets : 0),
-            (unsigned long long)(packets ? parks * 100 / packets : 0));
+            (unsigned long long)(packets ? parks * 100 / packets : 0), (unsigned long long)g[0],
+            (unsigned long long)g[1], (unsigned long long)g[2], (unsigned long long)g[3],
+            (unsigned long long)g[4], (unsigned long long)g[5], (unsigned long long)g[6]);
     }
     static inline std::atomic<uint64_t> sSpins{0}, sParks{0}, sPackets{0}, sWaits{0};
+    static inline std::atomic<uint64_t> sGaps[7] = {};
 };
 }  // namespace
 
