@@ -3273,6 +3273,28 @@ class VkDecoderGlobalState::Impl {
             return VK_ERROR_OUT_OF_HOST_MEMORY;
         }
 
+        // What the guest asks a scanout-capable image to be. A guest compositor's swapchain images
+        // are created here and bound to guest pool memory, so this format alone decides the byte
+        // order of everything the display consumer later reads -- there is no host colour buffer
+        // in that path to consult. When the picture comes out with red and blue exchanged, the
+        // question is always whether this agrees with the DRM fourcc the guest declared for the
+        // same buffer, and nothing recorded it. Bounded: one line per distinct format and usage.
+        if (pCreateInfo->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) {
+            static std::mutex sSeenMutex;
+            static std::set<std::pair<VkFormat, VkImageUsageFlags>> sSeen;
+            bool firstTime = false;
+            {
+                std::lock_guard<std::mutex> seenLock(sSeenMutex);
+                firstTime = sSeen.insert({pCreateInfo->format, pCreateInfo->usage}).second;
+            }
+            if (firstTime) {
+                GFXSTREAM_INFO("Guest colour-attachment image: %s %ux%u usage=0x%x tiling=%d",
+                               string_VkFormat(pCreateInfo->format), pCreateInfo->extent.width,
+                               pCreateInfo->extent.height, pCreateInfo->usage,
+                               (int)pCreateInfo->tiling);
+            }
+        }
+
         // Change creation parameters before the validation checks below as the
         // creation format and its device properties may change
         const bool needDecompression = deviceInfo->needEmulatedDecompression(pCreateInfo->format);
