@@ -149,6 +149,37 @@ ParseGfxstreamFeatures(const int rendererFlags,
         &features, VulkanRobustness,
         gfxstream::base::getEnvironmentVariable("GFXSTREAM_VULKAN_ROBUSTNESS") != "0");
 
+#if defined(__ANDROID__)
+    // On Android the platform default for external memory is AndroidAHB and nothing else --
+    // calculateMode()'s Android list is one entry long, with no fd fallback. That is wrong for
+    // this route twice over. The host driver here is Mesa turnip, whose exports are dma-buf fds;
+    // and every host-visible blob, the GpuPool and the guest-alloc slice are dma-buf all the way
+    // down, so a ColorBuffer exported as an AHardwareBuffer cannot be handed to any of them. A
+    // host that picks AHB advertises external memory it cannot actually share, and the guest
+    // renders into memory nothing scans out.
+    //
+    // OpaqueFd is the mode that means "fd", and it upgrades itself to
+    // VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT wherever the driver reports
+    // VK_EXT_external_memory_dma_buf, which turnip does. Set before the feature string is parsed,
+    // so an explicit VulkanExternalMemoryMode:... there still wins; GFXSTREAM_EXTERNAL_MEMORY_MODE
+    // is the same escape hatch for a launcher that cannot reach the feature string.
+    //
+    // On a host driver with no fd export -- the closed Adreno blob -- this resolves to
+    // NotSupported rather than silently falling back to AHB. That is deliberate: the AHB route
+    // cannot back host-visible coherent memory on this stack at all, so failing where the mode is
+    // chosen is far easier to read than a black screen several layers down.
+    {
+        const std::string modeOverride =
+            gfxstream::base::getEnvironmentVariable("GFXSTREAM_EXTERNAL_MEMORY_MODE");
+        const std::string mode = modeOverride.empty() ? "OpaqueFd" : modeOverride;
+        if (!features.processFeatureString("VulkanExternalMemoryMode:" + mode,
+                                           "DroidVM default: the host driver exports dma-buf")) {
+            GFXSTREAM_ERROR("Could not select the external memory mode: %s", mode.c_str());
+            return std::nullopt;
+        }
+    }
+#endif
+
     for (const std::string& rendererFeature : gfxstream::Split(rendererFeatures, ",;")) {
         if (rendererFeature.empty()) continue;
 
