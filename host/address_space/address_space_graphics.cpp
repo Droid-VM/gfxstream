@@ -19,11 +19,39 @@
 
 #include "gfxstream/AlignedBuf.h"
 #include "gfxstream/host/address_space_device.h"
+#include <stdlib.h>
+
 #include "gfxstream/common/logging.h"
 #include "gfxstream/host/sub_allocator.h"
 #include "render-utils/address_space_operations.h"
 
 namespace gfxstream {
+
+// How far ahead of this side the guest is allowed to get before it starts busy-waiting.
+//
+// The guest computes maxOutstanding = buffer_size / flush_interval - 1 and then, in
+// AddressSpaceStream::writeFully, spins on the ring's read position until it drops below that --
+// with no yield, no backoff and no ping, unlike every other wait on that path. At the shipped
+// 1MB / 256KB that is three transfers, so the guest holds a vCPU the moment this side falls even
+// slightly behind, and holding it is what keeps this side from being scheduled to catch up.
+//
+// Raising the buffer raises the allowance and shortens the spin. It is not free: this is the ASG
+// write buffer, it comes out of the boot-time GpuPool on this route, and there is one per guest
+// context. Left at the shipped value; the variable exists so the cost of the spin can be measured
+// against the cost of the memory on one build.
+static uint64_t asgWriteBufferSize() {
+    static const uint64_t kSize = [] {
+        if (const char* e = getenv("GFXSTREAM_ASG_WRITE_BUFFER_SIZE")) {
+            char* end = nullptr;
+            const unsigned long long v = strtoull(e, &end, 0);
+            // A step is the smallest useful buffer, and the guest divides by it.
+            if (end != e && v >= (unsigned long long)host::kAsgWriteStepSize) return (uint64_t)v;
+        }
+        return (uint64_t)host::kAsgWriteBufferSize;
+    }();
+    return kSize;
+}
+
 namespace host {
 
 struct AllocationCreateInfo {
@@ -213,7 +241,7 @@ class Globals {
 
     Allocation allocBuffer() {
         struct AllocationCreateInfo create = {};
-        create.size = kAsgWriteBufferSize;
+        create.size = asgWriteBufferSize();
         return newAllocation(create, mBufferBlocks);
     }
 
@@ -228,7 +256,7 @@ class Globals {
         }
 
         struct AllocationCreateInfo create = {};
-        create.size = kAsgConsumerRingStorageSize + kAsgWriteBufferSize;
+        create.size = kAsgConsumerRingStorageSize + asgWriteBufferSize();
         create.dedicatedContextHandle = asgCreate.handle;
         create.virtioGpu = true;
         if (asgCreate.externalAddr) {
@@ -253,7 +281,7 @@ class Globals {
     Allocation allocBufferViewIntoCombined(const Allocation& alloc) {
         Allocation res = alloc;
         res.buffer = alloc.buffer + kAsgConsumerRingStorageSize;
-        res.size = kAsgWriteBufferSize;
+        res.size = asgWriteBufferSize();
         res.isView = true;
         return res;
     }
@@ -541,7 +569,7 @@ AddressSpaceGraphicsContext::AddressSpaceGraphicsContext(
             .version = mVersion,
             .ring_storage = mRingAllocation.buffer,
             .buffer = mBufferAllocation.buffer,
-            .buffer_size = kAsgWriteBufferSize,
+            .buffer_size = (uint32_t)asgWriteBufferSize(),
             .buffer_flush_interval = kAsgWriteStepSize,
             .callbacks = mConsumerCallbacks,
             .virtioGpuContextId = mVirtioGpuInfo ?
@@ -589,7 +617,7 @@ void AddressSpaceGraphicsContext::perform(AddressSpaceDevicePingInfo* info) {
             .version = mVersion,
             .ring_storage = mRingAllocation.buffer,
             .buffer = mBufferAllocation.buffer,
-            .buffer_size = kAsgWriteBufferSize,
+            .buffer_size = (uint32_t)asgWriteBufferSize(),
             .buffer_flush_interval = kAsgWriteStepSize,
             .callbacks = mConsumerCallbacks,
             .virtioGpuContextId = mVirtioGpuInfo ?
@@ -720,7 +748,7 @@ bool AddressSpaceGraphicsContext::load(gfxstream::Stream* stream) {
             .version = mVersion,
             .ring_storage = mRingAllocation.buffer,
             .buffer = mBufferAllocation.buffer,
-            .buffer_size = kAsgWriteBufferSize,
+            .buffer_size = (uint32_t)asgWriteBufferSize(),
             .buffer_flush_interval = kAsgWriteStepSize,
             .callbacks = mConsumerCallbacks,
             .virtioGpuContextId = mVirtioGpuInfo ?
