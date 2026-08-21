@@ -172,6 +172,7 @@ struct SpinCount {
         uint64_t episodes = 0, spins = 0, parks = 0, reads = 0, packets = 0, events = 0;
         uint64_t gaps[7] = {};
         uint64_t lastPacketNs = 0;
+        uint64_t stallStartNs = 0;
         char name[20] = {};
     };
     static Counts& Mine() {
@@ -191,6 +192,35 @@ struct SpinCount {
     }
     static void NoteEntry() { ++Mine().reads; }
     static void NoteEpisode() { ++Mine().episodes; }
+
+    // A stall, caught while it is happening rather than inferred from a histogram afterwards.
+    //
+    // The gap distribution says most packets arrive faster than they used to and about one in a
+    // hundred takes over five milliseconds, and that thin tail is where the time goes. An average
+    // cannot say what those hundred-fold waits have in common; a line printed from inside one can.
+    //
+    // The threshold sits far above a normal wait (a handful of turns) and far below the park
+    // budget, so a healthy consumer never reaches it and pays a compare per turn for the privilege.
+    static constexpr uint32_t kStallSpins = 500;
+    static void NoteStallBegin(uint32_t writePos, uint32_t readPos, uint32_t state,
+                               uint32_t avail) {
+        Counts& c = Mine();
+        c.stallStartNs = NowNs();
+        GFXSTREAM_WARNING(
+            "ASGSTALL[%s] begin: spins=%u write=%u read=%u state=%u avail=%u",
+            c.name[0] ? c.name : "?", kStallSpins, writePos, readPos, state, avail);
+    }
+    static void NoteStallEnd(uint32_t spins, uint32_t writePos, uint32_t readPos, uint32_t state,
+                             uint32_t avail, bool parked) {
+        Counts& c = Mine();
+        if (!c.stallStartNs) return;
+        const uint64_t us = (NowNs() - c.stallStartNs) / 1000;
+        c.stallStartNs = 0;
+        GFXSTREAM_WARNING(
+            "ASGSTALL[%s] end: %s after %uus, spins=%u write=%u read=%u state=%u avail=%u",
+            c.name[0] ? c.name : "?", parked ? "parked" : "got data", (unsigned)us, spins, writePos,
+            readPos, state, avail);
+    }
     static void NotePacket() {
         Counts& c = Mine();
         ++c.packets;
@@ -406,6 +436,12 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                 mContext.to_host_large_xfer.ring,
                 &mContext.to_host_large_xfer.view);
 
+        if (SpinCount::Enabled() && spins && (ringAvailable || ringLargeXferAvailable)) {
+            SpinCount::NoteStallEnd(spins, mContext.to_host->write_pos, mContext.to_host->read_pos,
+                                    (unsigned)*(mContext.host_state), ringAvailable,
+                                    /* parked */ false);
+        }
+
         auto current = dst + count;
         auto ptrEnd = dst + wanted;
 
@@ -450,6 +486,12 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
             if (SpinCount::Enabled()) {
                 if (spins == 1) SpinCount::NoteEpisode();
                 SpinCount::NoteSpins(1, /* parked */ false);
+                if (spins == SpinCount::kStallSpins) {
+                    SpinCount::NoteStallBegin(mContext.to_host->write_pos,
+                                              mContext.to_host->read_pos,
+                                              (unsigned)*(mContext.host_state),
+                                              ring_buffer_available_read(mContext.to_host, 0));
+                }
             }
             uint32_t sleepUs = UINT32_MAX;  // past the last stage -> park
             for (const SpinLevel& level : spinLevels) {
@@ -465,6 +507,13 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                     gfxstream::base::sleepUs(sleepUs);
                 }
                 continue;
+            }
+            if (SpinCount::Enabled()) {
+                SpinCount::NoteStallEnd(spins, mContext.to_host->write_pos,
+                                        mContext.to_host->read_pos,
+                                        (unsigned)*(mContext.host_state),
+                                        ring_buffer_available_read(mContext.to_host, 0),
+                                        /* parked */ true);
             }
             spins = 0;
             if (SpinCount::Enabled()) SpinCount::NoteSpins(0, /* parked */ true);
