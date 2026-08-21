@@ -819,6 +819,9 @@ int VirtioGpuResource::GetCaching(uint32_t* outCaching) const {
 // copy into display buffers.
 int VirtioGpuResource::TransferRead(uint64_t offset, stream_renderer_box* box,
                                     std::optional<std::vector<struct iovec>> iovs) {
+    // A blob-backed resource never had iovs attached, so it has no staging buffer yet.
+    EnsureLinearAllocated();
+
     // First, copy from the underlying backend resource to this resource's linear buffer:
     int ret = 0;
     if (mResourceType == VirtioGpuResourceType::BLOB) {
@@ -854,6 +857,8 @@ int VirtioGpuResource::TransferRead(uint64_t offset, stream_renderer_box* box,
 // Corresponds to Virtio GPU "TransferToHost" commands.
 int VirtioGpuResource::TransferWrite(uint64_t offset, stream_renderer_box* box,
                                      std::optional<std::vector<struct iovec>> iovs) {
+    EnsureLinearAllocated();
+
     // First, copy from the desired iov to this resource's linear buffer:
     int ret = 0;
     if (iovs) {
@@ -880,6 +885,26 @@ int VirtioGpuResource::TransferWrite(uint64_t offset, stream_renderer_box* box,
         GFXSTREAM_ERROR("Failed to transfer: unhandled resource type.");
         return -EINVAL;
     }
+}
+
+void VirtioGpuResource::EnsureLinearAllocated() {
+    if (!mLinear.empty() || !mCreateArgs) {
+        return;
+    }
+
+    // Must match what ReadFrom*ToLinear() and TransferWithIov() require, or those reject the
+    // transfer with "mLinear is too small!" -- which is where this used to end up as a nullptr
+    // dereference instead: a blob resource skips AttachIov entirely, so readColorBuffer wrote to
+    // mLinear.data() == nullptr and took the host down on the first scanout readback.
+    const size_t linearSize =
+        GetTransferSize(mCreateArgs->format, mCreateArgs->width, mCreateArgs->height, 0, 0,
+                        mCreateArgs->width, mCreateArgs->height);
+    if (linearSize == 0) {
+        // Unsupported format; leave mLinear empty and let the existing guards report it.
+        return;
+    }
+
+    mLinear.resize(linearSize, 0);
 }
 
 int VirtioGpuResource::ReadFromPipeToLinear(uint64_t offset, stream_renderer_box* box) {
