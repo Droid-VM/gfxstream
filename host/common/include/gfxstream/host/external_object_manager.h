@@ -132,6 +132,12 @@ struct BlobDescriptorInfo {
 
 using SyncDescriptorInfo = GenericDescriptorInfo;
 
+// Android's BlobDescriptorType is a raw handle with no RAII, so any path that drops one without
+// consuming it has to close or release it explicitly, or the dma-buf fd / AHardwareBuffer
+// reference leaks for the life of the process. A no-op everywhere else, where the descriptor is a
+// ManagedDescriptor that closes itself. Idempotent: the handle is cleared.
+void CloseBlobDescriptor(BlobDescriptorType& descriptorInfo);
+
 class ExternalObjectManager {
    public:
     ExternalObjectManager() = default;
@@ -145,6 +151,10 @@ class ExternalObjectManager {
                                uint32_t streamHandleType, uint32_t caching,
                                std::optional<VulkanInfo> vulkanInfoOpt, int64_t poolOffset = -1);
     std::optional<BlobDescriptorInfo> removeBlobDescriptorInfo(uint32_t ctx_id, uint64_t blobId);
+    // Drop -- and on Android close -- every blob descriptor of a context that no
+    // RESOURCE_CREATE_BLOB ever picked up. Called when the context is destroyed, so an orphaned
+    // export cannot outlive it.
+    void removeContextBlobDescriptorInfos(uint32_t ctx_id);
 
     void addSyncDescriptorInfo(uint32_t ctx_id, uint64_t syncId, ManagedDescriptor descriptor,
                                uint32_t streamHandleType);

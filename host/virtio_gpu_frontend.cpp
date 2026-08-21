@@ -216,6 +216,11 @@ int VirtioGpuFrontend::destroyContext(VirtioGpuCtxId contextId) {
 
     context.Destroy(get_gfxstream_address_space_ops());
 
+    // Blob descriptors this context exported but no RESOURCE_CREATE_BLOB ever picked up have no
+    // other owner, and on Android nothing closes them: they held a dma-buf fd each for the life of
+    // the process. Measured at +17 leaked fds per Minecraft launch.
+    ExternalObjectManager::get()->removeContextBlobDescriptorInfos(contextId);
+
     mContexts.erase(contextIt);
     return 0;
 }
