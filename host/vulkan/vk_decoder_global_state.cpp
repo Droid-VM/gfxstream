@@ -4276,6 +4276,29 @@ class VkDecoderGlobalState::Impl {
         // one call, it blocks in the driver rather than spinning, and it holds no lock of ours.
         // One sweep afterwards turns "the fence signalled" into "the tracked operation completed"
         // for the bookkeeping.
+        // Which half of this wait costs anything decides what to do about it, and the two answers
+        // want opposite fixes: if the fences are already signalled and the time goes into the
+        // sweep, stop making completion depend on being swept; if they are genuinely still in
+        // flight, stop the guest having to wait for them here at all. So measure before choosing.
+        // The zero-timeout probe below is what separates them, and it is the number that matters:
+        // the old tree recorded 100% already-signalled in 5us, and if this tree is lower then the
+        // guest is being made to wait on the GPU on a synchronous path.
+        //
+        // GFXSTREAM_RESETFENCE_TRACE=1; reports every 5s. Off, this costs one bool test per call.
+        static const bool kResetFenceTrace = [] {
+            const char* env = getenv("GFXSTREAM_RESETFENCE_TRACE");
+            return env && env[0] != '0';
+        }();
+        static std::atomic<uint64_t> sCalls{0}, sWithPending{0}, sWaitNs{0}, sSweepNs{0},
+            sAlreadySignalled{0}, sFenceCount{0};
+        static std::atomic<uint64_t> sLastReportNs{0};
+        const auto traceNowNs = [] {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+        };
+        if (kResetFenceTrace) sCalls.fetch_add(1, std::memory_order_relaxed);
+
         if (!pendingUses.empty()) {
             {
                 std::lock_guard<std::mutex> lock(mMutex);
@@ -4291,12 +4314,28 @@ class VkDecoderGlobalState::Impl {
                 }
             }
 
+            if (kResetFenceTrace) {
+                sWithPending.fetch_add(1, std::memory_order_relaxed);
+                sFenceCount.fetch_add(pendingUseFences.size(), std::memory_order_relaxed);
+            }
+
             VkResult waitRes = VK_SUCCESS;
             if (!pendingUseFences.empty()) {
+                // A zero-timeout probe purely to record whether the wait below had anything to
+                // wait for. One extra driver call on a path that already makes several, and only
+                // when the trace is on.
+                if (kResetFenceTrace &&
+                    vk->vkWaitForFences(device, (uint32_t)pendingUseFences.size(),
+                                        pendingUseFences.data(), VK_TRUE, 0) == VK_SUCCESS) {
+                    sAlreadySignalled.fetch_add(1, std::memory_order_relaxed);
+                }
                 static constexpr uint64_t kFenceWaitTimeoutNs = 5ULL * 1000 * 1000 * 1000;
+                const uint64_t waitT0 = kResetFenceTrace ? traceNowNs() : 0;
                 waitRes = vk->vkWaitForFences(device, (uint32_t)pendingUseFences.size(),
                                               pendingUseFences.data(), VK_TRUE,
                                               kFenceWaitTimeoutNs);
+                if (kResetFenceTrace)
+                    sWaitNs.fetch_add(traceNowNs() - waitT0, std::memory_order_relaxed);
                 if (waitRes != VK_SUCCESS) {
                     // A fence that never signals must not hang the guest thread that reset it.
                     // The tracker expires such an operation on its own after five seconds.
@@ -4316,6 +4355,7 @@ class VkDecoderGlobalState::Impl {
             // measured at roughly 3.7ms a call and a quarter of all host dispatch. It also lands
             // on a guest-facing path, which is exactly what the tracker's own sweeper thread
             // exists to avoid.
+            const uint64_t sweepT0 = kResetFenceTrace ? traceNowNs() : 0;
             if (!pendingUseFences.empty() && waitRes == VK_SUCCESS) {
                 tracker->CompleteOpsForSignalledFences(pendingUseFences.data(),
                                                        (uint32_t)pendingUseFences.size());
@@ -4324,6 +4364,31 @@ class VkDecoderGlobalState::Impl {
                 // NOT known to be signalled -- marking those operations complete would let objects
                 // still referenced by them be destroyed. Fall back to asking the driver.
                 tracker->PollAndProcessGarbage();
+            }
+            if (kResetFenceTrace)
+                sSweepNs.fetch_add(traceNowNs() - sweepT0, std::memory_order_relaxed);
+        }
+
+        if (kResetFenceTrace) {
+            const uint64_t now = traceNowNs();
+            uint64_t last = sLastReportNs.load(std::memory_order_relaxed);
+            if (now - last > 5000000000ull &&
+                sLastReportNs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+                const uint64_t calls = sCalls.exchange(0, std::memory_order_relaxed);
+                const uint64_t pend = sWithPending.exchange(0, std::memory_order_relaxed);
+                const uint64_t sig = sAlreadySignalled.exchange(0, std::memory_order_relaxed);
+                const uint64_t fences = sFenceCount.exchange(0, std::memory_order_relaxed);
+                const uint64_t waitNs = sWaitNs.exchange(0, std::memory_order_relaxed);
+                const uint64_t sweepNs = sSweepNs.exchange(0, std::memory_order_relaxed);
+                GFXSTREAM_WARNING(
+                    "RESETFENCETRACE: %llu calls, %llu had a pending use (%llu of those had the "
+                    "fence already signalled, %llu fences waited on); wait %lluus total (%lluus "
+                    "each), sweep %lluus total (%lluus each)",
+                    (unsigned long long)calls, (unsigned long long)pend, (unsigned long long)sig,
+                    (unsigned long long)fences, (unsigned long long)(waitNs / 1000),
+                    (unsigned long long)(pend ? waitNs / pend / 1000 : 0),
+                    (unsigned long long)(sweepNs / 1000),
+                    (unsigned long long)(pend ? sweepNs / pend / 1000 : 0));
             }
         }
 
