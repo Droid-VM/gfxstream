@@ -176,6 +176,11 @@ struct SpinCount {
         uint64_t lastPacketNs = 0;
         uint64_t stallStartNs = 0;
         uint64_t stallStartNotifies = 0;
+        // The reply path. commitBuffer spins on sched_yield until the guest drains from_host, and
+        // does not back off for ten million turns, so "the host is waiting for the guest to read
+        // its answer" is invisible unless it is counted here. Duration buckets in microseconds.
+        uint64_t writes = 0, writeSpun = 0, writeIters = 0, writeUs = 0;
+        uint64_t writeGaps[7] = {};
         // Process name plus thread id. The name alone is not an identity: crosvm names each render
         // thread after the guest process it serves, and a guest process gets one ring per thread
         // that touches Vulkan -- eleven for plasmashell, eight for kwin_wayland on this device. A
@@ -250,6 +255,32 @@ struct SpinCount {
         }
         c.lastPacketNs = now;
     }
+    static void NoteWrite(uint64_t iters, uint64_t us) {
+        Counts& c = Mine();
+        ++c.writes;
+        c.writeIters += iters;
+        c.writeUs += us;
+        if (iters > 1) ++c.writeSpun;
+        static constexpr uint64_t kEdges[] = {10, 50, 100, 500, 1000, 5000};
+        size_t i = 0;
+        while (i < 6 && us >= kEdges[i]) ++i;
+        ++c.writeGaps[i];
+        constexpr uint64_t kEvery = 2000;
+        if (c.writes % kEvery) return;
+        // Raw counts, same discipline as ASGSPIN: a mean here would hide the tail, and the tail is
+        // the entire question.
+        GFXSTREAM_WARNING(
+            "ASGWRITE[%s] raw: writes=%llu spun=%llu iters=%llu totalus=%llu | us <10:%llu "
+            "<50:%llu <100:%llu <500:%llu <1k:%llu <5k:%llu 5k+:%llu",
+            c.name[0] ? c.name : "?", (unsigned long long)c.writes,
+            (unsigned long long)c.writeSpun, (unsigned long long)c.writeIters,
+            (unsigned long long)c.writeUs, (unsigned long long)c.writeGaps[0],
+            (unsigned long long)c.writeGaps[1], (unsigned long long)c.writeGaps[2],
+            (unsigned long long)c.writeGaps[3], (unsigned long long)c.writeGaps[4],
+            (unsigned long long)c.writeGaps[5], (unsigned long long)c.writeGaps[6]);
+        c.writes = c.writeSpun = c.writeIters = c.writeUs = 0;
+        for (auto& g : c.writeGaps) g = 0;
+    }
     static void NoteSpins(uint64_t n, bool parked) {
         Counts& c = Mine();
         c.spins += n;
@@ -288,6 +319,7 @@ int RingStream::commitBuffer(size_t size) {
     size_t sent = 0;
     auto data = mWriteBuffer.data();
 
+    const uint64_t writeT0 = SpinCount::Enabled() ? SpinCount::NowNs() : 0;
     size_t iters = 0;
     size_t backedOffIters = 0;
     const size_t kBackoffIters = 10000000ULL;
@@ -320,6 +352,10 @@ int RingStream::commitBuffer(size_t size) {
             data + sent, todo, 1);
 
         sent += todo;
+    }
+
+    if (SpinCount::Enabled()) {
+        SpinCount::NoteWrite(iters, (SpinCount::NowNs() - writeT0) / 1000);
     }
 
     if (backedOffIters > 0) {
