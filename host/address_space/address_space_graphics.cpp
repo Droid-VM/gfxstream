@@ -48,18 +48,20 @@ std::atomic<uint64_t>& asgNotifyCount() {
 // write buffer, it comes out of the boot-time GpuPool on this route, and there is one per guest
 // context. Left at the shipped value; the variable exists so the cost of the spin can be measured
 // against the cost of the memory on one build.
-static uint64_t asgWriteBufferSize() {
+namespace host {
+uint64_t asgWriteBufferSize() {
     static const uint64_t kSize = [] {
         if (const char* e = getenv("GFXSTREAM_ASG_WRITE_BUFFER_SIZE")) {
             char* end = nullptr;
             const unsigned long long v = strtoull(e, &end, 0);
             // A step is the smallest useful buffer, and the guest divides by it.
-            if (end != e && v >= (unsigned long long)host::kAsgWriteStepSize) return (uint64_t)v;
+            if (end != e && v >= (unsigned long long)kAsgWriteStepSize) return (uint64_t)v;
         }
-        return (uint64_t)host::kAsgWriteBufferSize;
+        return (uint64_t)kAsgWriteBufferSize;
     }();
     return kSize;
 }
+}  // namespace host
 
 namespace host {
 

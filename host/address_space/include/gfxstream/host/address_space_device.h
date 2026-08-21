@@ -27,6 +27,16 @@ constexpr const int kAsgWriteStepSize = 262144;
 constexpr const int kAsgDataRingSize = 524288;
 constexpr const int kAsgDrawFlushInterval = 10000;
 
+// The ASG write buffer size actually in force, which is kAsgWriteBufferSize unless
+// GFXSTREAM_ASG_WRITE_BUFFER_SIZE overrides it.
+//
+// Everything that has to agree on this number must read it from here. The host allocates the
+// buffer from it, and the guest sizes its ring blob and both ring_buffer_view masks from the
+// figure the capset reports -- so a source that does not follow the override has the two ends
+// masking the same memory differently, which shows up as a decoded packet with a nonsense
+// sType several seconds into a session rather than as anything resembling a size error.
+uint64_t asgWriteBufferSize();
+
 int gfxstream_address_space_save_memory_state(gfxstream::Stream* stream);
 int gfxstream_address_space_load_memory_state(gfxstream::Stream* stream);
 

@@ -666,12 +666,14 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
 
             capset->protocolVersion = 1;
             capset->ringSize = 12288;
-            // Must match the size RingStream is configured with (address_space_graphics.cpp uses
-            // kAsgWriteBufferSize for the same buffer): the guest allocates its ring blob from
-            // this figure, and a mismatch has one side reading past the end of what the other
-            // allocated. Two literals in different files agreeing today is not the same as them
-            // being the same number.
-            capset->bufferSize = static_cast<uint32_t>(gfxstream::host::kAsgWriteBufferSize);
+            // The guest allocates its ring blob from this figure and derives both
+            // ring_buffer_view masks from it, so a mismatch has one side reading past the end of
+            // what the other allocated. This used to be a second literal that happened to equal
+            // the one in address_space_graphics.cpp, with a comment noting that agreeing today is
+            // not the same as being the same number -- and then an environment override was added
+            // to that side only, which is exactly the failure the comment described. One
+            // accessor now, so there is nothing left to keep in step by hand.
+            capset->bufferSize = static_cast<uint32_t>(gfxstream::host::asgWriteBufferSize());
 
             auto* fb = FrameBuffer::getFB();
             if (fb->hasEmulationVk()) {
@@ -779,7 +781,7 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
 
             capset->protocolVersion = 1;
             capset->ringSize = 12288;
-            capset->bufferSize = static_cast<uint32_t>(gfxstream::host::kAsgWriteBufferSize);
+            capset->bufferSize = static_cast<uint32_t>(gfxstream::host::asgWriteBufferSize());
             capset->blobAlignment = mPageSize;
             break;
         }
@@ -789,7 +791,7 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
 
             capset->protocolVersion = 1;
             capset->ringSize = 12288;
-            capset->bufferSize = static_cast<uint32_t>(gfxstream::host::kAsgWriteBufferSize);
+            capset->bufferSize = static_cast<uint32_t>(gfxstream::host::asgWriteBufferSize());
             capset->blobAlignment = mPageSize;
             break;
         }
