@@ -32,10 +32,18 @@ namespace host {
 //
 // So they stay, and they stay off. GFXSTREAM_DIAG=1 turns them on. Read once, so a site that is
 // off costs a load and a branch.
+// The first thing it prints is that it is on. Without that line there is no way to tell a
+// diagnostic that found nothing from a diagnostic that never ran -- a run with no output is
+// evidence of nothing until something proves the switch reached this process. Printed from the
+// initialiser, so it appears exactly once and before any site that could report.
 inline bool diagEnabled() {
     static const bool enabled = [] {
         const char* v = getenv("GFXSTREAM_DIAG");
-        return v && v[0] && strcmp(v, "0") != 0;
+        const bool on = v && v[0] && strcmp(v, "0") != 0;
+        if (on) {
+            fprintf(stderr, "GFXSTREAM-DIAG-ON: diagnostics enabled (GFXSTREAM_DIAG=%s)\n", v);
+        }
+        return on;
     }();
     return enabled;
 }
