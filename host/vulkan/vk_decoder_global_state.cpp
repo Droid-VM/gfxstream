@@ -6333,6 +6333,57 @@ class VkDecoderGlobalState::Impl {
         const VkCreateBlobGOOGLE* createBlobInfoPtr =
             vk_find_struct<VkCreateBlobGOOGLE>(pAllocateInfo);
 
+        // A guest-pool blob imported by someone who did not create it. The guest names it the only
+        // way it can -- VkImportColorBufferGOOGLE with the virtio resource -- and there is no
+        // colour buffer behind that number, because the buffer is a gbm bo the winsys made on
+        // another context. That is the compositor's scanout buffer, and refusing it is what kills
+        // kwin two seconds into a session ("couldn't allocate memory: heap=0 size=3686400").
+        //
+        // The dma-buf for that resource is on file. Rewrite the request into the guest-blob import
+        // that would have been made had the importer known the blob id: seed the retained
+        // descriptor under a resource-derived id and let the ordinary path below pick it up.
+        VkCreateBlobGOOGLE syntheticBlobInfo = {};
+#if defined(__linux__) || defined(__ANDROID__)
+        if (!createBlobInfoPtr && (importCbInfoPtr || importBufferInfoPtr)) {
+            const uint32_t resHandle =
+                importCbInfoPtr ? importCbInfoPtr->colorBuffer : importBufferInfoPtr->buffer;
+            uint64_t unusedSize = 0;
+            uint32_t unusedTypeIndex = 0;
+            bool unusedDedicated = false;
+            void* unusedMapped = nullptr;
+            const bool known =
+                importCbInfoPtr
+                    ? m_vkEmulation->getColorBufferAllocationInfo(
+                          resHandle, &unusedSize, &unusedTypeIndex, &unusedDedicated, &unusedMapped)
+                    : m_vkEmulation->getBufferAllocationInfo(resHandle, &unusedSize,
+                                                             &unusedTypeIndex, &unusedDedicated);
+            if (!known) {
+                int fd = ExternalObjectManager::get()->dupGuestBlobResourceDescriptor(resHandle);
+                if (fd >= 0) {
+                    // Distinct from any guest-minted id, which is (pid << 32) | counter.
+                    const uint64_t syntheticId = 0xFFFFFFFF00000000ull | (uint64_t)resHandle;
+                    {
+                        std::lock_guard<std::mutex> lock(mGuestBlobFdsMutex);
+                        auto it = mGuestBlobFds.find(syntheticId);
+                        if (it != mGuestBlobFds.end()) close(it->second);
+                        mGuestBlobFds[syntheticId] = fd;
+                    }
+                    syntheticBlobInfo.sType = VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE;
+                    syntheticBlobInfo.blobMem = STREAM_BLOB_MEM_GUEST;
+                    syntheticBlobInfo.blobFlags = STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE;
+                    syntheticBlobInfo.blobId = syntheticId;
+                    createBlobInfoPtr = &syntheticBlobInfo;
+                    importCbInfoPtr = nullptr;
+                    importBufferInfoPtr = nullptr;
+                    GFXSTREAM_DIAG_PRINT(
+                        "GUESTBLOB-REIMPORT: resource=%u bound through its own dma-buf "
+                        "(no colour buffer)\n",
+                        resHandle);
+                }
+            }
+        }
+#endif
+
 #ifdef _WIN32
         VkImportMemoryWin32HandleInfoKHR importWin32HandleInfo{
             VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
@@ -6663,6 +6714,14 @@ class VkDecoderGlobalState::Impl {
         if (emulateHostVisible) {
             if (createBlobInfoPtr && createBlobInfoPtr->blobMem == STREAM_BLOB_MEM_GUEST &&
                 (createBlobInfoPtr->blobFlags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
+                // Pairs with GUESTBLOB-CREATE: this is the memory the GPU will actually render
+                // into, named by the id the display side can be matched against. The display side
+                // knows resources and this side knows blob ids; without the pair, "kwin scans out
+                // 46/52/62 while the GPU is bound to 39/40/41" can be observed but not
+                // interpreted.
+                GFXSTREAM_DIAG_PRINT("GUESTBLOB-BIND: blobId=%llu size=%llu\n",
+                                     (unsigned long long)createBlobInfoPtr->blobId,
+                                     (unsigned long long)localAllocInfo.allocationSize);
 // An Android host DOES use dma-buf on this route. The guest carves a slice of the host-accessible
 // gfx-guest pool and the VMM wraps it in a udmabuf; importing it here is what makes the host GPU
 // read and write the SAME pages the guest does. The `#if defined(__ANDROID__)` no-op this replaces
@@ -6692,9 +6751,34 @@ class VkDecoderGlobalState::Impl {
                         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                     }
 #endif
+                    // A guest blob can back more than one VkDeviceMemory: a compositor binds its
+                    // GBM bo in one context and imports the same bo's fd in another. The manager
+                    // entry is consumed by this first allocation, so keep a dup of our own for
+                    // every one after it.
+                    {
+                        std::lock_guard<std::mutex> lock(mGuestBlobFdsMutex);
+                        const uint64_t key = createBlobInfoPtr->blobId;
+                        int keep = dup((int)rawDescriptor);
+                        if (keep >= 0) {
+                            auto it = mGuestBlobFds.find(key);
+                            if (it != mGuestBlobFds.end()) close(it->second);
+                            mGuestBlobFds[key] = keep;
+                        }
+                    }
                 } else {
-                    GFXSTREAM_ERROR("Failed vkAllocateMemory: missing descriptor info.");
-                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    // Second or later allocation against the same guest blob: the manager entry is
+                    // gone, but the retained dup is as good as the original.
+                    int retained = -1;
+                    {
+                        std::lock_guard<std::mutex> lock(mGuestBlobFdsMutex);
+                        auto it = mGuestBlobFds.find(createBlobInfoPtr->blobId);
+                        if (it != mGuestBlobFds.end()) retained = dup(it->second);
+                    }
+                    if (retained < 0) {
+                        GFXSTREAM_ERROR("Failed vkAllocateMemory: missing descriptor info.");
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
+                    rawDescriptor = (DescriptorType)retained;
                 }
 
                 if (!m_vkEmulation->supportsDmaBuf() || !deviceHasDmabufExt) {
@@ -7606,18 +7690,35 @@ class VkDecoderGlobalState::Impl {
 
             auto exportedMemoryOpt = exportMemoryHandle(deviceInfo, vk, device, memory);
             if (!exportedMemoryOpt) {
-                return VK_ERROR_OUT_OF_HOST_MEMORY;
-            }
-            auto& exportedMemory = *exportedMemoryOpt;
+                // Memory that arrived here as an import -- a colour buffer's dma-buf backing a
+                // dedicated image, say -- was not allocated with an export chain, and the driver
+                // refuses to re-export it. That is no reason to deny the guest a mapping: on this
+                // hardware every memory type is host-visible, so map it and publish the host
+                // address the way the non-external-blob path below does. The guest's blob then
+                // resolves through the address mapping instead of a descriptor.
+                if (!info->needUnmap) {
+                    VkResult mapResult =
+                        vk->vkMapMemory(device, memory, 0, info->size, 0, &info->ptr);
+                    if (mapResult != VK_SUCCESS) {
+                        GFXSTREAM_ERROR(
+                            "vkGetBlobInternal: memory is neither exportable nor mappable (%d)",
+                            mapResult);
+                        return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    }
+                    info->needUnmap = true;
+                }
+            } else {
+                auto& exportedMemory = *exportedMemoryOpt;
 #ifdef __ANDROID__
-            auto& descriptor = exportedMemory.handle;
+                auto& descriptor = exportedMemory.handle;
 #else
-            auto& descriptor = exportedMemory.descriptor;
+                auto& descriptor = exportedMemory.descriptor;
 #endif
-            ExternalObjectManager::get()->addBlobDescriptorInfo(
-                virtioGpuContextId, hostBlobId, std::move(descriptor),
-                exportedMemory.streamHandleType, info->caching,
-                std::optional<VulkanInfo>(vulkanInfo));
+                ExternalObjectManager::get()->addBlobDescriptorInfo(
+                    virtioGpuContextId, hostBlobId, std::move(descriptor),
+                    exportedMemory.streamHandleType, info->caching,
+                    std::optional<VulkanInfo>(vulkanInfo));
+            }
         } else if (!info->needUnmap) {
             VkResult mapResult = vk->vkMapMemory(device, memory, 0, info->size, 0, &info->ptr);
             if (mapResult != VK_SUCCESS) {
@@ -7663,7 +7764,19 @@ class VkDecoderGlobalState::Impl {
                                                  uint64_t* pSize, uint64_t* pHostmemId) {
         uint64_t hostBlobId = sNextHostBlobId++;
         *pHostmemId = hostBlobId;
-        return vkGetBlobInternal(boxed_device, memory, hostBlobId);
+        VkResult result = vkGetBlobInternal(boxed_device, memory, hostBlobId);
+        // The size out-parameter was never written, so the guest saw zero and built zero-size GEM
+        // objects from it, then failed with ENOSPC. On the export path the guest has no size of
+        // its own; this reply is the only place one can come from.
+        if (result == VK_SUCCESS) {
+            std::lock_guard<std::mutex> lock(mMutex);
+            auto* info = gfxstream::base::find(mMemoryInfo, memory);
+            if (info) {
+                *pSize = info->size;
+                *pAddress = 0;
+            }
+        }
+        return result;
     }
 
     VkResult on_vkFreeMemorySyncGOOGLE(gfxstream::base::BumpPool* pool,
@@ -11434,6 +11547,11 @@ class VkDecoderGlobalState::Impl {
     std::unordered_map<VkDescriptorUpdateTemplate, DescriptorUpdateTemplateInfo>
         mDescriptorUpdateTemplateInfo GUARDED_BY(mMutex);
     std::unordered_map<VkDeviceMemory, MemoryInfo> mMemoryInfo GUARDED_BY(mMutex);
+    // Retained dups of guest-blob dma-buf fds, keyed by blob id: a consumed manager entry cannot
+    // serve a second allocation against the same blob, these can. Its own lock, because it is
+    // taken on the allocate path before mMutex is.
+    std::mutex mGuestBlobFdsMutex;
+    std::unordered_map<uint64_t, int> mGuestBlobFds;
     std::unordered_map<VkFence, FenceInfo> mFenceInfo GUARDED_BY(mMutex);
     std::unordered_map<VkFramebuffer, FramebufferInfo> mFramebufferInfo GUARDED_BY(mMutex);
     std::unordered_map<VkImage, ImageInfo> mImageInfo GUARDED_BY(mMutex);

@@ -560,6 +560,13 @@ void VirtioGpuFrontend::unrefResource(uint32_t resourceId) {
         detachResource(contextId, resourceId);
     }
 
+    // Drop the guest-blob dma-buf kept for this resource id. Ids are recycled by the guest, so an
+    // entry left here outlives the buffer it names: the next resource handed the same id is
+    // imported against its predecessor's pages, the GPU renders into memory nothing scans out, and
+    // the display goes black -- intermittently, depending on whether an id happens to be reused
+    // before it is imported again.
+    ExternalObjectManager::get()->removeGuestBlobResourceDescriptor(resourceId);
+
     resource.Destroy();
 
     // Hand this resource's ring blob, if it has one, back to the recycle pool so its pages stay
@@ -894,11 +901,6 @@ int VirtioGpuFrontend::createBlob(uint32_t contextId, uint32_t resourceId,
 int VirtioGpuFrontend::resourceMap(uint32_t resourceId, void** hvaOut, uint64_t* sizeOut) {
     D("resource: %u", resourceId);
 
-    if (mFeatures.ExternalBlob.enabled()) {
-        GFXSTREAM_ERROR("Failed to map resource: external blob enabled.");
-        return -EINVAL;
-    }
-
     auto it = mResources.find(resourceId);
     if (it == mResources.end()) {
         if (hvaOut) *hvaOut = nullptr;
@@ -908,6 +910,11 @@ int VirtioGpuFrontend::resourceMap(uint32_t resourceId, void** hvaOut, uint64_t*
         return -EINVAL;
     }
 
+    // ExternalBlob mode used to refuse every host-pointer map here, on the theory that everything
+    // is descriptor-exported. Memory the driver declines to re-export -- an imported colour buffer
+    // backing a dedicated image -- is registered as a host-address mapping instead, and mapping it
+    // here is the only way the guest ever sees it. Let the resource decide: Map() succeeds only
+    // for ring- and mapping-backed blobs, which are exactly the ones this is safe for.
     auto& resource = it->second;
     return resource.Map(hvaOut, sizeOut);
 }

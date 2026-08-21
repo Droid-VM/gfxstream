@@ -143,6 +143,35 @@ std::optional<BlobDescriptorInfo> ExternalObjectManager::removeBlobDescriptorInf
     return std::nullopt;
 }
 
+void ExternalObjectManager::addGuestBlobResourceDescriptor(uint32_t resHandle, int fd) {
+    if (fd < 0) return;
+    int keep = dup(fd);
+    if (keep < 0) return;
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto found = mGuestBlobResourceFds.find(resHandle);
+    if (found != mGuestBlobResourceFds.end()) {
+        close(found->second);
+        found->second = keep;
+        return;
+    }
+    mGuestBlobResourceFds[resHandle] = keep;
+}
+
+int ExternalObjectManager::dupGuestBlobResourceDescriptor(uint32_t resHandle) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto found = mGuestBlobResourceFds.find(resHandle);
+    if (found == mGuestBlobResourceFds.end()) return -1;
+    return dup(found->second);
+}
+
+void ExternalObjectManager::removeGuestBlobResourceDescriptor(uint32_t resHandle) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto found = mGuestBlobResourceFds.find(resHandle);
+    if (found == mGuestBlobResourceFds.end()) return;
+    close(found->second);
+    mGuestBlobResourceFds.erase(found);
+}
+
 void ExternalObjectManager::addSyncDescriptorInfo(uint32_t ctxId, uint64_t syncId,
                                                   ManagedDescriptor descriptor,
                                                   uint32_t streamHandleType) {
