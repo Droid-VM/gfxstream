@@ -2756,10 +2756,25 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
                     memcpy((void*)pData, *readStreamPtrPtr, sizeof(const uint8_t));
                     *readStreamPtrPtr += sizeof(const uint8_t);
                 }
+                // SECURITY: pData is untyped -- its size and layout are defined by the
+                // descriptor update template -- but this codegen path copies exactly one byte of
+                // it into a one-pointer stack buffer. Handing that to the driver makes it read
+                // past the buffer according to the template's entries and dereference garbage
+                // descriptor handles, which is a guest-triggerable host crash. pData cannot be
+                // reconstructed here, so the driver is never called for a raw with-template op.
+                //
+                // The guest ICD unrolls push-descriptor-with-template into a typed
+                // vkCmdPushDescriptorSet write array before it reaches the host, so this case is
+                // not taken in practice; if a raw op does arrive, that draw's descriptors are
+                // simply not pushed -- wrong pixels for that guest, never a dead host.
                 if (CC_LIKELY(vk)) {
-                    vk->vkCmdPushDescriptorSetWithTemplate((VkCommandBuffer)dispatchHandle,
-                                                           descriptorUpdateTemplate, layout, set,
-                                                           pData);
+                    static bool warnedPushTemplate = false;
+                    if (!warnedPushTemplate) {
+                        warnedPushTemplate = true;
+                        GFXSTREAM_ERROR(
+                            "Declining a raw vkCmdPushDescriptorSetWithTemplate: its pData cannot "
+                            "be decoded here. The guest should be unrolling these.");
+                    }
                 }
                 if (snapshotsEnabled()) {
                     this->snapshot()->vkCmdPushDescriptorSetWithTemplate(
@@ -2856,9 +2871,17 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
                         globalstate,
                         (VkPushDescriptorSetWithTemplateInfo*)(pPushDescriptorSetWithTemplateInfo));
                 }
+                // Same defect as vkCmdPushDescriptorSetWithTemplate above: the pData inside
+                // VkPushDescriptorSetWithTemplateInfo is untyped and arrives here decoded as one
+                // byte. Never handed to the driver.
                 if (CC_LIKELY(vk)) {
-                    vk->vkCmdPushDescriptorSetWithTemplate2((VkCommandBuffer)dispatchHandle,
-                                                            pPushDescriptorSetWithTemplateInfo);
+                    static bool warnedPushTemplate2 = false;
+                    if (!warnedPushTemplate2) {
+                        warnedPushTemplate2 = true;
+                        GFXSTREAM_ERROR(
+                            "Declining a raw vkCmdPushDescriptorSetWithTemplate2: its pData cannot "
+                            "be decoded here.");
+                    }
                 }
                 if (snapshotsEnabled()) {
                     this->snapshot()->vkCmdPushDescriptorSetWithTemplate2(

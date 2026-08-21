@@ -5566,9 +5566,21 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         (unsigned long long)pDataSize, (unsigned long long)pData);
                 }
                 VkResult vkGetPipelineCacheData_VkResult_return = VK_ERROR_OUT_OF_HOST_MEMORY;
-                if (CC_LIKELY(vk)) {
+                // A handle the guest has already destroyed unwraps to null here, and the driver
+                // dereferences it without checking: crosvm dies with SIGSEGV at fault_addr 0x40
+                // inside vk_common_GetPipelineCacheData. Reproducible by restarting a KDE session
+                // a couple of times -- Qt asks every process for its pipeline cache on the way
+                // out, and a teardown racing the last of those calls takes the whole VM with it.
+                //
+                // The guest cannot be trusted to have a live handle here, so answer for it. An
+                // empty cache is a truthful answer to "what is in a cache that no longer exists",
+                // and it is the one answer that cannot take the host down.
+                if (CC_LIKELY(vk) && pipelineCache != VK_NULL_HANDLE) {
                     vkGetPipelineCacheData_VkResult_return =
                         vk->vkGetPipelineCacheData(unboxed_device, pipelineCache, pDataSize, pData);
+                } else if (pipelineCache == VK_NULL_HANDLE) {
+                    if (pDataSize) *pDataSize = 0;
+                    vkGetPipelineCacheData_VkResult_return = VK_SUCCESS;
                 }
                 if ((vkGetPipelineCacheData_VkResult_return) == VK_ERROR_DEVICE_LOST)
                     m_state->on_DeviceLost();

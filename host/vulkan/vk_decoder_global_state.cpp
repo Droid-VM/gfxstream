@@ -1326,10 +1326,19 @@ class VkDecoderGlobalState::Impl {
         if (vkCleanupEnabled()) {
             m_vkEmulation->getCallbacks().registerProcessCleanupCallback(
                 unbox_VkInstance(boxed), contextId, [this, boxed] {
+                    // try_, not unbox_: this callback outlives the instance whenever the guest
+                    // destroys it after the cleanup list has been copied out of its lock, and by
+                    // then the boxed handle has been deleted. Unboxing a deleted handle hands
+                    // back whatever now occupies that slot, and destroying that would take out a
+                    // live instance belonging to someone else.
+                    VkInstance instance = try_unbox_VkInstance(boxed);
+                    if (instance == VK_NULL_HANDLE) {
+                        return;
+                    }
                     if (snapshotsEnabled()) {
                         snapshot()->vkDestroyInstance(nullptr, kInvalidSnapshotApiCallHandle, nullptr, 0, boxed, nullptr);
                     }
-                    vkDestroyInstanceImpl(unbox_VkInstance(boxed));
+                    vkDestroyInstanceImpl(instance);
                 });
         }
 
@@ -11317,6 +11326,12 @@ class VkDecoderGlobalState::Impl {
     }
 
     void destroyInstanceObjects(InstanceObjects& objects) {
+        // The extraction that produced this returns without filling the node in when the instance
+        // is already gone -- a cleanup callback racing the guest's own vkDestroyInstance -- and a
+        // node handle that holds nothing has no key() or mapped() to read.
+        if (objects.instance.empty()) {
+            return;
+        }
         VkInstance instance = objects.instance.key();
         InstanceInfo& instanceInfo = objects.instance.mapped();
         LOG_CALLS_VERBOSE(
