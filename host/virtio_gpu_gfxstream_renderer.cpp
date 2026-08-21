@@ -134,6 +134,20 @@ ParseGfxstreamFeatures(const int rendererFlags,
                                        rendererFlags & STREAM_RENDERER_FLAGS_USE_EXTERNAL_BLOB ||
                                            features.VulkanAllocateHostVisibleAsUdmabuf.enabled());
     GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(&features, VulkanEnsureCachedCoherentMemoryAvailable, true);
+    // zink -- the guest compositor's GL driver -- needs the nullDescriptor feature of
+    // VK_EXT_robustness2. The guest ICD reports the capability, but the only thing that makes the
+    // feature actually reach vkCreateDevice is the force-enable in vk_decoder_global_state.cpp,
+    // and that is gated on this flag, which nothing on the virtio-gpu path ever set. Without it
+    // every null descriptor is a raw address-0 read: a kgsl GPU PAGE FAULT (UCHE, addr=0) per
+    // draw, and black frames.
+    //
+    // Opt-out rather than opt-in because a host that gets this wrong renders nothing at all,
+    // while the cost of having it on is bounds checking the driver was going to be asked for
+    // anyway. It is set before the renderer-features string is parsed, so an explicit
+    // "VulkanRobustness:0" there still wins.
+    GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
+        &features, VulkanRobustness,
+        gfxstream::base::getEnvironmentVariable("GFXSTREAM_VULKAN_ROBUSTNESS") != "0");
 
     for (const std::string& rendererFeature : gfxstream::Split(rendererFeatures, ",;")) {
         if (rendererFeature.empty()) continue;

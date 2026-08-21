@@ -36,6 +36,7 @@
 #include "vulkan/vk_common_operations.h"
 // TODO: remove after moving save/load interface to ops.
 #include "gfxstream/common/logging.h"
+#include "gfxstream/host/address_space_device.h"
 #include "gfxstream/host/address_space_graphics.h"
 #include "gfxstream/host/file_stream.h"
 #include "gfxstream/host/tracing.h"
@@ -665,7 +666,12 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
 
             capset->protocolVersion = 1;
             capset->ringSize = 12288;
-            capset->bufferSize = 1048576;
+            // Must match the size RingStream is configured with (address_space_graphics.cpp uses
+            // kAsgWriteBufferSize for the same buffer): the guest allocates its ring blob from
+            // this figure, and a mismatch has one side reading past the end of what the other
+            // allocated. Two literals in different files agreeing today is not the same as them
+            // being the same number.
+            capset->bufferSize = static_cast<uint32_t>(gfxstream::host::kAsgWriteBufferSize);
 
             auto* fb = FrameBuffer::getFB();
             if (fb->hasEmulationVk()) {
@@ -773,7 +779,7 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
 
             capset->protocolVersion = 1;
             capset->ringSize = 12288;
-            capset->bufferSize = 1048576;
+            capset->bufferSize = static_cast<uint32_t>(gfxstream::host::kAsgWriteBufferSize);
             capset->blobAlignment = mPageSize;
             break;
         }
@@ -783,7 +789,7 @@ void VirtioGpuFrontend::fillCaps(uint32_t set, void* caps) {
 
             capset->protocolVersion = 1;
             capset->ringSize = 12288;
-            capset->bufferSize = 1048576;
+            capset->bufferSize = static_cast<uint32_t>(gfxstream::host::kAsgWriteBufferSize);
             capset->blobAlignment = mPageSize;
             break;
         }
