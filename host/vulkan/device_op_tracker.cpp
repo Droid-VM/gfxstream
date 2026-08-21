@@ -340,20 +340,27 @@ void DeviceOpTracker::CompleteOpsForSignalledFences(const VkFence* fences, uint3
     std::deque<PendingOp> completed;
     {
         std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
-        // Entries are in submission order and the queue is short (single digits in practice), so a
-        // linear scan is cheaper than any index would be -- and unlike a sweep, it touches no
-        // driver state at all.
-        for (auto it = mPollFunctions.begin(); it != mPollFunctions.end();) {
-            const bool matches =
-                it->fence != VK_NULL_HANDLE &&
-                std::find(fences, fences + fenceCount, it->fence) != fences + fenceCount;
+        // One pass, partitioning into survivors and matches, rather than erasing matches where
+        // they sit. Erasing from the middle of a deque is itself linear, so the obvious loop is
+        // quadratic in the number of matches -- which was fine under the assumption this code was
+        // written with, that the queue holds single digits because a sweep ran from every submit
+        // and every destroy. It no longer does: sweeping moved to a thread that runs twice a
+        // second, so the queue holds whatever half a second of submissions amounts to, and this
+        // runs on a per-frame path with the guest blocked on the answer.
+        //
+        // Order is preserved and no driver state is touched, exactly as before.
+        std::deque<PendingOp> survivors;
+        for (PendingOp& op : mPollFunctions) {
+            const bool matches = op.fence != VK_NULL_HANDLE &&
+                                 std::find(fences, fences + fenceCount, op.fence) !=
+                                     fences + fenceCount;
             if (matches) {
-                completed.push_back(std::move(*it));
-                it = mPollFunctions.erase(it);
+                completed.push_back(std::move(op));
             } else {
-                ++it;
+                survivors.push_back(std::move(op));
             }
         }
+        mPollFunctions.swap(survivors);
     }
 
     // Fulfil off the lock: a promise's continuation runs on whoever fulfils it, and holding the
