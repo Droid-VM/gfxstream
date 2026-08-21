@@ -34,6 +34,7 @@ files_lib_vulkan_server = files(
   'vk_format_support.cpp',
   'vk_format_utils.cpp',
   'vk_reconstruction.cpp',
+  'decoder_profile.cpp',
   'vk_utils.cpp',
   'vk_vvl_configuration.cpp',
   'vulkan_boxed_handles.cpp',

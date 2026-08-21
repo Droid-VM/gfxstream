@@ -3693,6 +3693,30 @@ class VkDecoderGlobalState::Impl {
         auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
         auto* imageInfo = gfxstream::base::find(mImageInfo, pCreateInfo->image);
         if (!deviceInfo || !imageInfo) return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+        // A view whose format differs from its image reinterprets the bytes already there --
+        // legal on a MUTABLE_FORMAT image, which the guest ICD sets on every image it creates.
+        // That makes it one of the two ways the scanout's declared format and its actual channel
+        // order can come apart. One line per distinct (image, view) format pair.
+        if (imageInfo->imageCreateInfoShallow.format != pCreateInfo->format) {
+            static std::mutex sViewSeenMutex;
+            static std::set<std::pair<VkFormat, VkFormat>> sViewSeen;
+            bool firstTime = false;
+            {
+                std::lock_guard<std::mutex> seenLock(sViewSeenMutex);
+                firstTime =
+                    sViewSeen.insert({imageInfo->imageCreateInfoShallow.format, pCreateInfo->format})
+                        .second;
+            }
+            if (firstTime) {
+                GFXSTREAM_DIAG_PRINT("VIEW-FORMAT: image=%s view=%s %ux%u\n",
+                                     string_VkFormat(imageInfo->imageCreateInfoShallow.format),
+                                     string_VkFormat(pCreateInfo->format),
+                                     imageInfo->imageCreateInfoShallow.extent.width,
+                                     imageInfo->imageCreateInfoShallow.extent.height);
+            }
+        }
+
         VkImageViewCreateInfo createInfo;
         bool needEmulatedAlpha = false;
         if (deviceInfo->needEmulatedDecompression(pCreateInfo->format)) {
@@ -5554,6 +5578,29 @@ class VkDecoderGlobalState::Impl {
         auto* srcImg = gfxstream::base::find(mImageInfo, srcImage);
         auto* dstImg = gfxstream::base::find(mImageInfo, dstImage);
         if (!srcImg || !dstImg) return;
+
+        // vkCmdCopyImage between two formats of the same block size moves the bytes verbatim --
+        // no channel conversion. So a copy across formats is the other way the declared format
+        // and the actual channel order can come apart. One line per distinct (src, dst) pair.
+        if (srcImg->imageCreateInfoShallow.format != dstImg->imageCreateInfoShallow.format) {
+            static std::mutex sCopySeenMutex;
+            static std::set<std::pair<VkFormat, VkFormat>> sCopySeen;
+            bool firstTime = false;
+            {
+                std::lock_guard<std::mutex> seenLock(sCopySeenMutex);
+                firstTime = sCopySeen
+                                .insert({srcImg->imageCreateInfoShallow.format,
+                                         dstImg->imageCreateInfoShallow.format})
+                                .second;
+            }
+            if (firstTime) {
+                GFXSTREAM_DIAG_PRINT("COPY-FORMAT: src=%s dst=%s %ux%u\n",
+                                     string_VkFormat(srcImg->imageCreateInfoShallow.format),
+                                     string_VkFormat(dstImg->imageCreateInfoShallow.format),
+                                     dstImg->imageCreateInfoShallow.extent.width,
+                                     dstImg->imageCreateInfoShallow.extent.height);
+            }
+        }
 
         VkDevice device = srcImg->device;
         auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);

@@ -46,6 +46,7 @@
 #include "frame_buffer.h"
 #include "gfxstream/BumpPool.h"
 #include "gfxstream/common/logging.h"
+#include "decoder_profile.h"
 #include "gfxstream/host/iostream.h"
 #include "gfxstream/host/tracing.h"
 #include "gfxstream/system/System.h"
@@ -145,12 +146,19 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
     auto& gfx_logger = *context.gfxApiLogger;
     auto& shouldExit = *context.shouldExit;
     if (len < 8) return 0;
+    const uint64_t profileBatchStart = decoderProfileBegin();
+    decoderProfileResetNesting();
+    uint64_t profilePackets = 0;
     unsigned char* ptr = (unsigned char*)buf;
     const unsigned char* const end = (const unsigned char*)buf + len;
     while (end - ptr >= 8) {
         const uint8_t* packet = (const uint8_t*)ptr;
         uint32_t opcode;
         std::memcpy(&opcode, ptr, sizeof(uint32_t));
+
+        // A generated file, so keep the footprint to these few lines: the logic lives in
+        // decoder_profile.cpp and a codegen refresh only has to have them re-added.
+        const uint64_t profileStart = decoderProfileBegin();
 
         uint32_t packetLen;
         std::memcpy(&packetLen, ptr + 4, sizeof(uint32_t));
@@ -23293,9 +23301,14 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             m_state->snapshot()->destroyApiCallInfoIfUnused(snapshotApiCallHandle);
         }
 
+        decoderProfileEnd(opcode, profileStart);
+        ++profilePackets;
+
         ptr += packetLen;
         vkStream->clearPool();
     }
+    decoderProfileBatch(profilePackets,
+                        profileBatchStart ? decoderProfileNow() - profileBatchStart : 0);
     m_pool.freeAll();
     return ptr - (unsigned char*)buf;
     ;
