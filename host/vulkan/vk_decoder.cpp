@@ -32,10 +32,15 @@
 
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <optional>
+#include <set>
+#include <string>
 #include <unordered_map>
+#include <utility>
 
 #include "common/goldfish_vk_marshaling.h"
+#include "gfxstream_diag.h"
 #include "common/goldfish_vk_reserved_marshaling.h"
 #include "common/goldfish_vk_transform.h"
 #include "frame_buffer.h"
@@ -96,6 +101,26 @@ class VkDecoder::Impl {
     bool m_queueSubmitWithCommandsEnabled = false;
     const bool m_snapshotsEnabled = false;
 };
+
+// An opcode with no case falls to default:, which returns without consuming the packet and
+// without advancing the sequence counter. The render thread's read loop then asks for one more
+// byte and decodes the same bytes again, and again, for every byte that arrives -- and because
+// this path never reaches an epilogue, every other render thread of the same guest process blocks
+// in the sequence-number wait on a number that will never arrive. A single unknown opcode wedges
+// a whole guest process, and nothing said so.
+//
+// Bounded: one line per (process, opcode) pair, a few hundred at most for the life of the host.
+static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32_t packetLen) {
+    static std::mutex sMutex;
+    static std::set<std::pair<std::string, uint32_t>> sSeen;
+    const std::string name = processName ? processName : "null";
+    std::lock_guard<std::mutex> lock(sMutex);
+    if (!sSeen.insert({name, opcode}).second) return;
+    GFXSTREAM_STALL_PRINT(
+        "DECODE-UNKNOWN: process=%s opcode=%u packetLen=%u -- no case for this opcode, the stream "
+        "stalls here permanently\n",
+        name.c_str(), opcode, packetLen);
+}
 
 VkDecoder::VkDecoder() : mImpl(new VkDecoder::Impl()) {}
 
@@ -23200,6 +23225,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             }
 #endif
             default: {
+                note_unknown_opcode(processName, opcode, packetLen);
                 if (m_snapshotsEnabled) {
                     m_state->snapshot()->destroyApiCallInfoIfUnused(snapshotApiCallHandle);
                 }
