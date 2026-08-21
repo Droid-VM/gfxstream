@@ -3738,25 +3738,44 @@ class VkDecoderGlobalState::Impl {
         // was printed" is worth nothing unless something proves this site ran and saw the image in
         // question. A line saying image and view agree is that proof, and it also answers what the
         // render target actually is when the answer turns out not to be a swapped view.
+        // The components field is the other half of what a view can change, and the half that is
+        // easy to forget: a non-identity swizzle makes every sample come out in a different
+        // channel order than the image holds, which is how a renderer can write mirrored bytes
+        // through an attachment whose format is perfectly correct. zink sets exactly this kind of
+        // swizzle on sampler views (zink_context.c), while render-target views are always identity
+        // -- so the one to look for sits on the texture being read, not on the scanout.
+        auto swizzleIsIdentity = [](const VkComponentMapping& c) {
+            auto ok = [](VkComponentSwizzle s, VkComponentSwizzle want) {
+                return s == VK_COMPONENT_SWIZZLE_IDENTITY || s == want;
+            };
+            return ok(c.r, VK_COMPONENT_SWIZZLE_R) && ok(c.g, VK_COMPONENT_SWIZZLE_G) &&
+                   ok(c.b, VK_COMPONENT_SWIZZLE_B) && ok(c.a, VK_COMPONENT_SWIZZLE_A);
+        };
+        const bool viewSwizzled = !swizzleIsIdentity(pCreateInfo->components);
         const bool viewFormatDiffers =
             imageInfo->imageCreateInfoShallow.format != pCreateInfo->format;
-        if (viewFormatDiffers || imageInfo->imageCreateInfoShallow.extent.width >= 1024) {
+        if (viewFormatDiffers || viewSwizzled ||
+            imageInfo->imageCreateInfoShallow.extent.width >= 1024) {
             static std::mutex sViewSeenMutex;
-            static std::set<std::pair<VkFormat, VkFormat>> sViewSeen;
+            static std::set<std::tuple<VkFormat, VkFormat, bool>> sViewSeen;
             bool firstTime = false;
             {
                 std::lock_guard<std::mutex> seenLock(sViewSeenMutex);
                 firstTime =
-                    sViewSeen.insert({imageInfo->imageCreateInfoShallow.format, pCreateInfo->format})
+                    sViewSeen
+                        .insert({imageInfo->imageCreateInfoShallow.format, pCreateInfo->format,
+                                 viewSwizzled})
                         .second;
             }
             if (firstTime) {
-                GFXSTREAM_DIAG_PRINT("VIEW-FORMAT: %s image=%s view=%s %ux%u\n",
-                                     viewFormatDiffers ? "MISMATCH" : "match",
-                                     string_VkFormat(imageInfo->imageCreateInfoShallow.format),
-                                     string_VkFormat(pCreateInfo->format),
-                                     imageInfo->imageCreateInfoShallow.extent.width,
-                                     imageInfo->imageCreateInfoShallow.extent.height);
+                GFXSTREAM_DIAG_PRINT(
+                    "VIEW-FORMAT: %s%s image=%s view=%s swizzle=%d,%d,%d,%d %ux%u\n",
+                    viewFormatDiffers ? "MISMATCH" : "match", viewSwizzled ? "+SWIZZLED" : "",
+                    string_VkFormat(imageInfo->imageCreateInfoShallow.format),
+                    string_VkFormat(pCreateInfo->format), (int)pCreateInfo->components.r,
+                    (int)pCreateInfo->components.g, (int)pCreateInfo->components.b,
+                    (int)pCreateInfo->components.a, imageInfo->imageCreateInfoShallow.extent.width,
+                    imageInfo->imageCreateInfoShallow.extent.height);
             }
         }
 
