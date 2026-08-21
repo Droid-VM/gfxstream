@@ -2478,6 +2478,44 @@ class VkDecoderGlobalState::Impl {
             result = vk->vkCreateDevice(physicalDevice, &createInfoFiltered, nullptr, pDevice);
         }
 
+        if (result == VK_ERROR_FEATURE_NOT_PRESENT) {
+            // Some Android host drivers -- the phone's stock Adreno HAL, which is a selectable
+            // host ICD -- reject VkPhysicalDeviceVulkan13Features outright when any of its fields
+            // is VK_TRUE, even for features they do support through the individual extension
+            // structs. Zero the aggregate and try once more, keeping the struct in the chain so
+            // the driver still sees a 1.3 device.
+            //
+            // Retry rather than doing this unconditionally: on Mesa turnip, which is the host
+            // driver this route is built for and which accepts the aggregate, zeroing it up front
+            // would silently take every Vulkan 1.3 feature away from the guest. A driver that
+            // needs the workaround pays one extra failed vkCreateDevice; a driver that does not
+            // never notices.
+            if (auto* vk13 =
+                    vk_find_struct<VkPhysicalDeviceVulkan13Features>(&createInfoFiltered)) {
+                const void* savedNext = vk13->pNext;
+                bool anySet = false;
+                for (const VkBool32* f = &vk13->robustImageAccess;
+                     f <= &vk13->maintenance4; ++f) {
+                    if (*f) {
+                        anySet = true;
+                        break;
+                    }
+                }
+                if (anySet) {
+                    *vk13 = VkPhysicalDeviceVulkan13Features{
+                        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                        .pNext = const_cast<void*>(savedNext),
+                    };
+                    GFXSTREAM_WARNING(
+                        "vkCreateDevice rejected VkPhysicalDeviceVulkan13Features; retrying with "
+                        "it zeroed. The 1.3 features the guest asked for reach this driver through "
+                        "their individual extension structs, if at all.");
+                    result =
+                        vk->vkCreateDevice(physicalDevice, &createInfoFiltered, nullptr, pDevice);
+                }
+            }
+        }
+
         if (result != VK_SUCCESS) {
             GFXSTREAM_WARNING("Failed to create VkDevice: %s.", string_VkResult(result));
 
@@ -2834,11 +2872,6 @@ class VkDecoderGlobalState::Impl {
         }
 
         const VkFormat format = pInfo->pCreateInfo->format;
-        bool needDecompression = isEtc2(format) || isAstc(format);
-        if (!needDecompression) {
-            // No modifications needed
-            return;
-        }
 
         std::lock_guard<std::mutex> lock(mMutex);
 
@@ -2848,31 +2881,37 @@ class VkDecoderGlobalState::Impl {
             return;
         }
 
-        needDecompression = deviceInfo->needEmulatedDecompression(format);
-        if (!needDecompression) {
-            // No modifications needed
-            return;
-        }
+        if ((isEtc2(format) || isAstc(format)) && deviceInfo->needEmulatedDecompression(format)) {
+            // Create CompressedImageInfo on the fly to get requirements to use when creating the
+            // image
+            CompressedImageInfo cmpInfo =
+                CompressedImageInfo(device, *pInfo->pCreateInfo, deviceInfo->decompPipelines.get());
+            {
+                VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo);
+                VkImage tempImage;
+                VkResult createRes = vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
+                if (createRes != VK_SUCCESS) {
+                    GFXSTREAM_ERROR("%s: vkCreateImage failed for decompression: %s", __func__,
+                                    string_VkResult(createRes));
+                    return;
+                }
 
-        // Create CompressedImageInfo on the fly to get requirements to use when creating the image
-        CompressedImageInfo cmpInfo =
-            CompressedImageInfo(device, *pInfo->pCreateInfo, deviceInfo->decompPipelines.get());
-        {
-            VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo);
-            VkImage tempImage;
-            VkResult createRes = vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
-            if (createRes != VK_SUCCESS) {
-                GFXSTREAM_ERROR("%s: Failed to find device info for device: %p", __func__, device);
-                return;
+                cmpInfo.setOutputImage(tempImage);
+                cmpInfo.createCompressedMipmapImages(vk, decompInfo);
             }
 
-            cmpInfo.setOutputImage(tempImage);
-            cmpInfo.createCompressedMipmapImages(vk, decompInfo);
+            pMemoryRequirements->memoryRequirements = cmpInfo.getMemoryRequirements();
+            cmpInfo.destroy(vk);
         }
 
-        pMemoryRequirements->memoryRequirements = cmpInfo.getMemoryRequirements();
-        cmpInfo.destroy(vk);
-
+        // The host-to-guest memory type index mapping belongs on EVERY image, not only on the
+        // emulated-decompression formats: the two early returns this replaces handed the guest raw
+        // HOST memory type bits for every ordinary image. Every sibling handler here --
+        // on_vkGetImageMemoryRequirements, ...2, and the buffer pair -- applies it unconditionally,
+        // which is what makes this an oversight rather than an exemption. The guest then picks a
+        // memory type by index against its own emulated properties, so an unmapped set is not a
+        // near miss; it is a different type. Reached through maintenance4, so it stayed hidden
+        // until a guest driver started using vkGetDeviceImageMemoryRequirements.
         auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
         if (!physicalDeviceInfo) {
             GFXSTREAM_ERROR("Failed to find physical device info for physical device:%p",
