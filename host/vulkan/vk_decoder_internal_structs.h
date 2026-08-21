@@ -255,6 +255,11 @@ struct DeviceInfo {
 
     ExternalFenceInfo externalFenceInfo;
     VkPhysicalDevice physicalDevice;
+    // The instance this device was created under. Recorded at create time because
+    // PhysicalDeviceInfo::instance is overwritten by whichever instance last enumerated the
+    // (shared, and reused) host physdev handle -- selecting devices to co-destroy through that
+    // backpointer can destroy another instance's live device.
+    VkInstance parentInstance = VK_NULL_HANDLE;
     VkDevice boxed = nullptr;
     DebugUtilsHelper debugUtilsHelper = DebugUtilsHelper::withUtilsDisabled();
     std::unique_ptr<ExternalFencePool<VulkanDispatch>> externalFencePool = nullptr;

@@ -509,6 +509,61 @@ bool vkDispatchValid(const VulkanDispatch* vk) {
            vk->vkGetInstanceProcAddr != nullptr || vk->vkGetDeviceProcAddr != nullptr;
 }
 
+// Promoted-to-core entry points and the KHR names they came from. A driver may expose either
+// spelling -- vkGetInstanceProcAddr returns null for a core entry above the negotiated API
+// version, and for a KHR entry whose extension is not enabled -- so whichever exists fills in for
+// the other. The aliased prototypes are ABI-identical by definition of the promotion, which is
+// what makes the cast safe; do not add a pair without checking both members exist.
+#define GFXSTREAM_VK_DISPATCH_ALIASES(X)                                                          \
+    X(vkGetPhysicalDeviceFeatures2, vkGetPhysicalDeviceFeatures2KHR)                              \
+    X(vkGetPhysicalDeviceProperties2, vkGetPhysicalDeviceProperties2KHR)                          \
+    X(vkGetPhysicalDeviceFormatProperties2, vkGetPhysicalDeviceFormatProperties2KHR)              \
+    X(vkGetPhysicalDeviceImageFormatProperties2, vkGetPhysicalDeviceImageFormatProperties2KHR)    \
+    X(vkGetPhysicalDeviceQueueFamilyProperties2, vkGetPhysicalDeviceQueueFamilyProperties2KHR)    \
+    X(vkGetPhysicalDeviceMemoryProperties2, vkGetPhysicalDeviceMemoryProperties2KHR)              \
+    X(vkGetPhysicalDeviceExternalBufferProperties, vkGetPhysicalDeviceExternalBufferPropertiesKHR) \
+    X(vkGetPhysicalDeviceExternalFenceProperties, vkGetPhysicalDeviceExternalFencePropertiesKHR)  \
+    X(vkGetPhysicalDeviceExternalSemaphoreProperties,                                             \
+      vkGetPhysicalDeviceExternalSemaphorePropertiesKHR)                                          \
+    X(vkBindBufferMemory2, vkBindBufferMemory2KHR)                                                \
+    X(vkBindImageMemory2, vkBindImageMemory2KHR)                                                  \
+    X(vkGetBufferMemoryRequirements2, vkGetBufferMemoryRequirements2KHR)                          \
+    X(vkGetImageMemoryRequirements2, vkGetImageMemoryRequirements2KHR)                            \
+    X(vkGetBufferDeviceAddress, vkGetBufferDeviceAddressKHR)                                      \
+    X(vkCreateRenderPass2, vkCreateRenderPass2KHR)                                                \
+    X(vkCmdBeginRenderPass2, vkCmdBeginRenderPass2KHR)                                            \
+    X(vkCmdNextSubpass2, vkCmdNextSubpass2KHR)                                                    \
+    X(vkCmdEndRenderPass2, vkCmdEndRenderPass2KHR)                                                \
+    X(vkQueueSubmit2, vkQueueSubmit2KHR)                                                          \
+    X(vkCmdPipelineBarrier2, vkCmdPipelineBarrier2KHR)                                            \
+    X(vkCmdSetEvent2, vkCmdSetEvent2KHR)                                                          \
+    X(vkCmdResetEvent2, vkCmdResetEvent2KHR)                                                      \
+    X(vkCmdWaitEvents2, vkCmdWaitEvents2KHR)                                                      \
+    X(vkCmdWriteTimestamp2, vkCmdWriteTimestamp2KHR)                                              \
+    X(vkCmdCopyBuffer2, vkCmdCopyBuffer2KHR)                                                      \
+    X(vkCmdCopyImage2, vkCmdCopyImage2KHR)                                                        \
+    X(vkCmdCopyBufferToImage2, vkCmdCopyBufferToImage2KHR)                                        \
+    X(vkCmdCopyImageToBuffer2, vkCmdCopyImageToBuffer2KHR)                                        \
+    X(vkCmdBlitImage2, vkCmdBlitImage2KHR)                                                        \
+    X(vkCmdResolveImage2, vkCmdResolveImage2KHR)                                                  \
+    X(vkCmdBeginRendering, vkCmdBeginRenderingKHR)                                                \
+    X(vkCmdEndRendering, vkCmdEndRenderingKHR)                                                    \
+    X(vkGetDeviceBufferMemoryRequirements, vkGetDeviceBufferMemoryRequirementsKHR)                \
+    X(vkGetDeviceImageMemoryRequirements, vkGetDeviceImageMemoryRequirementsKHR)                  \
+    X(vkGetDeviceImageSparseMemoryRequirements, vkGetDeviceImageSparseMemoryRequirementsKHR)
+
+void fillMissingDispatchAliases(VulkanDispatch* vk) {
+    if (!vk) return;
+#define GFXSTREAM_VK_FILL_ALIAS(core, ext)                       \
+    if (!vk->core && vk->ext) {                                  \
+        vk->core = reinterpret_cast<decltype(vk->core)>(vk->ext); \
+    } else if (!vk->ext && vk->core) {                           \
+        vk->ext = reinterpret_cast<decltype(vk->ext)>(vk->core);  \
+    }
+    GFXSTREAM_VK_DISPATCH_ALIASES(GFXSTREAM_VK_FILL_ALIAS)
+#undef GFXSTREAM_VK_FILL_ALIAS
+}
+
 }  // namespace vk
 }  // namespace host
 }  // namespace gfxstream

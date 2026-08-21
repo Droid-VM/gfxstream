@@ -366,6 +366,14 @@ public:
 #ifndef _WIN32
         sigset_t set;
         sigfillset(&set);
+        // Keep the synchronous fault signals deliverable; see Thread::maskAllSignals().
+        sigdelset(&set, SIGSEGV);
+        sigdelset(&set, SIGBUS);
+        sigdelset(&set, SIGILL);
+        sigdelset(&set, SIGFPE);
+        sigdelset(&set, SIGABRT);
+        sigdelset(&set, SIGSYS);
+        sigdelset(&set, SIGTRAP);
         pthread_sigmask(SIG_SETMASK, &set, NULL);
 #endif
         bool running = true;

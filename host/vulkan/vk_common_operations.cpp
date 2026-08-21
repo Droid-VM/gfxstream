@@ -18,6 +18,7 @@
 #include <string.h>
 #include <vulkan/vk_enum_string_helper.h>
 
+#include <algorithm>
 #include <glm/gtc/type_ptr.hpp>
 #include <iomanip>
 #include <ostream>
@@ -78,6 +79,14 @@ using gfxstream::host::RepresentativeColorBufferMemoryTypeInfo;
 
 constexpr size_t kPageBits = 12;
 constexpr size_t kPageSize = 1u << kPageBits;
+
+// The instance API version to ask for, clamped to whatever the loader reports. It has to be at
+// least what the decoder advertises to the guest: vkGetDeviceProcAddr returns null for a core
+// entry point above the instance's version, so asking for less than the guest is told it has
+// leaves the promoted-to-core entry points -- vkQueueSubmit2, vkCmdPipelineBarrier2,
+// vkCmdBeginRendering and the rest -- unreachable whenever the guest uses the core spelling
+// instead of enabling the KHR extension, which a guest at 1.3 is entitled to do.
+constexpr uint32_t kTargetInstanceVersion = VK_MAKE_VERSION(1, 3, 0);
 
 static std::optional<std::string> sMemoryLogPath = std::nullopt;
 
@@ -940,7 +949,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
         if (VK_SUCCESS == res) {
             if (maxInstanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
                 GFXSTREAM_DEBUG("global loader has vkEnumerateInstanceVersion returning >= 1.1.");
-                appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
+                appInfo.apiVersion = std::min(maxInstanceVersion, kTargetInstanceVersion);
             }
         }
     }
@@ -974,6 +983,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     // Create instance level dispatch.
     emulation->mIvk = new VulkanDispatch();
     init_vulkan_dispatch_from_instance(gvk, emulation->mInstance, emulation->mIvk);
+    fillMissingDispatchAliases(emulation->mIvk);
 
     auto ivk = emulation->mIvk;
     if (!vulkan_dispatch_check_instance_VK_BASE_VERSION_1_0(ivk)) {
@@ -992,20 +1002,38 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             maxInstanceVersion = instanceVersion;
         }
 
-        if (appInfo.apiVersion < VK_MAKE_VERSION(1, 1, 0) &&
-            instanceVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        const uint32_t wantedVersion = std::min(instanceVersion, kTargetInstanceVersion);
+        if ((VK_SUCCESS == enumInstanceRes) && appInfo.apiVersion < wantedVersion) {
             GFXSTREAM_DEBUG("Found out that we can create a higher version instance.");
-            appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
+            appInfo.apiVersion = wantedVersion;
 
-            gvk->vkDestroyInstance(emulation->mInstance, nullptr);
+            // vkDestroyInstance is an instance-level command, so it belongs to the instance
+            // dispatch (ivk). The global dispatch's copy is null under a custom Vulkan loader that
+            // resolves globals through vkGetInstanceProcAddr(nullptr, ...). vkCreateInstance below
+            // is a genuine global command and stays on gvk.
+            ivk->vkDestroyInstance(emulation->mInstance, nullptr);
 
             res = gvk->vkCreateInstance(&instCi, nullptr, &emulation->mInstance);
+            if (res != VK_SUCCESS && appInfo.apiVersion > VK_MAKE_VERSION(1, 1, 0)) {
+                // The clamp above keeps the request within what the loader reported, so this
+                // should not happen -- but a driver that refuses the higher version must not cost
+                // us the renderer entirely. Drop back to the version this code has always asked
+                // for and try once more.
+                GFXSTREAM_WARNING("Failed to create a Vulkan %d.%d instance (%s); retrying at 1.1.",
+                                  VK_VERSION_MAJOR(appInfo.apiVersion),
+                                  VK_VERSION_MINOR(appInfo.apiVersion), string_VkResult(res));
+                appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
+                res = gvk->vkCreateInstance(&instCi, nullptr, &emulation->mInstance);
+            }
             if (res != VK_SUCCESS) {
-                GFXSTREAM_ERROR("Failed to create Vulkan 1.1 instance. Error %s.", string_VkResult(res));
+                GFXSTREAM_ERROR("Failed to create Vulkan %d.%d instance. Error %s.",
+                                VK_VERSION_MAJOR(appInfo.apiVersion),
+                                VK_VERSION_MINOR(appInfo.apiVersion), string_VkResult(res));
                 return nullptr;
             }
 
             init_vulkan_dispatch_from_instance(gvk, emulation->mInstance, emulation->mIvk);
+            fillMissingDispatchAliases(emulation->mIvk);
 
             GFXSTREAM_DEBUG("Created Vulkan 1.1 instance on second try.");
 
@@ -1564,6 +1592,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     // device created; populate dispatch table
     emulation->mDvk = new VulkanDispatch();
     init_vulkan_dispatch_from_device(ivk, emulation->mDevice, emulation->mDvk);
+    fillMissingDispatchAliases(emulation->mDvk);
 
     auto dvk = emulation->mDvk;
 
@@ -1796,8 +1825,11 @@ VkEmulation::~VkEmulation() {
         mIvk->vkDestroyDevice(mDevice, nullptr);
     }
 
-    if (mGvk && mInstance != VK_NULL_HANDLE) {
-        mGvk->vkDestroyInstance(mInstance, nullptr);
+    if (mIvk && mInstance != VK_NULL_HANDLE) {
+        // Instance-level command: the instance dispatch owns it. Under a custom loader the global
+        // dispatch's entry is null, and destroying the instance through it jumps to 0 on the way
+        // out of a process that was shutting down cleanly.
+        mIvk->vkDestroyInstance(mInstance, nullptr);
     }
 }
 

@@ -22,6 +22,12 @@ namespace vk {
 VulkanDispatch* vkDispatch(bool forTesting = false);
 bool vkDispatchValid(const VulkanDispatch* vk);
 
+// Fill in dispatch entries the loader left null because the promoted-to-core name and its original
+// KHR name resolve differently on this driver at this API version. Call right after
+// init_vulkan_dispatch_from_instance/device: a decoder that calls the core entry unchecked jumps
+// to 0 instead, which a guest can trigger at will and which kills the whole process.
+void fillMissingDispatchAliases(VulkanDispatch* vk);
+
 }  // namespace vk
 }  // namespace host
 }  // namespace gfxstream
