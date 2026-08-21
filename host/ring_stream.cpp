@@ -141,6 +141,43 @@ RingStream::RingStream(const AsgConsumerCreateInfo& info, size_t bufsize) :
 
 RingStream::~RingStream() = default;
 
+
+// How much of a consumer's time on its core is spinning rather than consuming.
+//
+// FPS on this device varies by more than two to one between boots of the same binary, which makes
+// any throughput comparison of a spin setting unreadable. Counts do not: the per-frame structural
+// numbers this session measured -- opcodes, batches, replays -- stayed within 4% across the same
+// runs whose scores moved 2.1x, because they are normalised by the work rather than by the clock.
+//
+// So count the spinning instead of timing it. Reported against packets consumed, so "spins per
+// packet" is comparable between two trees without either of them having to score the same.
+namespace {
+struct SpinCount {
+    static bool Enabled() {
+        static const bool on = getenv("GFXSTREAM_ASG_SPIN_TRACE") != nullptr;
+        return on;
+    }
+    static void NotePacket() { sPackets.fetch_add(1, std::memory_order_relaxed); }
+    static void NoteSpins(uint64_t n, bool parked) {
+        sSpins.fetch_add(n, std::memory_order_relaxed);
+        if (parked) sParks.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t reports = sWaits.fetch_add(1, std::memory_order_relaxed) + 1;
+        constexpr uint64_t kEvery = 2000;
+        if (reports % kEvery) return;
+        const uint64_t packets = sPackets.exchange(0, std::memory_order_relaxed);
+        const uint64_t spins = sSpins.exchange(0, std::memory_order_relaxed);
+        const uint64_t parks = sParks.exchange(0, std::memory_order_relaxed);
+        GFXSTREAM_WARNING(
+            "ASGSPIN over %llu waits: %llu spins, %llu parks, %llu packets -> %llu spins/packet, "
+            "%llu parks/packet",
+            (unsigned long long)kEvery, (unsigned long long)spins, (unsigned long long)parks,
+            (unsigned long long)packets, (unsigned long long)(packets ? spins / packets : 0),
+            (unsigned long long)(packets ? parks * 100 / packets : 0));
+    }
+    static inline std::atomic<uint64_t> sSpins{0}, sParks{0}, sPackets{0}, sWaits{0};
+};
+}  // namespace
+
 void RingStream::reloadRingConfig() {
     *mContext.ring_config = mSavedRingConfig;
 }
@@ -360,6 +397,7 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
             }
 
             ++spins;
+            if (SpinCount::Enabled()) SpinCount::NoteSpins(1, /* parked */ false);
             uint32_t sleepUs = UINT32_MAX;  // past the last stage -> park
             for (const SpinLevel& level : spinLevels) {
                 if (spins <= level.upToIter) {
@@ -376,6 +414,7 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                 continue;
             }
             spins = 0;
+            if (SpinCount::Enabled()) SpinCount::NoteSpins(0, /* parked */ true);
 
             if (mShouldExit) {
                 return nullptr;
@@ -435,6 +474,7 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
     }
 
     *inout_len = count;
+    if (SpinCount::Enabled()) SpinCount::NotePacket();
     ++mXmits;
     mTotalRecv += count;
 
