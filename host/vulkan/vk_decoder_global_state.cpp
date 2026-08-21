@@ -2592,8 +2592,6 @@ class VkDecoderGlobalState::Impl {
         deviceInfo.useAstcCpuDecompression =
             m_vkEmulation->getAstcLdrEmulationMode() == AstcEmulationMode::Cpu &&
             AstcCpuDecompressor::get().available();
-        deviceInfo.decompPipelines =
-            std::make_unique<GpuDecompressionPipelineManager>(m_vk, *pDevice);
         getSupportedFenceHandleTypes(vk, physicalDevice, &supportedFenceHandleTypes);
         getSupportedSemaphoreHandleTypes(vk, physicalDevice, &supportedBinarySemaphoreHandleTypes);
 
@@ -2625,6 +2623,18 @@ class VkDecoderGlobalState::Impl {
         VulkanDispatch* dispatch = dispatch_VkDevice(boxedDevice);
         init_vulkan_dispatch_from_device(vk, *pDevice, dispatch);
         fillMissingDispatchAliases(dispatch);
+
+        // Built here, once the device dispatch exists, rather than earlier with the global one.
+        // m_vk holds only what the loader could resolve by dlsym, and for a host driver loaded
+        // directly -- an Android Vulkan HAL, opened through HMI -- that is the global commands and
+        // nothing else: every device-level pointer in it is null, so tearing these pipelines down
+        // through it jumps to 0.
+        deviceInfo.decompPipelines =
+            std::make_unique<GpuDecompressionPipelineManager>(dispatch, *pDevice);
+        // Kept for the ASTC CPU decompression path, which needs both device-level calls and
+        // vkGetPhysicalDeviceMemoryProperties -- so it needs the instance dispatch, which has
+        // both, and not the device one, which has no physical-device entry points.
+        deviceInfo.instanceDispatch = vk;
 
         if (mLogging) {
             GFXSTREAM_INFO("%s: init vulkan dispatch from device (end)", __func__);
@@ -3017,7 +3027,9 @@ class VkDecoderGlobalState::Impl {
         // Run the underlying API call.
         {
             AutoLock lock(*graphicsDriverLock());
-            m_vk->vkDestroyDevice(device, nullptr);
+            // Device-level command: the per-device dispatch owns it. See the note on
+            // decompPipelines in on_vkCreateDevice for why the global dispatch cannot be used.
+            deviceDispatch->vkDestroyDevice(device, nullptr);
         }
 
         GFXSTREAM_INFO("Destroyed VkDevice:%p", device);
@@ -3324,7 +3336,12 @@ class VkDecoderGlobalState::Impl {
             cmpInfo->createCompressedMipmapImages(vk, *pCreateInfo);
 
             if (deviceInfo->useAstcCpuDecompression && cmpInfo->isAstc()) {
-                cmpInfo->initAstcCpuDecompression(m_vk, deviceInfo->physicalDevice);
+                // The instance dispatch: this path makes device-level calls AND asks for the
+                // physical device's memory properties, and only the instance dispatch has both.
+                // See the note in on_vkCreateDevice about the global dispatch.
+                cmpInfo->initAstcCpuDecompression(
+                    deviceInfo->instanceDispatch ? deviceInfo->instanceDispatch : m_vk,
+                    deviceInfo->physicalDevice);
             }
         }
 
@@ -11373,7 +11390,17 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
-        m_vk->vkDestroyInstance(instance, nullptr);
+        // Instance-level command; the instance dispatch owns it. The global dispatch's copy is
+        // null whenever the host driver was loaded directly rather than through a system loader.
+        if (auto* instanceVk = dispatch_VkInstance(instanceInfo.boxed);
+            instanceVk && instanceVk->vkDestroyInstance) {
+            instanceVk->vkDestroyInstance(instance, nullptr);
+        } else if (m_vk->vkDestroyInstance) {
+            m_vk->vkDestroyInstance(instance, nullptr);
+        } else {
+            GFXSTREAM_ERROR("No vkDestroyInstance in any dispatch; leaking VkInstance:%p.",
+                            instance);
+        }
         GFXSTREAM_INFO("Destroyed VkInstance:%p for application:'%s' engine:'%s'.", instance,
                        instanceInfo.applicationName.c_str(), instanceInfo.engineName.c_str());
 
