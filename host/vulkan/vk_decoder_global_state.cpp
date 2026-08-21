@@ -3698,7 +3698,14 @@ class VkDecoderGlobalState::Impl {
         // legal on a MUTABLE_FORMAT image, which the guest ICD sets on every image it creates.
         // That makes it one of the two ways the scanout's declared format and its actual channel
         // order can come apart. One line per distinct (image, view) format pair.
-        if (imageInfo->imageCreateInfoShallow.format != pCreateInfo->format) {
+        //
+        // Matching views on scanout-sized images are reported too, and deliberately: "no mismatch
+        // was printed" is worth nothing unless something proves this site ran and saw the image in
+        // question. A line saying image and view agree is that proof, and it also answers what the
+        // render target actually is when the answer turns out not to be a swapped view.
+        const bool viewFormatDiffers =
+            imageInfo->imageCreateInfoShallow.format != pCreateInfo->format;
+        if (viewFormatDiffers || imageInfo->imageCreateInfoShallow.extent.width >= 1024) {
             static std::mutex sViewSeenMutex;
             static std::set<std::pair<VkFormat, VkFormat>> sViewSeen;
             bool firstTime = false;
@@ -3709,7 +3716,8 @@ class VkDecoderGlobalState::Impl {
                         .second;
             }
             if (firstTime) {
-                GFXSTREAM_DIAG_PRINT("VIEW-FORMAT: image=%s view=%s %ux%u\n",
+                GFXSTREAM_DIAG_PRINT("VIEW-FORMAT: %s image=%s view=%s %ux%u\n",
+                                     viewFormatDiffers ? "MISMATCH" : "match",
                                      string_VkFormat(imageInfo->imageCreateInfoShallow.format),
                                      string_VkFormat(pCreateInfo->format),
                                      imageInfo->imageCreateInfoShallow.extent.width,
