@@ -15,12 +15,27 @@
 #include "virtio_gpu_resource.h"
 
 #include <drm/drm_fourcc.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+
 #if !defined(_WIN32)
+#include <sys/mman.h>
 #include <unistd.h>
 #endif
 
 #include "frame_buffer.h"
+#include "gfxstream_diag.h"
 #include "virtio_gpu_format_utils.h"
+#include "vulkan/host_visible_pool.h"
 
 namespace gfxstream {
 namespace host {
@@ -32,6 +47,272 @@ using gfxstream::host::snapshot::VirtioGpuResourceCreateArgs;
 using gfxstream::host::snapshot::VirtioGpuResourceCreateBlobArgs;
 using gfxstream::host::snapshot::VirtioGpuResourceSnapshot;
 #endif
+
+
+// Gunyah workaround: recycle RingBlob backing memory and never free it.
+//
+// On Gunyah, the VMM SHAREs the host-visible blob pages with the guest, and a
+// SHARE is permanent: once a GPA is SHARE'd to a physical page, it cannot be
+// re-pointed at a different page later. So when the guest re-maps a host-visible
+// blob at a BAR offset it used before, the new blob MUST land on the same
+// physical pages as the old one, or the guest reads stale data.
+//
+// We achieve this with a recycle pool: a RingBlob's backing memory is never
+// freed, and when a same-size RingBlob is later needed we hand back a
+// previously-freed one (its physical pages intact) instead of allocating new
+// memory. gfxstream cannot see the guest BAR offset/GPA (it is only known on the
+// crosvm side at map time), so we key the pool by size and reuse most-recently-
+// freed first (LIFO) — guest address allocators tend to re-hand-out the most-
+// recently-freed offset, and ASG ring blobs are per-context, fixed-size, and
+// created/destroyed serially, so this matches "same GPA reuses same pages" in
+// practice.
+//
+// Only enabled when the host VMM runs on Gunyah (gated by the
+// GFXSTREAM_GUNYAH_PIN_RINGBLOB env var); other hosts (e.g. KVM-based
+// crosvm/qemu) are unaffected and keep the normal allocate/free behavior.
+bool ShouldPinRingBlobsForGunyah() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("GFXSTREAM_GUNYAH_PIN_RINGBLOB");
+        return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+}
+
+struct GunyahRingBlobPool {
+    std::mutex mutex;
+    // size -> stack of released RingBlobs available for reuse (LIFO), held WEAKLY.
+    //
+    // Weakly, because `pinned` below already owns every blob forever, and the recycle test is
+    // "does anyone still hold this one" -- expressed as use_count() == 1, meaning `pinned` is the
+    // only owner left. A strong reference here would add a second owner and make that test
+    // permanently false: no blob would ever be handed back, every context would carve a fresh
+    // one, and the whole recycling mechanism would be dead code that silently leaks a ring per
+    // context. That is exactly what it was doing -- a 64 MB gfx-host pool ran out after ~63
+    // contexts (RINGBLOB-POOL-MISS[exhausted] used=65244KB high=65244KB), after which every
+    // further ring fell back to a fresh mlocked 2 MB memfd + a runtime Gunyah SHARE.
+    std::unordered_map<uint64_t, std::vector<std::weak_ptr<RingBlob>>> freeBySize;
+    // Permanent reference to every RingBlob ever created so its pages never free.
+    std::vector<std::shared_ptr<RingBlob>> pinned;
+};
+
+GunyahRingBlobPool& GetGunyahRingBlobPool() {
+    static GunyahRingBlobPool* pool = new GunyahRingBlobPool();  // intentional leak
+    return *pool;
+}
+
+// Reuse a freed same-size RingBlob if available, else create one and pin it.
+std::shared_ptr<RingBlob> AcquireGunyahRingBlob(uint32_t id, uint64_t size, uint64_t alignment,
+                                                bool externalBlob) {
+    auto& pool = GetGunyahRingBlobPool();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+
+    // Round the backing up to a 2MB multiple so the shmem can be collapsed into
+    // whole order-9 folios (the memfd is created sealed, so it cannot be grown
+    // later with ftruncate). This is a requirement of the fresh-memfd path at the
+    // bottom of this function and of nothing else -- see the pool branch below.
+    constexpr uint64_t kPmdSize2 = 2ULL * 1024 * 1024;
+    const uint64_t roundedSize = (size + kPmdSize2 - 1) & ~(kPmdSize2 - 1);
+
+    // The recycle map is keyed by blob->size(), which is what Release() sees, so each backing
+    // path has to look itself up under the size IT charges. Getting this wrong is not a missed
+    // optimisation: a pooled blob is moved into pool.pinned and its chunks are never returned to
+    // the allocator, so every recycle miss burns another slice of the pool permanently.
+    auto takeFree = [&pool](uint64_t sz) -> std::shared_ptr<RingBlob> {
+        auto it = pool.freeBySize.find(sz);
+        if (it == pool.freeBySize.end() || it->second.empty()) return nullptr;
+
+        // Only a blob nobody else still holds. A resource being dropped puts its RingBlob back
+        // here immediately, but the consumer that was reading it is a separate thread with its own
+        // reference and does not stop just because the resource did. Handing such a blob to a new
+        // context puts two render threads on one ring: the old one goes on consuming, the new one
+        // waits in its opening read for bytes the old one is taking, and neither ever finishes.
+        // Seen directly -- two RING-VIEW lines with the same storage address, two RT-ENTERs, and
+        // only the first HS-DONE.
+        //
+        // use_count()==1 means this vector is the last owner, so the reader is gone. Anything else
+        // stays where it is and is looked at again next time.
+        auto idle = std::find_if(it->second.begin(), it->second.end(),
+                                 [](const std::weak_ptr<RingBlob>& b) { return b.use_count() == 1; });
+        if (idle == it->second.end()) return nullptr;
+        std::shared_ptr<RingBlob> blob = idle->lock();
+        it->second.erase(idle);
+        if (!blob) return nullptr;  // cannot happen while `pinned` owns it; not worth crashing on
+
+        // Same physical pages as before, and that is the point -- but they still hold the previous
+        // ring's header. A recycled blob arrives with the old write and read positions and the old
+        // state byte, and whether the session survives then depends on a race: the guest
+        // initialises the ring when it maps the blob, this side attaches when the guest pings, and
+        // nothing orders those two. Attach first and the consumer is looking at a ring that says
+        // it is empty and already consumed, so it waits in the opening four-byte read for bytes
+        // that, as far as its view is concerned, were taken long ago -- and the guest waits for a
+        // reply that will never come.
+        //
+        // Measured: every healthy attach reports write=0 read=0 state=0, the stuck one reported
+        // write=16 read=16 state=1. Hand back pages that say nothing rather than pages that lie.
+        if (void* mem = blob->map()) {
+            memset(mem, 0, blob->size());
+        }
+        return blob;
+    };
+
+    // DroidVM gfxstream PRE-ALLOC: back the ASG RingBlob from the boot-blessed GpuPool so it is
+    // pool-resident (guest maps the pool GPA directly) with ZERO runtime SHARE — the last thing
+    // that still needed /dev/gunyah_share. This makes pre-alloc fully self-sufficient on phones
+    // where the gunyah_host_share module can't be installed. The pool is already folio-backed and
+    // mlocked at boot, so no per-blob collapse/mlock is needed.
+    //
+    // Charge the pool only what the ring actually needs. The 2MB round above is there so a
+    // standalone memfd can be MADV_COLLAPSE'd into order-9 folios; a pool blob is never
+    // collapsed, mlocked or mmap'd per-blob, so none of that applies to it. The ASG blob asks
+    // for kAsgConsumerRingStorageSize + kAsgWriteBufferSize (1036KB), and rounding that to 2MB
+    // charged nearly twice what it used -- with one ring per guest context, that was the pool's
+    // entire footprint. `alignment` is the guest page size the caller already computed, which is
+    // also the real floor: the guest maps the blob with io_remap_pfn_range at page granularity.
+    if (auto* hvPool = vk::HostVisiblePool::get()) {
+        const char* poolMiss = nullptr;
+        const uint64_t align = alignment ? alignment : 4096;
+        const uint64_t poolSize = (size + align - 1) & ~(align - 1);
+        if (auto reused = takeFree(poolSize)) return reused;
+
+        auto chunks = hvPool->alloc(poolSize, align);
+        if (chunks.size() == 1) {
+            // map-once: back the RingBlob with a pointer into the whole-pool mapping
+            // (hvaForOffset = baseHva + offset), no per-blob mmap.
+            auto pooled = RingBlob::CreateFromPool(id, poolSize,
+                                                   hvPool->hvaForOffset(chunks[0].offset),
+                                                   (int64_t)chunks[0].offset);
+            if (pooled) {
+                std::shared_ptr<RingBlob> pblob = std::move(pooled);
+                if (void* addr = pblob->map()) std::memset(addr, 0, poolSize);
+                pool.pinned.push_back(pblob);
+                GFXSTREAM_DIAG_PRINT( "RINGBLOB-POOL: id=%u size=%llu -> pool offset=0x%llx (no SHARE)\n",
+                        id, (unsigned long long)poolSize,
+                        (unsigned long long)chunks[0].offset);
+                return pblob;
+            }
+            hvPool->free(chunks);
+            poolMiss = "create-from-pool-failed";
+        } else if (!chunks.empty()) {
+            hvPool->free(chunks);  // fragmented: fall back to fresh memfd + runtime SHARE
+            poolMiss = "fragmented";
+        } else {
+            poolMiss = "exhausted";
+        }
+        // One ASG ring per guest context, and the pool is the only thing standing between that
+        // ring and a runtime SHARE + guest MEM_ACCEPT -- which is where this route's accept
+        // failures live. A miss used to leave no trace at all: the success line is behind
+        // GFXSTREAM_DIAG and both failure branches just fell through silently, so the first
+        // evidence of one was a blob map failing several layers down with no hint that the pool
+        // had been asked and had said no. Say it once per kind, with the state that caused it:
+        // "exhausted" wants a bigger gfx-host-mb, "fragmented" wants the multi-chunk path.
+        if (poolMiss) {
+            static std::atomic<uint64_t> sRingPoolMisses{0};
+            const uint64_t n = ++sRingPoolMisses;
+            if ((n & (n - 1)) == 0) {
+                auto st = hvPool->stats();
+                fprintf(stderr,
+                        "RINGBLOB-POOL-MISS[%s] #%llu: req=%lluKB pool used=%lluKB high=%lluKB "
+                        "free=%lluKB largest=%lluKB blocks=%zu -> fresh memfd + runtime SHARE\n",
+                        poolMiss, (unsigned long long)n, (unsigned long long)(poolSize >> 10),
+                        (unsigned long long)(st.used >> 10), (unsigned long long)(st.highWater >> 10),
+                        (unsigned long long)(st.freeBytes >> 10),
+                        (unsigned long long)(st.largest >> 10), st.blocks);
+                fflush(stderr);
+            }
+        }
+    }
+
+    if (auto reused = takeFree(roundedSize)) return reused;
+
+    // Gunyah persistent-BAR (fixed_blob_mapping) path: the VMM maps each blob into the shared BAR
+    // via add_fd_mapping(), which requires an exportable fd. AlignedMemory (CreateWithHostMemory) is
+    // NOT exportable, so always back the RingBlob with shmem (memfd) when pinning for Gunyah,
+    // regardless of the ExternalBlob feature flag.
+    (void)externalBlob;
+    std::unique_ptr<RingBlob> created = RingBlob::CreateWithShmem(id, roundedSize);
+    if (!created) {
+        return nullptr;
+    }
+    std::shared_ptr<RingBlob> blob = std::move(created);
+
+#ifndef _WIN32
+    // Back the blob with 2MB (order-9) folios from the gh_hugepage_reserve pool.
+    //
+    // crosvm is a tracked gunyah-VM owner, so every order-9 allocation it makes is
+    // intercepted and served from the module's reserve pool: the blob then consumes
+    // VM reserve quota instead of competing with apps for system RAM, gunyah_share_66
+    // coalesces each folio into a single 2MB mem_entry (instead of 512 4K entries),
+    // and on ANY exit path — including SIGKILL/SIGSEGV — the final folio free reaches
+    // the buddy allocator at order 9, where the module's free hook reclaims it back
+    // into the pool. The folio must never be split (no partial unmap/hole-punch of a
+    // 2MB chunk), or its 4K frees become invisible to the hook and the pages are lost
+    // to the pool until the owner dies.
+    //
+    // Recipe mirrors crosvm's proven mthp guest-RAM path: round the memfd up to a 2MB
+    // multiple, fault it in through a PMD-aligned temporary mapping, MADV_COLLAPSE.
+    // Collapse allocates the order-9 folio in-process (madvise runs in crosvm's mm,
+    // which is what the module's intercept matches on). Best-effort: on failure the
+    // blob simply stays 4K-backed like before.
+    {
+        constexpr uint64_t kPmdSize = 2ULL * 1024 * 1024;
+#ifndef MADV_COLLAPSE
+        constexpr int kMadvCollapse = 25;
+#else
+        constexpr int kMadvCollapse = MADV_COLLAPSE;
+#endif
+        int hfd = blob->isExportable() ? blob->dupHandle() : -1;
+        if (hfd >= 0) {
+            int collapseRet = -1, collapseErrno = 0;
+            void* rsv = mmap(nullptr, roundedSize + kPmdSize, PROT_NONE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (rsv != MAP_FAILED) {
+                uintptr_t alignedAddr =
+                    (reinterpret_cast<uintptr_t>(rsv) + kPmdSize - 1) & ~(kPmdSize - 1);
+                void* aligned = mmap(reinterpret_cast<void*>(alignedAddr), roundedSize,
+                                     PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, hfd, 0);
+                if (aligned != MAP_FAILED) {
+                    madvise(aligned, roundedSize, MADV_HUGEPAGE);
+                    std::memset(aligned, 0, roundedSize);
+                    collapseRet = madvise(aligned, roundedSize, kMadvCollapse);
+                    collapseErrno = collapseRet ? errno : 0;
+                }
+                munmap(rsv, roundedSize + kPmdSize);
+            }
+            close(hfd);
+            if (collapseRet) {
+                GFXSTREAM_DIAG_PRINT( "RINGBLOB-POOL: collapse failed id=%u rounded=%llu errno=%d\n",
+                        id, (unsigned long long)roundedSize, collapseErrno);
+            }
+        }
+    }
+#endif
+
+    // Gunyah SHARE (lend=false) does not fault in or lock the backing pages. A shmem/memfd-backed
+    // RingBlob is demand-paged, so the guest's first access to a not-yet-present page would SIGBUS.
+    // Touch every page to fault it in, then mlock to keep it resident for the VM's lifetime
+    // (mirrors how qemu's pre-allocated hostmem backend is always resident).
+#ifndef _WIN32
+    if (void* addr = blob->map()) {
+        std::memset(addr, 0, roundedSize);
+        if (mlock(addr, roundedSize) != 0) {
+            GFXSTREAM_DIAG_PRINT( "RINGBLOB-PIN: mlock failed id=%u size=%llu errno=%d\n", id,
+                    (unsigned long long)size, errno);
+        }
+    }
+#endif
+
+    pool.pinned.push_back(blob);  // keep alive forever
+    return blob;
+}
+
+void ReleaseGunyahRingBlob(const std::shared_ptr<RingBlob>& blob) {
+    if (!blob) {
+        return;
+    }
+    auto& pool = GetGunyahRingBlobPool();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+    pool.freeBySize[blob->size()].push_back(std::weak_ptr<RingBlob>(blob));
+}
 
 enum pipe_texture_target {
     PIPE_BUFFER,
@@ -244,7 +525,13 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
 
     if (createBlobArgs->blob_id == 0) {
         RingBlobMemory memory;
-        if (features.ExternalBlob.enabled()) {
+        if (ShouldPinRingBlobsForGunyah()) {
+            // Reuse a pinned same-size RingBlob (the same physical pages) if one is free, else
+            // carve one from the pool or allocate and pin a new one. Gunyah's SHARE is permanent,
+            // so the pages have to stay put across unmap/remap.
+            memory = AcquireGunyahRingBlob(resourceId, createBlobArgs->size, pageSize,
+                                           features.ExternalBlob.enabled());
+        } else if (features.ExternalBlob.enabled()) {
             memory = RingBlob::CreateWithShmem(resourceId, createBlobArgs->size);
         } else {
             memory = RingBlob::CreateWithHostMemory(resourceId, createBlobArgs->size, pageSize);
@@ -806,16 +1093,46 @@ int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
 
     if (std::holds_alternative<RingBlobMemory>(*mBlobMemory)) {
         auto& memory = std::get<RingBlobMemory>(*mBlobMemory);
+        // A pool-resident ring blob: hand the VMM a dup of the pool memfd plus the offset so it
+        // maps the pool GPA directly, with no runtime SHARE. This has to come before the
+        // isExportable() check -- a pool ring blob is backed by borrowed memory and is not
+        // exportable in the shmem sense.
+        if (memory->poolOffset() >= 0) {
+            auto* hvPool = vk::HostVisiblePool::get();
+            // Returning 0 with os_handle -1 would be indistinguishable from a real handle except
+            // by checking for a negative fd, and the VMM turns that into an error naming no cause,
+            // leaving the display quietly falling back to a copy of memory nothing writes.
+            if (!hvPool) {
+                GFXSTREAM_ERROR(
+                    "failed to export blob for resource %u: pool-resident ring blob at offset %lld "
+                    "but there is no host-visible pool",
+                    mId, (long long)memory->poolOffset());
+                return -EINVAL;
+            }
+            int poolFd = dup(hvPool->memfd());
+            if (poolFd < 0) {
+                GFXSTREAM_ERROR(
+                    "failed to export blob for resource %u: dup of the pool memfd failed", mId);
+                return -EINVAL;
+            }
+            outHandle->os_handle = (int64_t)poolFd;
+            outHandle->handle_type = STREAM_HANDLE_TYPE_MEM_POOL;
+            outHandle->pool_offset = (uint64_t)memory->poolOffset();
+            return 0;
+        }
         if (!memory->isExportable()) {
             return -EINVAL;
         }
 
-        // Handle ownership transferred to VMM, Gfxstream keeps the mapping.
+        // Handle ownership transferred to VMM, Gfxstream keeps the mapping. A recycled ring blob
+        // is exported once per blob resource that reuses it, so hand out a dup instead of its only
+        // handle when recycling is on.
+        gfxstream::base::SharedMemory::handle_type handle =
+            ShouldPinRingBlobsForGunyah() ? memory->dupHandle() : memory->releaseHandle();
 #ifdef _WIN32
-        outHandle->os_handle =
-            static_cast<int64_t>(reinterpret_cast<intptr_t>(memory->releaseHandle()));
+        outHandle->os_handle = static_cast<int64_t>(reinterpret_cast<intptr_t>(handle));
 #else
-        outHandle->os_handle = static_cast<int64_t>(memory->releaseHandle());
+        outHandle->os_handle = static_cast<int64_t>(handle);
 #endif
         outHandle->handle_type = STREAM_HANDLE_TYPE_MEM_SHM;
         return 0;
@@ -856,6 +1173,18 @@ int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
     }
 
     return -EINVAL;
+}
+
+void VirtioGpuResource::ReturnRingBlobToGunyahPool() {
+    if (!ShouldPinRingBlobsForGunyah() || !mBlobMemory) {
+        return;
+    }
+    if (!std::holds_alternative<RingBlobMemory>(*mBlobMemory)) {
+        return;
+    }
+    // Back to the recycle pool -- kept alive and reusable by a later same-size blob -- instead of
+    // being freed when this resource is dropped.
+    ReleaseGunyahRingBlob(std::get<RingBlobMemory>(*mBlobMemory));
 }
 
 std::shared_ptr<RingBlob> VirtioGpuResource::ShareRingBlob() {

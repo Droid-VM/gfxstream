@@ -557,6 +557,10 @@ void VirtioGpuFrontend::unrefResource(uint32_t resourceId) {
 
     resource.Destroy();
 
+    // Hand this resource's ring blob, if it has one, back to the recycle pool so its pages stay
+    // alive for a later same-size blob. No-op unless ring-blob recycling is on.
+    resource.ReturnRingBlobToGunyahPool();
+
     mResources.erase(resourceIt);
 }
 

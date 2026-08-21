@@ -100,6 +100,11 @@ class VirtioGpuResource {
 
     std::shared_ptr<RingBlob> ShareRingBlob();
 
+    // If this resource owns a RingBlob, return it to the recycle pool -- kept alive and reusable
+    // by a later same-size blob -- instead of letting it be freed on unref, so its physical pages
+    // stay put for Gunyah's permanent SHARE. No-op unless GFXSTREAM_GUNYAH_PIN_RINGBLOB=1.
+    void ReturnRingBlobToGunyahPool();
+
 #ifdef GFXSTREAM_BUILD_WITH_SNAPSHOT_FRONTEND_SUPPORT
     std::optional<gfxstream::host::snapshot::VirtioGpuResourceSnapshot> Snapshot() const;
 
