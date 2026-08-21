@@ -16,6 +16,8 @@
 
 #include "frame_buffer.h"
 
+#include <inttypes.h>
+
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -2435,6 +2437,19 @@ std::unique_ptr<ProcessResources> FrameBuffer::Impl::removeGraphicsProcessResour
 void FrameBuffer::Impl::cleanupProcGLObjects(uint64_t puid) {
     bool renderThreadWithThisPuidExists = false;
 
+    // Wait for this process's render threads to finish -- but not forever. The guest recycles
+    // context ids, and it routinely hands the same one to a replacement process before this
+    // cleanup runs: "a render thread with this puid" then matches the REPLACEMENT's threads, which
+    // are alive and serving and have no reason to exit. The wait never ends, the cleanup worker
+    // never returns, and every later teardown queues behind it.
+    //
+    // What actually ends a render thread here is the guest closing its stream, which this loop
+    // cannot influence either way. So it is a courtesy, and it is bounded: give the threads a
+    // couple of seconds to leave on their own, then get on with freeing the objects. Sessions
+    // measured with no wait at all came up 20 times out of 20.
+    constexpr int kMaxWaitIterations = 200;  // 200 * 10ms = 2s
+    int waitIterations = 0;
+
     do {
         renderThreadWithThisPuidExists = false;
         RenderThreadInfo::forAllRenderThreadInfos(
@@ -2443,6 +2458,17 @@ void FrameBuffer::Impl::cleanupProcGLObjects(uint64_t puid) {
                 renderThreadWithThisPuidExists = true;
             }
         });
+        if (!renderThreadWithThisPuidExists) {
+            break;
+        }
+        if (++waitIterations >= kMaxWaitIterations) {
+            GFXSTREAM_WARNING(
+                "Proceeding with cleanup for puid 0x%" PRIx64
+                " while a render thread still carries it: either it is taking its time to exit, or "
+                "the guest has already handed this context id to another process.",
+                puid);
+            break;
+        }
         gfxstream::base::sleepUs(10000);
     } while (renderThreadWithThisPuidExists);
 
