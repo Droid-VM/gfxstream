@@ -1229,12 +1229,47 @@ int VirtioGpuResource::TransferWithIov(uint64_t offset, const stream_renderer_bo
 int VirtioGpuResource::ExportBlob(struct stream_renderer_handle* outHandle) {
     // For non-blob COLOR_BUFFER resources (CREATE_3D path), there is no mBlobMemory
     // set. Attempt to export the ColorBuffer's external memory.
+    //
+    // Upstream 74f179774 added this, and its message names a counterpart it depends on: a
+    // rutabaga change calling export_blob from Gfxstream::create_3d to capture the handle on the
+    // RutabagaResource. This VMM does not have that counterpart -- create_3d here returns
+    // handle: None -- so the pair is applied by halves, host side only, and the display path
+    // reaches an export that now answers where it used to refuse.
+    //
+    // Whether that matters is measured rather than argued: GFXSTREAM_NO_CB_EXPORT=1 restores the
+    // old refusal, and the counter says whether this branch is on the path at all. A branch that
+    // is never taken cannot be the cause however plausible it reads, and one that is taken
+    // thousands of times a second is worth a build to test.
     if (!mBlobMemory && mResourceType == VirtioGpuResourceType::COLOR_BUFFER) {
-        auto descriptorInfoOpt = FrameBuffer::getFB()->exportColorBuffer(mId);
-        if (!descriptorInfoOpt) {
+        static const bool kNoCbExport = getenv("GFXSTREAM_NO_CB_EXPORT") != nullptr;
+        static std::atomic<uint64_t> sTaken{0};
+        const uint64_t n = sTaken.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 3 || (n & 0x3FF) == 0) {
+            GFXSTREAM_WARNING("CB-EXPORT: non-blob COLOR_BUFFER export path taken %llu times%s",
+                              (unsigned long long)n, kNoCbExport ? " (disabled, returning -EINVAL)"
+                                                                 : "");
+        }
+        if (kNoCbExport) {
             return -EINVAL;
         }
-        return fillExportHandle(outHandle, descriptorInfoOpt->descriptorInfo);
+        auto descriptorInfoOpt = FrameBuffer::getFB()->exportColorBuffer(mId);
+        if (!descriptorInfoOpt) {
+            if (n <= 3) GFXSTREAM_WARNING("CB-EXPORT: exportColorBuffer(%u) returned nothing", mId);
+            return -EINVAL;
+        }
+        // The handle type is the whole question, not a detail. The VMM wraps os_handle in an owned
+        // file descriptor and closes it on drop, so a type that is not an fd -- PLATFORM_AHB
+        // carries an AHardwareBuffer pointer -- would have it closing a descriptor whose number is
+        // the low half of a pointer. Print the type and the value before handing them over; the
+        // old tree refused this export outright and never reached the question.
+        const int ret = fillExportHandle(outHandle, descriptorInfoOpt->descriptorInfo);
+        if (n <= 3 || (n & 0x3FF) == 0) {
+            GFXSTREAM_WARNING(
+                "CB-EXPORT: res=%u stream_type=0x%x -> handle_type=0x%x os_handle=%lld ret=%d",
+                mId, descriptorInfoOpt->descriptorInfo.streamHandleType, outHandle->handle_type,
+                (long long)outHandle->os_handle, ret);
+        }
+        return ret;
     }
 
     if (!mBlobMemory) {
