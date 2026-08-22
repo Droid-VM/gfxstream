@@ -181,6 +181,29 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
 
     GFXSTREAM_DEBUG("ctxid: %u len: %u name: %s", contextId, nlen, contextName.c_str());
 
+    // Retire any sequence counter left under this id before creating the context.
+    //
+    // The counter is keyed on the context id, and ids are recycled: context 4 goes to one
+    // kwin_wayland and then to its replacement. A context being created is a guest connection with
+    // no history, so whatever is still filed under the id belongs to a process that is gone.
+    //
+    // Zeroing the existing counter is not enough. The previous occupant's packets are still in
+    // flight and get decoded after the new context exists, driving the shared counter to thousands
+    // while the new process numbers from one. Its first packet then waits for a value that went by
+    // long ago: the main thread blocks on its first Vulkan call, stops serving Wayland, plasmashell
+    // sits in wl_display_roundtrip_queue until systemd gives up, and the session has no desktop.
+    // Measured on the pre-upstream tree as "seqno loop stuck: want=30 have=19372
+    // process=kwin_wayland" against a counter that was zero when the context was created.
+    //
+    // So hand the old object to the stragglers and start the new occupant on a fresh one. Retiring
+    // rather than freeing is deliberate -- render threads hold raw pointers into it, and freeing it
+    // under them took the VM down when this was tried from the destroy side. Retire here rather
+    // than on destroy for the same reason in reverse: the counter is shared by every render thread
+    // of a live process, and clearing it when one context closes killed a running kwin.
+    if (auto stale = FrameBuffer::getFB()->removeGraphicsProcessResources(contextId)) {
+        mRetiredProcessResources.push_back(std::move(stale));
+    }
+
     auto contextOpt = VirtioGpuContext::Create(mRenderer, contextId, contextName, contextInit);
     if (!contextOpt) {
         GFXSTREAM_ERROR("Failed to create context %u.", contextId);
