@@ -30,6 +30,18 @@ using ::testing::Return;
 using ::testing::Test;
 using ::testing::UnorderedElementsAre;
 
+TEST(VkDecoderGlobalStateExternalMemoryTest, ClassifiesImportsByHandleType) {
+    EXPECT_EQ(ExternalMemoryImportKind::OpaqueFd,
+              externalMemoryImportKind(STREAM_HANDLE_TYPE_MEM_OPAQUE_FD));
+    EXPECT_EQ(ExternalMemoryImportKind::DmaBuf,
+              externalMemoryImportKind(STREAM_HANDLE_TYPE_MEM_DMABUF));
+    EXPECT_EQ(ExternalMemoryImportKind::AndroidHardwareBuffer,
+              externalMemoryImportKind(STREAM_HANDLE_TYPE_PLATFORM_AHB));
+    EXPECT_EQ(ExternalMemoryImportKind::Unsupported,
+              externalMemoryImportKind(STREAM_HANDLE_TYPE_MEM_SHM));
+    EXPECT_EQ(ExternalMemoryImportKind::Unsupported, externalMemoryImportKind(0xffffffff));
+}
+
 class VkDecoderGlobalStateExternalFenceTest : public Test {
 protected:
     class MockDispatch {
