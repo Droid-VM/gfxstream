@@ -102,9 +102,8 @@ namespace gfxstream {
 namespace host {
 namespace vk {
 
-// Outstanding runtime-share (folio) bytes, process-wide, summed into the guest-visible
-// VK_EXT_memory_budget usage figure. Charged when the VMM accepts a blob backing, refunded at
-// vkFreeMemory. Pool sub-allocations are counted separately by HostVisiblePool::usedBytes().
+// Outstanding gfxstream-owned folio bytes, process-wide, summed into the guest-visible
+// VK_EXT_memory_budget usage figure. Pool sub-allocations are counted separately.
 static std::atomic<uint64_t> sOutstandingFolioBytes{0};
 
 using gfxstream::base::AutoLock;
@@ -7171,10 +7170,8 @@ class VkDecoderGlobalState::Impl {
         std::optional<SharedMemory> sharedMemory = std::nullopt;
         std::optional<VkExportMemoryAllocateInfo> exportAllocateInfo;
         std::shared_ptr<PrivateMemory> privateMemory = {};
-        // Bytes the VMM charged against its host-visible VRAM quota when it folio-backed this
-        // blob (0 if it did not). Refunded at vkFreeMemory. The backing itself is the VMM's job,
-        // through the prepare-blob-backing callback below; see host_visible_folio.h.
-        uint64_t blobBackingCharged = 0;
+        // Owns gfxstream's folio quota reservation until the VkDeviceMemory bookkeeping commits.
+        HostVisibleFolioCharge folioCharge;
         // >=0 once this host-visible memory is sub-allocated from the boot-blessed GpuPool, which
         // skips the fresh-memfd + runtime-SHARE path entirely. Reported to the VMM at blob export.
         int64_t poolOffset = -1;
@@ -7275,11 +7272,20 @@ class VkDecoderGlobalState::Impl {
                 }
                 localAllocInfo.allocationSize = alignedSize;
 
-                // Folio backing is the VMM's job now: it grows the memfd to a 2MB multiple and
-                // MADV_COLLAPSEs it, below, before anything pins the pages. gfxstream neither
-                // rounds nor collapses here; see host_visible_folio.h.
                 const bool udmabufEnabled =
                     m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled();
+                // This policy applies only to fresh shmem allocated below. Imported ColorBuffer /
+                // driver DMA-BUF memory never enters this branch and is shared with its existing
+                // backing unchanged.
+                static const HostVisibleFolioConfig kFolioConfig = [] {
+                    auto config = HostVisibleFolioConfig::fromEnv();
+                    GFXSTREAM_DIAG_PRINT(
+                        "VKFOLIO: limitMB=%llu thresholdKB=%llu policy=%s\n",
+                        (unsigned long long)(config.quotaBytes >> 20),
+                        (unsigned long long)(config.thresholdBytes >> 10),
+                        config.oomOnExceed() ? "oom" : "fallback");
+                    return config;
+                }();
 
                 // PRE-ALLOC: before creating a fresh memfd, try to sub-allocate this host-visible
                 // memory from the boot-blessed GpuPool, which is already SHARE'd into the guest's
@@ -7398,6 +7404,27 @@ class VkDecoderGlobalState::Impl {
                     }
                 }
 
+                if (poolOffset < 0 && udmabufEnabled &&
+                    kFolioConfig.routesToFolio(localAllocInfo.allocationSize)) {
+                    const uint64_t roundedSize =
+                        ALIGN(localAllocInfo.allocationSize, kFolioSize);
+                    if (!folioCharge.tryCharge(roundedSize, kFolioConfig.quotaBytes)) {
+                        if (kFolioConfig.oomOnExceed()) {
+                            GFXSTREAM_ERROR(
+                                "VKFOLIO: quota exhausted used=%lluMB need=%lluMB cap=%lluMB",
+                                (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
+                                (unsigned long long)(roundedSize >> 20),
+                                (unsigned long long)(kFolioConfig.quotaBytes >> 20));
+                            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                        }
+                        GFXSTREAM_DIAG_PRINT(
+                            "VKFOLIO: quota exhausted used=%lluMB need=%lluMB cap=%lluMB -> 4K\n",
+                            (unsigned long long)(HostVisibleFolioQuota::usedBytes() >> 20),
+                            (unsigned long long)(roundedSize >> 20),
+                            (unsigned long long)(kFolioConfig.quotaBytes >> 20));
+                    }
+                }
+
               // The fresh-memfd path, skipped entirely when the pool provided the backing above
               // (importFdInfo is already appended). Left at its original indentation, one level
               // short, so this stays a wrapper around upstream's block rather than a rewrite of
@@ -7415,22 +7442,24 @@ class VkDecoderGlobalState::Impl {
                     }
 
 #if defined(__linux__)
-                    // Let the VMM back this blob per its policy -- Gunyah grows it to a 2MB
-                    // multiple and MADV_COLLAPSEs it into order-9 folios so its later stage-2
-                    // SHARE is exec-clean; KVM and gzvm no-op -- BEFORE the udmabuf exists, because
-                    // the udmabuf pins the pages and an extra reference blocks MADV_COLLAPSE. The
-                    // return is bytes charged against the VMM's VRAM quota, refunded at
-                    // vkFreeMemory; negative means the VMM refused (exceed-policy=oom with the
-                    // reserve exhausted), and proceeding on 4K pages is not a usable fallback.
+                    // Collapse gfxstream's own shmem before udmabuf pins it. crosvm later receives
+                    // the resulting descriptor only to map/share its existing pages into the VM.
                     if (udmabufEnabled) {
-                        int64_t prepared = HostVisibleBlobBacking::get().prepare(
-                            memory.getFd(), localAllocInfo.allocationSize);
-                        if (prepared < 0) {
-                            GFXSTREAM_ERROR("VMM refused blob backing (exceed-policy=oom); size=%llu",
-                                            (unsigned long long)localAllocInfo.allocationSize);
-                            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                        if (folioCharge.bytes()) {
+                            const int collapseError =
+                                CollapseMemfdToFolios(memory.getFd(), folioCharge.bytes());
+                            if (collapseError) {
+                                GFXSTREAM_DIAG_PRINT(
+                                    "VKFOLIO: collapse failed errno=%d size=%llu -> %s\n",
+                                    collapseError,
+                                    (unsigned long long)localAllocInfo.allocationSize,
+                                    kFolioConfig.oomOnExceed() ? "OOM" : "4K");
+                                folioCharge.release();
+                                if (kFolioConfig.oomOnExceed()) {
+                                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                                }
+                            }
                         }
-                        blobBackingCharged = static_cast<uint64_t>(prepared);
 
                         // A blob too small to be folio-backed faults plain shmem pages into
                         // MOVABLE/CMA pageblocks, where gunyah_share's FOLL_LONGTERM pin fails
@@ -7438,7 +7467,7 @@ class VkDecoderGlobalState::Impl {
                         // non-movable BEFORE the udmabuf faults its pages in, so they are born in
                         // an UNMOVABLE pageblock. Folio-backed blobs (prepared > 0) already sit in
                         // isolated reserve folios. Best-effort: no /dev/gh_unmovable, no retype.
-                        if (prepared == 0) {
+                        if (folioCharge.bytes() == 0) {
                             static int sGhuFd = open("/dev/gh_unmovable", O_RDWR | O_CLOEXEC);
                             if (sGhuFd >= 0 && ioctl(sGhuFd, GH_UNMOVABLE_MAKE,
                                                      (unsigned long)memory.getFd()) != 0) {
@@ -7602,12 +7631,12 @@ class VkDecoderGlobalState::Impl {
         memoryInfo.size = localAllocInfo.allocationSize;
         memoryInfo.device = device;
         memoryInfo.memoryIndex = localAllocInfo.memoryTypeIndex;
-        memoryInfo.folioBytes = blobBackingCharged;
+        memoryInfo.folioBytes = folioCharge.transfer();
         // Count the charge as outstanding only once it is committed here, mirroring the refund in
         // destroyMemoryWithExclusiveInfo, which keys off memoryInfo.folioBytes. The failure paths
         // between the charge and this point never reach here, so the guest-visible usage figure
         // cannot leak.
-        if (blobBackingCharged) sOutstandingFolioBytes.fetch_add(blobBackingCharged);
+        if (memoryInfo.folioBytes) sOutstandingFolioBytes.fetch_add(memoryInfo.folioBytes);
         memoryInfo.poolOffset = poolOffset;
         memoryInfo.poolSize = poolSize;
 
@@ -7693,8 +7722,7 @@ class VkDecoderGlobalState::Impl {
         }
 
         if (memoryInfo.folioBytes) {
-            // Refund the VMM's host-visible VRAM quota charged at allocation.
-            HostVisibleBlobBacking::get().release(memoryInfo.folioBytes);
+            HostVisibleFolioQuota::release(memoryInfo.folioBytes);
             sOutstandingFolioBytes.fetch_sub(memoryInfo.folioBytes);
             memoryInfo.folioBytes = 0;
         }

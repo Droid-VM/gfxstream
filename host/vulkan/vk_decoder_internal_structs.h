@@ -176,7 +176,7 @@ struct MemoryInfo {
     uint32_t memoryIndex = 0;
     // Set if the memory is backed by shared memory.
     std::optional<gfxstream::base::SharedMemory> sharedMemory;
-    // Bytes the VMM charged for folio-backing this blob; refunded when the memory is destroyed.
+    // Bytes gfxstream charged for folio-backing its own shmem; refunded on memory destruction.
     uint64_t folioBytes = 0;
     // Byte offset within the boot-blessed GpuPool if this host-visible memory was sub-allocated
     // from it; -1 = not pool-resident (the fresh-memfd / runtime-SHARE path). Carried to the blob

@@ -2,65 +2,146 @@
 // Copyright DroidVM contributors
 // Additional permissions apply; see ADDITIONAL-PERMISSIONS in the repository root.
 
-//
-// Host-visible blob backing bridge.
-//
-// Folio backing (rounding a host-visible blob's shmem up to 2MB and MADV_COLLAPSE'ing it into
-// order-9 folios) and the host-visible VRAM quota used to live here, in the gfxstream host. They
-// now live in the crosvm GPU backend, dispatched per-hypervisor via the Vm trait: Gunyah protected
-// folds each blob so its later stage-2 SHARE never splits a hyp block shared with LENT guest RAM
-// (the exec-strip); KVM / gzvm / unprotected are a no-op. This keeps the GPU backend
-// backend-agnostic and lets every hypervisor reuse one folio path.
-//
-// gfxstream now only forwards the blob's shmem fd to the VMM (crosvm) via the prepare/release
-// callbacks, set from STREAM_RENDERER_PARAM_{PREPARE,RELEASE}_BLOB_BACKING_CALLBACK. `prepare` MUST
-// run before gfxstream creates the udmabuf for the blob: the udmabuf pins the pages and extra
-// references block the VMM's MADV_COLLAPSE.
+// Optional 2 MiB-folio backing for the shmem gfxstream itself allocates for emulated host-visible
+// VkDeviceMemory. This is deliberately a renderer allocation policy, not part of crosvm's generic
+// memory-registration path: an imported ColorBuffer/DMA-BUF already has backing chosen by its host
+// driver and must be shared as-is.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <utility>
+
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+
+#include <cerrno>
+#endif
 
 namespace gfxstream {
 namespace host {
+namespace vk {
 
-// Process-global host-visible blob-backing callbacks, populated by
-// virtio-gpu-gfxstream-renderer.cpp from the init params.
-class HostVisibleBlobBacking {
-   public:
-    static HostVisibleBlobBacking& get() {
-        static HostVisibleBlobBacking sInstance;
-        return sInstance;
+constexpr uint64_t kFolioSize = 2ULL * 1024 * 1024;
+
+struct HostVisibleFolioConfig {
+    enum ExceedPolicy {
+        kFallback = 0,
+        kOom,
+    };
+
+    // Zero disables folio backing. crosvm sets this only for gfxstream host-alloc with dynamic
+    // VRAM enabled; an unset environment therefore retains normal upstream allocation behavior.
+    uint64_t quotaBytes = 0;
+    uint64_t thresholdBytes = 1024 * 1024;
+    ExceedPolicy exceedPolicy = kFallback;
+
+    bool enabled() const { return quotaBytes != 0; }
+    bool oomOnExceed() const { return exceedPolicy == kOom; }
+    bool routesToFolio(uint64_t size) const { return enabled() && size >= thresholdBytes; }
+
+    static HostVisibleFolioConfig fromEnv() {
+        HostVisibleFolioConfig config;
+        if (const char* limit = getenv("GFXSTREAM_VRAM_LIMIT_MB")) {
+            config.quotaBytes = strtoull(limit, nullptr, 0) << 20;
+        }
+        if (const char* threshold = getenv("GFXSTREAM_VRAM_FOLIO_THRESHOLD_KB")) {
+            config.thresholdBytes = strtoull(threshold, nullptr, 0) << 10;
+        }
+        if (const char* policy = getenv("GFXSTREAM_VRAM_EXCEED_POLICY")) {
+            if (!strcmp(policy, "oom")) config.exceedPolicy = kOom;
+        }
+        return config;
     }
-
-    void set(int64_t (*prepare)(void*, int, uint64_t), void (*release)(void*, uint64_t),
-             void* userData) {
-        mPrepare = prepare;
-        mRelease = release;
-        mUserData = userData;
-    }
-
-    bool enabled() const { return mPrepare != nullptr; }
-
-    // Ask the VMM to back `memfd` (size `size`) per its policy. Returns the bytes charged against
-    // the VMM's VRAM quota (0 => not folio-backed / no callback), or a NEGATIVE value when the VMM
-    // refused the backing (--runtime-share exceed-policy=oom with the reserve exhausted): the
-    // caller must then fail the allocation (VK_ERROR_OUT_OF_DEVICE_MEMORY) instead of proceeding
-    // on 4K pages. Call BEFORE any udmabuf pin.
-    int64_t prepare(int memfd, uint64_t size) {
-        if (!mPrepare) return 0;
-        return mPrepare(mUserData, memfd, size);
-    }
-
-    // Refund a charge previously returned by prepare().
-    void release(uint64_t charged) {
-        if (mRelease && charged) mRelease(mUserData, charged);
-    }
-
-   private:
-    int64_t (*mPrepare)(void*, int, uint64_t) = nullptr;
-    void (*mRelease)(void*, uint64_t) = nullptr;
-    void* mUserData = nullptr;
 };
 
+class HostVisibleFolioQuota {
+   public:
+    static bool tryCharge(uint64_t bytes, uint64_t cap) {
+        auto& current = used();
+        uint64_t value = current.load(std::memory_order_relaxed);
+        do {
+            if (bytes > cap || value > cap - bytes) return false;
+        } while (!current.compare_exchange_weak(value, value + bytes,
+                                                std::memory_order_relaxed));
+        return true;
+    }
+
+    static void release(uint64_t bytes) { used().fetch_sub(bytes, std::memory_order_relaxed); }
+    static uint64_t usedBytes() { return used().load(std::memory_order_relaxed); }
+
+   private:
+    static std::atomic<uint64_t>& used() {
+        static std::atomic<uint64_t> value{0};
+        return value;
+    }
+};
+
+// Holds a quota reservation across the allocation's error paths. Once VkDeviceMemory has been
+// recorded, transfer() moves responsibility to MemoryInfo::folioBytes.
+class HostVisibleFolioCharge {
+   public:
+    ~HostVisibleFolioCharge() { release(); }
+    HostVisibleFolioCharge() = default;
+    HostVisibleFolioCharge(const HostVisibleFolioCharge&) = delete;
+    HostVisibleFolioCharge& operator=(const HostVisibleFolioCharge&) = delete;
+
+    bool tryCharge(uint64_t bytes, uint64_t cap) {
+        if (mBytes || !HostVisibleFolioQuota::tryCharge(bytes, cap)) return false;
+        mBytes = bytes;
+        return true;
+    }
+
+    void release() {
+        if (!mBytes) return;
+        HostVisibleFolioQuota::release(mBytes);
+        mBytes = 0;
+    }
+
+    uint64_t bytes() const { return mBytes; }
+    uint64_t transfer() { return std::exchange(mBytes, uint64_t(0)); }
+
+   private:
+    uint64_t mBytes = 0;
+};
+
+#if defined(__linux__)
+// Grow the physical shmem backing to whole-folio size and collapse it before udmabuf pins the
+// pages. The SharedMemory object's logical size and the Vulkan allocation remain unchanged; only
+// the underlying memfd has an inaccessible rounded tail, matching gfxstream's former behavior.
+inline int CollapseMemfdToFolios(int fd, uint64_t roundedSize) {
+#ifndef MADV_COLLAPSE
+    constexpr int kMadvCollapse = 25;
+#else
+    constexpr int kMadvCollapse = MADV_COLLAPSE;
+#endif
+    if (fd < 0 || !roundedSize || (roundedSize & (kFolioSize - 1))) return EINVAL;
+    if (ftruncate(fd, static_cast<off_t>(roundedSize)) != 0) return errno;
+
+    void* reservation = mmap(nullptr, roundedSize + kFolioSize, PROT_NONE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (reservation == MAP_FAILED) return errno;
+
+    const uintptr_t alignedAddress =
+        (reinterpret_cast<uintptr_t>(reservation) + kFolioSize - 1) & ~(kFolioSize - 1);
+    void* mapping = mmap(reinterpret_cast<void*>(alignedAddress), roundedSize,
+                         PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+    int result = 0;
+    if (mapping == MAP_FAILED) {
+        result = errno;
+    } else {
+        (void)madvise(mapping, roundedSize, MADV_HUGEPAGE);
+        std::memset(mapping, 0, roundedSize);
+        if (madvise(mapping, roundedSize, kMadvCollapse) != 0) result = errno;
+    }
+    munmap(reservation, roundedSize + kFolioSize);
+    return result;
+}
+#endif
+
+}  // namespace vk
 }  // namespace host
 }  // namespace gfxstream

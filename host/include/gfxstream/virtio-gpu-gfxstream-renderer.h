@@ -142,16 +142,6 @@ struct stream_renderer_debug_ex {
 typedef void (*stream_renderer_debug_callback_ex)(void* user_data,
                                                struct stream_renderer_debug_ex* debug);
 
-// DroidVM: host-visible blob backing callbacks. The VMM (crosvm) owns how a host-visible blob's
-// shmem is backed (e.g. Gunyah folds it into 2MB folios so its later stage-2 SHARE is exec-clean)
-// and accounts a VRAM quota. `prepare` is called inside VkAllocateMemory with the blob's shmem fd
-// and size, BEFORE any udmabuf pins the pages (a pin blocks MADV_COLLAPSE); it returns the bytes
-// charged against the VMM's quota (0 = not folio-backed / not charged). `release` is called at
-// VkFreeMemory with that value to refund the quota.
-typedef int64_t (*stream_renderer_prepare_blob_backing_callback)(void* user_data, int memfd,
-                                                                 uint64_t size);
-typedef void (*stream_renderer_release_blob_backing_callback)(void* user_data, uint64_t charged);
-
 // Parameters - data passed to initialize the renderer, with the goal of avoiding FFI breakages.
 // To change the data a parameter is passing safely, you should create a new parameter and
 // deprecate the old one. The old parameter may be removed after sufficient time.
@@ -174,10 +164,6 @@ typedef void (*stream_renderer_release_blob_backing_callback)(void* user_data, u
 #define STREAM_RENDERER_PARAM_WIN0_HEIGHT 5
 #define STREAM_RENDERER_PARAM_DEBUG_CALLBACK 6
 #define STREAM_RENDERER_PARAM_DEBUG_CALLBACK_EX 7
-// DroidVM host-visible blob backing callbacks (see typedefs above). Custom key range.
-#define STREAM_RENDERER_PARAM_PREPARE_BLOB_BACKING_CALLBACK 2048
-#define STREAM_RENDERER_PARAM_RELEASE_BLOB_BACKING_CALLBACK 2049
-
 // An entry in the stream renderer parameters list.
 // The key should be one of STREAM_RENDERER_PARAM_*
 // The value can be either a uint64_t or cast to a pointer to a struct, depending on if the
