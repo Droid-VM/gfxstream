@@ -117,6 +117,9 @@ class RenderThread : public gfxstream::base::Thread {
 
     bool mRunInLimitedMode = false;
     uint32_t mContextId = 0;
+    // One DECODE-STALL line per thread: the condition it names does not clear on its own, so
+    // repeating it says nothing new and costs a write on the pipe the VMM's stderr is streamed over.
+    bool mDecodeStallReported = false;
     uint32_t mCapsetId = 0;
     // If we need to reload process resources.
     // This happens in snapshot testing where we don't snapshot render threads.

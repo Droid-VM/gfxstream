@@ -413,12 +413,14 @@ intptr_t RenderThread::main() {
 
     const ProcessResources* processResources = nullptr;
     bool anyProgress = false;
+    uint32_t headerOpcode = 0;
     while (true) {
         // Let's make sure we read enough data for at least some processing.
         uint32_t packetSize;
         if (readBuf.validData() >= 8) {
             // We know that packet size is the second uint32_t from the start.
             std::memcpy(&packetSize, readBuf.buf() + 4, sizeof(uint32_t));
+            std::memcpy(&headerOpcode, readBuf.buf(), sizeof(uint32_t));
             if (!packetSize) {
                 // Emulator will get live-stuck here if packet size is read to be zero;
                 // crash right away so we can see these events.
@@ -431,6 +433,24 @@ intptr_t RenderThread::main() {
             packetSize = 8;
         }
         if (!anyProgress) {
+            // A whole packet already present and nothing decoded it is not the case the rule
+            // below was written for. anyProgress is cleared before each decode pass, so it means
+            // "the last pass decoded nothing", not "no data has arrived". Asking for one more byte
+            // then turns "I am holding a complete packet the decoder declined" into "I am waiting
+            // for a byte the guest will never send" -- the guest is itself waiting for the reply
+            // to that very packet. It presents as a park at have = want - 1, with a correct opcode
+            // and a sane length, and no error on either side.
+            //
+            // The rule is left alone on purpose: widening the read would hide the real defect,
+            // which is a decoder that will not consume a whole packet. See DECODE-UNKNOWN.
+            if (readBuf.validData() >= 8 && packetSize >= 8 && readBuf.validData() >= packetSize &&
+                !mDecodeStallReported) {
+                mDecodeStallReported = true;
+                GFXSTREAM_STALL_PRINT(
+                    "DECODE-STALL: whole packet present and undecoded: opcode=%u len=%u valid=%u "
+                    "ring=%d\n",
+                    headerOpcode, packetSize, (unsigned)readBuf.validData(), mRingStream ? 1 : 0);
+            }
             // If we didn't make any progress last time, then make sure we read at least one
             // extra byte.
             packetSize = std::max(packetSize, static_cast<uint32_t>(readBuf.validData() + 1));
@@ -518,6 +538,8 @@ intptr_t RenderThread::main() {
                             "Processed some Vulkan packets without process resources created. "
                             "That's problematic.");
                     }
+                    if (mRingStream)
+                        mRingStream->noteDecoded(tInfo->m_vkInfo->m_vkDec.lastOpcode());
                     readBuf.consume(last);
                     progress = true;
                 }

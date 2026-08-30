@@ -23,6 +23,9 @@
 #include <iomanip>
 #include <ostream>
 #include <sstream>
+#include <mutex>
+#include <set>
+#include <tuple>
 #include <unordered_set>
 
 #include "compositor_vk.h"
@@ -3089,6 +3092,29 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
         return false;
     }
     const VkFormat vkFormat = *vkFormatOpt;
+
+    // What a colour buffer's bytes actually are. The guest's GPU writes into this image through
+    // its own view of the same memory, the host reads those bytes back unconverted, and the
+    // display consumer assumes a byte order -- so if the guest and this disagree, every colour
+    // comes out with its channels exchanged and nothing else looks wrong. One line per distinct
+    // format triple, so a session costs a handful.
+    {
+        // Per colour buffer, not per format: deduplicating by format hides the interesting case,
+        // which is a buffer whose format happens to match one already seen. Capped so a long
+        // session cannot fill the log.
+        static std::mutex sSeenMutex;
+        static std::set<uint32_t> sSeenHandles;
+        bool firstTime = false;
+        {
+            std::lock_guard<std::mutex> lock(sSeenMutex);
+            firstTime = sSeenHandles.size() < 24 && sSeenHandles.insert(colorBufferHandle).second;
+        }
+        if (firstTime) {
+            GFXSTREAM_INFO("ColorBuffer %u: %ux%u %s -> internal %s -> %s", colorBufferHandle, width,
+                           height, ToString(format).c_str(), ToString(internalFormat).c_str(),
+                           string_VkFormat(vkFormat));
+        }
+    }
 
     // Requesting invalid texture sizes can crash some drivers, early out to gracefully handle
     // the errors and avoid total emulator crash.

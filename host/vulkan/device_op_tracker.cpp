@@ -113,7 +113,61 @@ void DeviceOpTracker::StopPollThread() {
     }
 }
 
+
+// Where a sweep's time goes, and how deep the queue it walks is.
+//
+// The two questions that decide whether a sweep is worth avoiding: how many operations it has to
+// ask the driver about, and what one of those questions costs. vkGetFenceStatus is not a cheap
+// read on this driver, so the cost of a sweep is essentially the queue depth times that -- which
+// means a queue that grows over time turns an occasional sweep into a multi-millisecond stall
+// while every average stays where it was.
+//
+// GFXSTREAM_SUBMIT_TRACE=1 turns it on; off, it costs one load and a branch. Reports every 100
+// sweeps, and prints the depth left behind so a queue that is growing is visible as a trend.
+struct SweepProfile {
+    static bool Enabled() {
+        static const bool on = getenv("GFXSTREAM_SUBMIT_TRACE") != nullptr;
+        return on;
+    }
+    static uint64_t NowNs() {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    }
+    static void Record(uint64_t lockNs, uint64_t pollNs, size_t polled, size_t pollLeft,
+                       uint64_t garbageNs, size_t destroyed, size_t garbageLeft) {
+        static std::atomic<uint64_t> sPoll{0}, sGarbage{0}, sPolled{0}, sDestroyed{0}, sCount{0};
+        static std::atomic<uint64_t> sLock{0}, sPollMax{0};
+        sLock += lockNs;
+        if (polled) {
+            uint64_t per = pollNs / polled, prev = sPollMax.load();
+            while (per > prev && !sPollMax.compare_exchange_weak(prev, per)) {}
+        }
+        sPoll += pollNs;
+        sGarbage += garbageNs;
+        sPolled += polled;
+        sDestroyed += destroyed;
+        const uint64_t n = ++sCount;
+        constexpr uint64_t kEvery = 100;
+        if (n % kEvery) return;
+        GFXSTREAM_WARNING(
+            "SWEEPPROF n=%llu avg/sweep(us): lock-wait=%llu poll=%llu (worst single "
+            "vkGetFenceStatus=%llu) over %llu ops, %d queued | destroy=%llu over %llu objs, %d "
+            "queued",
+            (unsigned long long)n, (unsigned long long)(sLock.exchange(0) / kEvery / 1000),
+            (unsigned long long)(sPoll.exchange(0) / kEvery / 1000),
+            (unsigned long long)(sPollMax.exchange(0) / 1000),
+            (unsigned long long)(sPolled.exchange(0) / kEvery), (int)pollLeft,
+            (unsigned long long)(sGarbage.exchange(0) / kEvery / 1000),
+            (unsigned long long)(sDestroyed.exchange(0) / kEvery), (int)garbageLeft);
+    }
+};
+
 void DeviceOpTracker::PollAndProcessGarbage() {
+    const bool prof = SweepProfile::Enabled();
+    const uint64_t profT0 = prof ? SweepProfile::NowNs() : 0;
+    size_t profPolled = 0, profDestroyed = 0;
+    uint64_t profPollNs = 0;
 
     // Take the operations to examine out of the queue before touching the driver. Polling can cost
     // milliseconds per call, and AddPendingDeviceOp -- which every queue submit runs -- needs this
@@ -124,6 +178,7 @@ void DeviceOpTracker::PollAndProcessGarbage() {
         std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
         examining.swap(mPollFunctions);
     }
+    const uint64_t profLockedNs = prof ? SweepProfile::NowNs() : 0;
 
     {
         const auto expiry = std::chrono::system_clock::now() - kAutoDeleteTimeThreshold;
@@ -132,6 +187,7 @@ void DeviceOpTracker::PollAndProcessGarbage() {
         // call.
         auto firstInFlightIt = examining.begin();
         for (; firstInFlightIt != examining.end(); ++firstInFlightIt) {
+            ++profPolled;
             if (PollOne(*firstInFlightIt, /* assumeSignalled */ false) != DeviceOpStatus::kPending) {
                 continue;
             }
@@ -149,6 +205,7 @@ void DeviceOpTracker::PollAndProcessGarbage() {
         }
         examining.erase(examining.begin(), firstInFlightIt);
     }
+    if (prof) profPollNs = SweepProfile::NowNs() - profLockedNs;
 
     std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
     // Anything submitted while we were polling belongs after what we put back.
@@ -194,6 +251,7 @@ void DeviceOpTracker::PollAndProcessGarbage() {
 
         for (auto it = mPendingGarbage.begin(); it != firstPendingIt; it++) {
             PendingGarbage& pendingGarbage = *it;
+            ++profDestroyed;
 
             if (pendingGarbage.timepoint < old) {
                 const auto difference = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -220,6 +278,12 @@ void DeviceOpTracker::PollAndProcessGarbage() {
 
         mPendingGarbage.erase(mPendingGarbage.begin(), firstPendingIt);
 
+        if (prof) {
+            SweepProfile::Record(profLockedNs - profT0, profPollNs, profPolled,
+                                 mPollFunctions.size(),
+                                 SweepProfile::NowNs() - profLockedNs - profPollNs, profDestroyed,
+                                 mPendingGarbage.size());
+        }
         if (mPendingGarbage.size() > kSizeLoggingThreshold) {
             GFXSTREAM_WARNING("VkDevice:%p has %d pending garbage objects.", mDevice,
                               mPendingGarbage.size());

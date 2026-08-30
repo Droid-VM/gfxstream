@@ -48,6 +48,7 @@
 #include <vulkan/vulkan_beta.h> // for MoltenVK portability extensions
 #endif
 
+#include "decoder_profile.h"
 #include "common/goldfish_vk_deepcopy.h"
 #include "common/goldfish_vk_dispatch.h"
 #include "common/goldfish_vk_marshaling.h"
@@ -3292,6 +3293,29 @@ class VkDecoderGlobalState::Impl {
             return VK_ERROR_OUT_OF_HOST_MEMORY;
         }
 
+        // What the guest asks a scanout-capable image to be. A guest compositor's swapchain images
+        // are created here and bound to guest pool memory, so this format alone decides the byte
+        // order of everything the display consumer later reads -- there is no host colour buffer
+        // in that path to consult. When the picture comes out with red and blue exchanged, the
+        // question is always whether this agrees with the DRM fourcc the guest declared for the
+        // same buffer, and nothing recorded it. Bounded: one line per distinct format and usage.
+        if (::gfxstream::host::diagEnabled() &&
+            (pCreateInfo->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+            static std::mutex sSeenMutex;
+            static std::set<std::pair<VkFormat, VkImageUsageFlags>> sSeen;
+            bool firstTime = false;
+            {
+                std::lock_guard<std::mutex> seenLock(sSeenMutex);
+                firstTime = sSeen.insert({pCreateInfo->format, pCreateInfo->usage}).second;
+            }
+            if (firstTime) {
+                GFXSTREAM_DIAG_PRINT("GUEST-IMAGE: %s %ux%u usage=0x%x tiling=%d\n",
+                                     string_VkFormat(pCreateInfo->format),
+                                     pCreateInfo->extent.width, pCreateInfo->extent.height,
+                                     pCreateInfo->usage, (int)pCreateInfo->tiling);
+            }
+        }
+
         // Change creation parameters before the validation checks below as the
         // creation format and its device properties may change
         const bool needDecompression = deviceInfo->needEmulatedDecompression(pCreateInfo->format);
@@ -3465,6 +3489,46 @@ class VkDecoderGlobalState::Impl {
         return VK_SUCCESS;
     }
 
+    // Two images over the same bytes is the third way a declared format and an actual channel
+    // order come apart, and the only one the view and copy diagnostics cannot see: whichever
+    // image is rendered into decides the byte order, while the one the scanout is described by
+    // decides the label. The pool path makes this easy to do by accident, since a blob's memory
+    // is handed out by offset. Reported for scanout-sized images whether or not the formats
+    // differ -- a line saying two images agree is what proves the site ran.
+    //
+    // Called from both bind paths. vkBindImageMemory2 only routes through performBindImageMemory
+    // when something needs emulating, so a check living there alone is blind to every ordinary
+    // bind the guest makes through the 2 entry point -- which is what made one batch of runs look
+    // structurally different from another when the only difference was which entry point was used.
+    static void noteImageMemoryBind(const VkImageCreateInfo& ci, VkDeviceMemory memory,
+                                    VkDeviceSize memoryOffset) {
+        // Nothing here runs unless the switch is on: the bookkeeping below takes a process-wide
+        // lock and grows a map that is never pruned, and a diagnostic that is off has to cost a
+        // load and a branch, not that.
+        if (!::gfxstream::host::diagEnabled()) return;
+        if (ci.extent.width < 1024) return;
+        static std::mutex sAliasMutex;
+        static std::map<std::pair<VkDeviceMemory, VkDeviceSize>, VkFormat> sBoundAt;
+        VkFormat previous = VK_FORMAT_UNDEFINED;
+        bool firstAtOffset = false;
+        {
+            std::lock_guard<std::mutex> aliasLock(sAliasMutex);
+            auto [it, inserted] = sBoundAt.emplace(std::make_pair(memory, memoryOffset), ci.format);
+            firstAtOffset = inserted;
+            if (!inserted) previous = it->second;
+        }
+        if (!firstAtOffset) {
+            GFXSTREAM_DIAG_PRINT("BIND-ALIAS: %s mem=%p off=%llu first=%s now=%s %ux%u\n",
+                                 previous != ci.format ? "MISMATCH" : "same", (void*)memory,
+                                 (unsigned long long)memoryOffset, string_VkFormat(previous),
+                                 string_VkFormat(ci.format), ci.extent.width, ci.extent.height);
+        } else {
+            GFXSTREAM_DIAG_PRINT("BIND-ALIAS: first mem=%p off=%llu fmt=%s %ux%u\n", (void*)memory,
+                                 (unsigned long long)memoryOffset, string_VkFormat(ci.format),
+                                 ci.extent.width, ci.extent.height);
+        }
+    }
+
     VkResult performBindImageMemory(gfxstream::base::BumpPool* pool,
                                     VkSnapshotApiCallHandle apiCallHandle, VkDevice boxed_device,
                                     const VkBindImageMemoryInfo* bimi) EXCLUDES(mMutex) {
@@ -3502,6 +3566,30 @@ class VkDecoderGlobalState::Impl {
                                                        *imageInfo->boundColorBuffer);
         }
         imageInfo->memory = memory;
+
+        // Ties an image bind to the memory's provenance so a render target can be told apart from
+        // the scanout export: prints the blobId, whether it is a ColorBuffer, and the GpuPool
+        // offset. The hardware greeter renders to images bound to fresh host memory (blob=0,
+        // cb=none) while the buffer the display scans out is a distinct guest blob -- if that is
+        // what this shows, the two never alias and the drawn frame never reaches the screen.
+        if (::gfxstream::host::diagEnabled() &&
+            imageInfo->imageCreateInfoShallow.extent.width >= 512) {
+            const char* tilingStr =
+                imageInfo->imageCreateInfoShallow.tiling == VK_IMAGE_TILING_LINEAR    ? "LINEAR"
+                : imageInfo->imageCreateInfoShallow.tiling == VK_IMAGE_TILING_OPTIMAL ? "OPTIMAL"
+                                                                                      : "DRM_MOD";
+            GFXSTREAM_DIAG_PRINT(
+                "BIND-PROV: %ux%u fmt=%s tiling=%s usage=%#x mem=%p blobId=%llu cb=%d poolOff=%lld\n",
+                imageInfo->imageCreateInfoShallow.extent.width,
+                imageInfo->imageCreateInfoShallow.extent.height,
+                string_VkFormat(imageInfo->imageCreateInfoShallow.format), tilingStr,
+                imageInfo->imageCreateInfoShallow.usage, (void*)memory,
+                (unsigned long long)memoryInfo->blobId,
+                (int)memoryInfo->boundColorBuffer.value_or(-1),
+                (long long)memoryInfo->poolOffset);
+        }
+
+        noteImageMemoryBind(imageInfo->imageCreateInfoShallow, memory, memoryOffset);
 
         if (!imageInfo->compressInfo) {
             return VK_SUCCESS;
@@ -3602,6 +3690,9 @@ class VkDecoderGlobalState::Impl {
                         pBindInfos[i].image, "ColorBuffer:%d", *memoryInfo->boundColorBuffer);
                 }
                 imageInfo->memory = pBindInfos[i].memory;
+
+                noteImageMemoryBind(imageInfo->imageCreateInfoShallow, pBindInfos[i].memory,
+                                    pBindInfos[i].memoryOffset);
             }
         }
 
@@ -3621,6 +3712,59 @@ class VkDecoderGlobalState::Impl {
         auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
         auto* imageInfo = gfxstream::base::find(mImageInfo, pCreateInfo->image);
         if (!deviceInfo || !imageInfo) return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+        // A view whose format differs from its image reinterprets the bytes already there --
+        // legal on a MUTABLE_FORMAT image, which the guest ICD sets on every image it creates.
+        // That makes it one of the two ways the scanout's declared format and its actual channel
+        // order can come apart. One line per distinct (image, view) format pair.
+        //
+        // Matching views on scanout-sized images are reported too, and deliberately: "no mismatch
+        // was printed" is worth nothing unless something proves this site ran and saw the image in
+        // question. A line saying image and view agree is that proof, and it also answers what the
+        // render target actually is when the answer turns out not to be a swapped view.
+        // The components field is the other half of what a view can change, and the half that is
+        // easy to forget: a non-identity swizzle makes every sample come out in a different
+        // channel order than the image holds, which is how a renderer can write mirrored bytes
+        // through an attachment whose format is perfectly correct. zink sets exactly this kind of
+        // swizzle on sampler views (zink_context.c), while render-target views are always identity
+        // -- so the one to look for sits on the texture being read, not on the scanout.
+        auto swizzleIsIdentity = [](const VkComponentMapping& c) {
+            auto ok = [](VkComponentSwizzle s, VkComponentSwizzle want) {
+                return s == VK_COMPONENT_SWIZZLE_IDENTITY || s == want;
+            };
+            return ok(c.r, VK_COMPONENT_SWIZZLE_R) && ok(c.g, VK_COMPONENT_SWIZZLE_G) &&
+                   ok(c.b, VK_COMPONENT_SWIZZLE_B) && ok(c.a, VK_COMPONENT_SWIZZLE_A);
+        };
+        const bool viewSwizzled =
+            ::gfxstream::host::diagEnabled() && !swizzleIsIdentity(pCreateInfo->components);
+        const bool viewFormatDiffers =
+            imageInfo->imageCreateInfoShallow.format != pCreateInfo->format;
+        if (::gfxstream::host::diagEnabled() &&
+            (viewFormatDiffers || viewSwizzled ||
+             imageInfo->imageCreateInfoShallow.extent.width >= 1024)) {
+            static std::mutex sViewSeenMutex;
+            static std::set<std::tuple<VkFormat, VkFormat, bool>> sViewSeen;
+            bool firstTime = false;
+            {
+                std::lock_guard<std::mutex> seenLock(sViewSeenMutex);
+                firstTime =
+                    sViewSeen
+                        .insert({imageInfo->imageCreateInfoShallow.format, pCreateInfo->format,
+                                 viewSwizzled})
+                        .second;
+            }
+            if (firstTime) {
+                GFXSTREAM_DIAG_PRINT(
+                    "VIEW-FORMAT: %s%s image=%s view=%s swizzle=%d,%d,%d,%d %ux%u\n",
+                    viewFormatDiffers ? "MISMATCH" : "match", viewSwizzled ? "+SWIZZLED" : "",
+                    string_VkFormat(imageInfo->imageCreateInfoShallow.format),
+                    string_VkFormat(pCreateInfo->format), (int)pCreateInfo->components.r,
+                    (int)pCreateInfo->components.g, (int)pCreateInfo->components.b,
+                    (int)pCreateInfo->components.a, imageInfo->imageCreateInfoShallow.extent.width,
+                    imageInfo->imageCreateInfoShallow.extent.height);
+            }
+        }
+
         VkImageViewCreateInfo createInfo;
         bool needEmulatedAlpha = false;
         if (deviceInfo->needEmulatedDecompression(pCreateInfo->format)) {
@@ -4104,6 +4248,29 @@ class VkDecoderGlobalState::Impl {
         // one call, it blocks in the driver rather than spinning, and it holds no lock of ours.
         // One sweep afterwards turns "the fence signalled" into "the tracked operation completed"
         // for the bookkeeping.
+        // Which half of this wait costs anything decides what to do about it, and the two answers
+        // want opposite fixes: if the fences are already signalled and the time goes into the
+        // sweep, stop making completion depend on being swept; if they are genuinely still in
+        // flight, stop the guest having to wait for them here at all. So measure before choosing.
+        // The zero-timeout probe below is what separates them, and it is the number that matters:
+        // the old tree recorded 100% already-signalled in 5us, and if this tree is lower then the
+        // guest is being made to wait on the GPU on a synchronous path.
+        //
+        // GFXSTREAM_RESETFENCE_TRACE=1; reports every 5s. Off, this costs one bool test per call.
+        static const bool kResetFenceTrace = [] {
+            const char* env = getenv("GFXSTREAM_RESETFENCE_TRACE");
+            return env && env[0] != '0';
+        }();
+        static std::atomic<uint64_t> sCalls{0}, sWithPending{0}, sWaitNs{0}, sSweepNs{0},
+            sAlreadySignalled{0}, sFenceCount{0};
+        static std::atomic<uint64_t> sLastReportNs{0};
+        const auto traceNowNs = [] {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+        };
+        if (kResetFenceTrace) sCalls.fetch_add(1, std::memory_order_relaxed);
+
         if (!pendingUses.empty()) {
             {
                 std::lock_guard<std::mutex> lock(mMutex);
@@ -4126,10 +4293,21 @@ class VkDecoderGlobalState::Impl {
 
             VkResult waitRes = VK_SUCCESS;
             if (!pendingUseFences.empty()) {
+                // A zero-timeout probe purely to record whether the wait below had anything to
+                // wait for. One extra driver call on a path that already makes several, and only
+                // when the trace is on.
+                if (kResetFenceTrace &&
+                    vk->vkWaitForFences(device, (uint32_t)pendingUseFences.size(),
+                                        pendingUseFences.data(), VK_TRUE, 0) == VK_SUCCESS) {
+                    sAlreadySignalled.fetch_add(1, std::memory_order_relaxed);
+                }
                 static constexpr uint64_t kFenceWaitTimeoutNs = 5ULL * 1000 * 1000 * 1000;
+                const uint64_t waitT0 = kResetFenceTrace ? traceNowNs() : 0;
                 waitRes = vk->vkWaitForFences(device, (uint32_t)pendingUseFences.size(),
                                               pendingUseFences.data(), VK_TRUE,
                                               kFenceWaitTimeoutNs);
+                if (kResetFenceTrace)
+                    sWaitNs.fetch_add(traceNowNs() - waitT0, std::memory_order_relaxed);
                 if (waitRes != VK_SUCCESS) {
                     // A fence that never signals must not hang the guest thread that reset it.
                     // The tracker expires such an operation on its own after five seconds.
@@ -4149,6 +4327,7 @@ class VkDecoderGlobalState::Impl {
             // measured at roughly 3.7ms a call and a quarter of all host dispatch. It also lands
             // on a guest-facing path, which is exactly what the tracker's own sweeper thread
             // exists to avoid.
+            const uint64_t sweepT0 = kResetFenceTrace ? traceNowNs() : 0;
             if (!pendingUseFences.empty() && waitRes == VK_SUCCESS) {
                 tracker->CompleteOpsForSignalledFences(pendingUseFences.data(),
                                                        (uint32_t)pendingUseFences.size());
@@ -4157,6 +4336,31 @@ class VkDecoderGlobalState::Impl {
                 // NOT known to be signalled -- marking those operations complete would let objects
                 // still referenced by them be destroyed. Fall back to asking the driver.
                 tracker->PollAndProcessGarbage();
+            }
+            if (kResetFenceTrace)
+                sSweepNs.fetch_add(traceNowNs() - sweepT0, std::memory_order_relaxed);
+        }
+
+        if (kResetFenceTrace) {
+            const uint64_t now = traceNowNs();
+            uint64_t last = sLastReportNs.load(std::memory_order_relaxed);
+            if (now - last > 5000000000ull &&
+                sLastReportNs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+                const uint64_t calls = sCalls.exchange(0, std::memory_order_relaxed);
+                const uint64_t pend = sWithPending.exchange(0, std::memory_order_relaxed);
+                const uint64_t sig = sAlreadySignalled.exchange(0, std::memory_order_relaxed);
+                const uint64_t fences = sFenceCount.exchange(0, std::memory_order_relaxed);
+                const uint64_t waitNs = sWaitNs.exchange(0, std::memory_order_relaxed);
+                const uint64_t sweepNs = sSweepNs.exchange(0, std::memory_order_relaxed);
+                GFXSTREAM_WARNING(
+                    "RESETFENCETRACE: %llu calls, %llu had a pending use (%llu of those had the "
+                    "fence already signalled, %llu fences waited on); wait %lluus total (%lluus "
+                    "each), sweep %lluus total (%lluus each)",
+                    (unsigned long long)calls, (unsigned long long)pend, (unsigned long long)sig,
+                    (unsigned long long)fences, (unsigned long long)(waitNs / 1000),
+                    (unsigned long long)(pend ? waitNs / pend / 1000 : 0),
+                    (unsigned long long)(sweepNs / 1000),
+                    (unsigned long long)(pend ? sweepNs / pend / 1000 : 0));
             }
         }
 
@@ -5504,6 +5708,30 @@ class VkDecoderGlobalState::Impl {
         auto* srcImg = gfxstream::base::find(mImageInfo, srcImage);
         auto* dstImg = gfxstream::base::find(mImageInfo, dstImage);
         if (!srcImg || !dstImg) return;
+
+        // vkCmdCopyImage between two formats of the same block size moves the bytes verbatim --
+        // no channel conversion. So a copy across formats is the other way the declared format
+        // and the actual channel order can come apart. One line per distinct (src, dst) pair.
+        if (::gfxstream::host::diagEnabled() &&
+            srcImg->imageCreateInfoShallow.format != dstImg->imageCreateInfoShallow.format) {
+            static std::mutex sCopySeenMutex;
+            static std::set<std::pair<VkFormat, VkFormat>> sCopySeen;
+            bool firstTime = false;
+            {
+                std::lock_guard<std::mutex> seenLock(sCopySeenMutex);
+                firstTime = sCopySeen
+                                .insert({srcImg->imageCreateInfoShallow.format,
+                                         dstImg->imageCreateInfoShallow.format})
+                                .second;
+            }
+            if (firstTime) {
+                GFXSTREAM_DIAG_PRINT("COPY-FORMAT: src=%s dst=%s %ux%u\n",
+                                     string_VkFormat(srcImg->imageCreateInfoShallow.format),
+                                     string_VkFormat(dstImg->imageCreateInfoShallow.format),
+                                     dstImg->imageCreateInfoShallow.extent.width,
+                                     dstImg->imageCreateInfoShallow.extent.height);
+            }
+        }
 
         VkDevice device = srcImg->device;
         auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);

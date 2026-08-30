@@ -143,6 +143,167 @@ RingStream::RingStream(const AsgConsumerCreateInfo& info, size_t bufsize) :
 
 RingStream::~RingStream() = default;
 
+
+// How much of a consumer's time on its core is spinning rather than consuming.
+//
+// FPS on this device varies by more than two to one between boots of the same binary, which makes
+// any throughput comparison of a spin setting unreadable. Counts do not: the per-frame structural
+// numbers this session measured -- opcodes, batches, replays -- stayed within 4% across the same
+// runs whose scores moved 2.1x, because they are normalised by the work rather than by the clock.
+//
+// So count the spinning instead of timing it. Reported against packets consumed, so "spins per
+// packet" is comparable between two trees without either of them having to score the same.
+namespace {
+// Per consumer thread, because the aggregate is dominated by whichever thread has nothing to do.
+//
+// A consumer with no traffic sits inside one readRaw call forever: spin the budget, park on the
+// message queue, get woken, spin the budget again. It never returns, so it contributes no reads
+// and no packets, while producing far more spin events than a thread that is actually working --
+// which is why the summed counters read as "zero reads, zero packets" even though the system is
+// plainly running. Summed, the busy thread is invisible; split by thread, the two are obvious.
+//
+// Parking itself is cheap: onUnavailableRead blocks on a queue. What costs is the spin before it,
+// and with a zero sleep each turn is a sched_yield -- a syscall that hands the core away and takes
+// it back, thousands of times per wake, on a core every consumer shares.
+struct SpinCount {
+    static bool Enabled() {
+        static const bool on = getenv("GFXSTREAM_ASG_SPIN_TRACE") != nullptr;
+        return on;
+    }
+    struct Counts {
+        uint64_t episodes = 0, spins = 0, parks = 0, reads = 0, packets = 0, events = 0;
+        uint64_t gaps[7] = {};
+        uint64_t lastPacketNs = 0;
+        uint64_t stallStartNs = 0;
+        uint64_t stallStartNotifies = 0;
+        // The reply path. commitBuffer spins on sched_yield until the guest drains from_host, and
+        // does not back off for ten million turns, so "the host is waiting for the guest to read
+        // its answer" is invisible unless it is counted here. Duration buckets in microseconds.
+        uint64_t writes = 0, writeSpun = 0, writeIters = 0, writeUs = 0;
+        uint64_t writeGaps[7] = {};
+        // Process name plus thread id. The name alone is not an identity: crosvm names each render
+        // thread after the guest process it serves, and a guest process gets one ring per thread
+        // that touches Vulkan -- eleven for plasmashell, eight for kwin_wayland on this device. A
+        // line labelled only "kwin_wayland" is therefore eight rings' worth of events tallied as
+        // one, which is not something the reader can undo afterwards.
+        char name[32] = {};
+    };
+    static Counts& Mine() {
+        static thread_local Counts c = [] {
+            Counts init;
+#if defined(__linux__)
+            char comm[16] = {};
+            prctl(PR_GET_NAME, comm, 0, 0, 0);
+            snprintf(init.name, sizeof(init.name), "%s/%d", comm, (int)gettid());
+#endif
+            return init;
+        }();
+        return c;
+    }
+    static uint64_t NowNs() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    }
+    static void NoteEntry() { ++Mine().reads; }
+    static void NoteEpisode() { ++Mine().episodes; }
+
+    // A stall, caught while it is happening rather than inferred from a histogram afterwards.
+    //
+    // The gap distribution says most packets arrive faster than they used to and about one in a
+    // hundred takes over five milliseconds, and that thin tail is where the time goes. An average
+    // cannot say what those hundred-fold waits have in common; a line printed from inside one can.
+    //
+    // The threshold sits far above a normal wait (a handful of turns) and far below the park
+    // budget, so a healthy consumer never reaches it and pays a compare per turn for the privilege.
+    static constexpr uint32_t kStallSpins = 500;
+    static void NoteStallBegin(uint32_t writePos, uint32_t readPos, uint32_t state, uint32_t avail,
+                               uint32_t largeAvail, uint32_t lastOpcode, uint64_t badOps) {
+        Counts& c = Mine();
+        c.stallStartNs = NowNs();
+        c.stallStartNotifies = asgNotifyCount().load(std::memory_order_relaxed);
+        GFXSTREAM_WARNING(
+            "ASGSTALL[%s] begin: spins=%u write=%u read=%u state=%u avail=%u largeavail=%u "
+            "lastop=%u badops=%llu",
+            c.name[0] ? c.name : "?", kStallSpins, writePos, readPos, state, avail, largeAvail,
+            lastOpcode, (unsigned long long)badOps);
+    }
+    static void NoteStallEnd(uint32_t spins, uint32_t writePos, uint32_t readPos, uint32_t state,
+                             uint32_t avail, uint32_t largeAvail, bool parked) {
+        Counts& c = Mine();
+        if (!c.stallStartNs) return;
+        const uint64_t us = (NowNs() - c.stallStartNs) / 1000;
+        const uint64_t notifies =
+            asgNotifyCount().load(std::memory_order_relaxed) - c.stallStartNotifies;
+        c.stallStartNs = 0;
+        GFXSTREAM_WARNING(
+            "ASGSTALL[%s] end: %s after %uus, spins=%u write=%u read=%u state=%u avail=%u "
+            "largeavail=%u wakeups=%llu",
+            c.name[0] ? c.name : "?", parked ? "parked" : "got data", (unsigned)us, spins, writePos,
+            readPos, state, avail, largeAvail, (unsigned long long)notifies);
+    }
+    static void NotePacket() {
+        Counts& c = Mine();
+        ++c.packets;
+        const uint64_t now = NowNs();
+        if (c.lastPacketNs) {
+            const uint64_t gapUs = (now - c.lastPacketNs) / 1000;
+            static constexpr uint64_t kEdges[] = {10, 50, 100, 500, 1000, 5000};
+            size_t i = 0;
+            while (i < 6 && gapUs >= kEdges[i]) ++i;
+            ++c.gaps[i];
+        }
+        c.lastPacketNs = now;
+    }
+    static void NoteWrite(uint64_t iters, uint64_t us) {
+        Counts& c = Mine();
+        ++c.writes;
+        c.writeIters += iters;
+        c.writeUs += us;
+        if (iters > 1) ++c.writeSpun;
+        static constexpr uint64_t kEdges[] = {10, 50, 100, 500, 1000, 5000};
+        size_t i = 0;
+        while (i < 6 && us >= kEdges[i]) ++i;
+        ++c.writeGaps[i];
+        constexpr uint64_t kEvery = 2000;
+        if (c.writes % kEvery) return;
+        // Raw counts, same discipline as ASGSPIN: a mean here would hide the tail, and the tail is
+        // the entire question.
+        GFXSTREAM_WARNING(
+            "ASGWRITE[%s] raw: writes=%llu spun=%llu iters=%llu totalus=%llu | us <10:%llu "
+            "<50:%llu <100:%llu <500:%llu <1k:%llu <5k:%llu 5k+:%llu",
+            c.name[0] ? c.name : "?", (unsigned long long)c.writes,
+            (unsigned long long)c.writeSpun, (unsigned long long)c.writeIters,
+            (unsigned long long)c.writeUs, (unsigned long long)c.writeGaps[0],
+            (unsigned long long)c.writeGaps[1], (unsigned long long)c.writeGaps[2],
+            (unsigned long long)c.writeGaps[3], (unsigned long long)c.writeGaps[4],
+            (unsigned long long)c.writeGaps[5], (unsigned long long)c.writeGaps[6]);
+        c.writes = c.writeSpun = c.writeIters = c.writeUs = 0;
+        for (auto& g : c.writeGaps) g = 0;
+    }
+    static void NoteSpins(uint64_t n, bool parked) {
+        Counts& c = Mine();
+        c.spins += n;
+        if (parked) ++c.parks;
+        constexpr uint64_t kEvery = 2000;
+        if (++c.events % kEvery) return;
+        // Raw counts only. A ratio computed here hides how its parts were counted, which has
+        // already produced three findings this session that were arithmetic rather than behaviour.
+        GFXSTREAM_WARNING(
+            "ASGSPIN[%s] raw: episodes=%llu spin_iters=%llu parks=%llu reads=%llu packets=%llu | "
+            "gap us <10:%llu <50:%llu <100:%llu <500:%llu <1k:%llu <5k:%llu 5k+:%llu",
+            c.name[0] ? c.name : "?", (unsigned long long)c.episodes, (unsigned long long)c.spins,
+            (unsigned long long)c.parks, (unsigned long long)c.reads,
+            (unsigned long long)c.packets, (unsigned long long)c.gaps[0],
+            (unsigned long long)c.gaps[1], (unsigned long long)c.gaps[2],
+            (unsigned long long)c.gaps[3], (unsigned long long)c.gaps[4],
+            (unsigned long long)c.gaps[5], (unsigned long long)c.gaps[6]);
+        c.episodes = c.spins = c.parks = c.reads = c.packets = 0;
+        for (auto& g : c.gaps) g = 0;
+    }
+};
+}  // namespace
+
 void RingStream::reloadRingConfig() {
     *mContext.ring_config = mSavedRingConfig;
 }
@@ -158,6 +319,7 @@ int RingStream::commitBuffer(size_t size) {
     size_t sent = 0;
     auto data = mWriteBuffer.data();
 
+    const uint64_t writeT0 = SpinCount::Enabled() ? SpinCount::NowNs() : 0;
     size_t iters = 0;
     size_t backedOffIters = 0;
     const size_t kBackoffIters = 10000000ULL;
@@ -192,6 +354,10 @@ int RingStream::commitBuffer(size_t size) {
         sent += todo;
     }
 
+    if (SpinCount::Enabled()) {
+        SpinCount::NoteWrite(iters, (SpinCount::NowNs() - writeT0) / 1000);
+    }
+
     if (backedOffIters > 0) {
         GFXSTREAM_WARNING(
             "Backed off %zu times to avoid overloading the guest system. This "
@@ -202,6 +368,7 @@ int RingStream::commitBuffer(size_t size) {
 }
 
 const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
+    if (SpinCount::Enabled()) SpinCount::NoteEntry();
     size_t wanted = *inout_len;
     size_t count = 0U;
     auto dst = static_cast<char*>(buf);
@@ -321,6 +488,12 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                 mContext.to_host_large_xfer.ring,
                 &mContext.to_host_large_xfer.view);
 
+        if (SpinCount::Enabled() && spins && (ringAvailable || ringLargeXferAvailable)) {
+            SpinCount::NoteStallEnd(spins, mContext.to_host->write_pos, mContext.to_host->read_pos,
+                                    (unsigned)*(mContext.host_state), ringAvailable,
+                                    ringLargeXferAvailable, /* parked */ false);
+        }
+
         auto current = dst + count;
         auto ptrEnd = dst + wanted;
 
@@ -362,6 +535,20 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
             }
 
             ++spins;
+            if (SpinCount::Enabled()) {
+                if (spins == 1) SpinCount::NoteEpisode();
+                SpinCount::NoteSpins(1, /* parked */ false);
+                if (spins == SpinCount::kStallSpins) {
+                    SpinCount::NoteStallBegin(mContext.to_host->write_pos,
+                                              mContext.to_host->read_pos,
+                                              (unsigned)*(mContext.host_state),
+                                              ring_buffer_available_read(mContext.to_host, 0),
+                                              ring_buffer_available_read(
+                                                  mContext.to_host_large_xfer.ring,
+                                                  &mContext.to_host_large_xfer.view),
+                                              mLastDecoded, mBadDecoded);
+                }
+            }
             uint32_t sleepUs = UINT32_MAX;  // past the last stage -> park
             for (const SpinLevel& level : spinLevels) {
                 if (spins <= level.upToIter) {
@@ -377,7 +564,18 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
                 }
                 continue;
             }
+            if (SpinCount::Enabled()) {
+                SpinCount::NoteStallEnd(spins, mContext.to_host->write_pos,
+                                        mContext.to_host->read_pos,
+                                        (unsigned)*(mContext.host_state),
+                                        ring_buffer_available_read(mContext.to_host, 0),
+                                        ring_buffer_available_read(
+                                            mContext.to_host_large_xfer.ring,
+                                            &mContext.to_host_large_xfer.view),
+                                        /* parked */ true);
+            }
             spins = 0;
+            if (SpinCount::Enabled()) SpinCount::NoteSpins(0, /* parked */ true);
 
             if (mShouldExit) {
                 return nullptr;
@@ -437,6 +635,7 @@ const unsigned char* RingStream::readRaw(void* buf, size_t* inout_len) {
     }
 
     *inout_len = count;
+    if (SpinCount::Enabled()) SpinCount::NotePacket();
     ++mXmits;
     mTotalRecv += count;
 

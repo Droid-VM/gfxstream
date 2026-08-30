@@ -33,9 +33,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <thread>
+#include <set>
+#include <string>
 #include <unordered_map>
+#include <utility>
 
 #include "common/goldfish_vk_marshaling.h"
 #include "gfxstream_diag.h"
@@ -44,6 +48,7 @@
 #include "frame_buffer.h"
 #include "gfxstream/BumpPool.h"
 #include "gfxstream/common/logging.h"
+#include "decoder_profile.h"
 #include "gfxstream/host/iostream.h"
 #include "gfxstream/host/tracing.h"
 #include "gfxstream/system/System.h"
@@ -77,6 +82,7 @@ class VkDecoder::Impl {
           m_queueSubmitWithCommandsEnabled(
               m_state->getFeatures().VulkanQueueSubmitWithCommands.enabled()),
           m_snapshotsEnabled(m_state->snapshotsEnabled()) {}
+    uint32_t lastOpcode() const { return m_lastOpcode; }
     VulkanStream* stream() { return &m_vkStream; }
     VulkanMemReadingStream* readStream() { return &m_vkMemReadingStream; }
 
@@ -98,9 +104,35 @@ class VkDecoder::Impl {
     std::optional<uint32_t> m_prevSeqno;
     bool m_queueSubmitWithCommandsEnabled = false;
     const bool m_snapshotsEnabled = false;
+    // The last packet this decoder finished. The park path is the only place that can report what
+    // the guest was doing before it went quiet, and a decoder that is waiting never gets back to
+    // its own loop to say so. One store per packet.
+    uint32_t m_lastOpcode = 0;
 };
 
+// An opcode with no case falls to default:, which returns without consuming the packet and
+// without advancing the sequence counter. The render thread's read loop then asks for one more
+// byte and decodes the same bytes again, and again, for every byte that arrives -- and because
+// this path never reaches an epilogue, every other render thread of the same guest process blocks
+// in the sequence-number wait on a number that will never arrive. A single unknown opcode wedges
+// a whole guest process, and nothing said so.
+//
+// Bounded: one line per (process, opcode) pair, a few hundred at most for the life of the host.
+static void note_unknown_opcode(const char* processName, uint32_t opcode, uint32_t packetLen) {
+    static std::mutex sMutex;
+    static std::set<std::pair<std::string, uint32_t>> sSeen;
+    const std::string name = processName ? processName : "null";
+    std::lock_guard<std::mutex> lock(sMutex);
+    if (!sSeen.insert({name, opcode}).second) return;
+    GFXSTREAM_STALL_PRINT(
+        "DECODE-UNKNOWN: process=%s opcode=%u packetLen=%u -- no case for this opcode, the stream "
+        "stalls here permanently\n",
+        name.c_str(), opcode, packetLen);
+}
+
 VkDecoder::VkDecoder() : mImpl(new VkDecoder::Impl()) {}
+
+uint32_t VkDecoder::lastOpcode() const { return mImpl->lastOpcode(); }
 
 VkDecoder::~VkDecoder() = default;
 
@@ -123,12 +155,19 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
     auto& gfx_logger = *context.gfxApiLogger;
     auto& shouldExit = *context.shouldExit;
     if (len < 8) return 0;
+    const uint64_t profileBatchStart = decoderProfileBegin();
+    decoderProfileResetNesting();
+    uint64_t profilePackets = 0;
     unsigned char* ptr = (unsigned char*)buf;
     const unsigned char* const end = (const unsigned char*)buf + len;
     while (end - ptr >= 8) {
         const uint8_t* packet = (const uint8_t*)ptr;
         uint32_t opcode;
         std::memcpy(&opcode, ptr, sizeof(uint32_t));
+
+        // A generated file, so keep the footprint to these few lines: the logic lives in
+        // decoder_profile.cpp and a codegen refresh only has to have them re-added.
+        const uint64_t profileStart = decoderProfileBegin();
 
         uint32_t packetLen;
         std::memcpy(&packetLen, ptr + 4, sizeof(uint32_t));
@@ -214,6 +253,14 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
 #elif (defined(__GNUC__) && defined(__aarch64__))
                         __asm__ __volatile__("yield");
 #endif
+                        if ((++spins & 0xFFFFFFull) == 0) {
+                            GFXSTREAM_STALL_PRINT(
+                                "SEQNO-STUCK: want=%u have=%u opcode=%u process=%s spins=%llu\n",
+                                seqno, seqnoPtr->load(std::memory_order_seq_cst), opcode,
+                                processName ? processName : "null",
+                                (unsigned long long)spins);
+                        }
+
                         // Past this, hand the core over instead of holding it.
                         //
                         // YIELD above is a pipeline hint, not a syscall: it does not release the
@@ -23278,6 +23325,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             }
 #endif
             default: {
+                note_unknown_opcode(processName, opcode, packetLen);
                 if (m_snapshotsEnabled) {
                     m_state->snapshot()->destroyApiCallInfoIfUnused(snapshotApiCallHandle);
                 }
@@ -23291,9 +23339,15 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             m_state->snapshot()->destroyApiCallInfoIfUnused(snapshotApiCallHandle);
         }
 
+        decoderProfileEnd(opcode, profileStart);
+        ++profilePackets;
+
+        m_lastOpcode = opcode;
         ptr += packetLen;
         vkStream->clearPool();
     }
+    decoderProfileBatch(profilePackets,
+                        profileBatchStart ? decoderProfileNow() - profileBatchStart : 0);
     m_pool.freeAll();
     return ptr - (unsigned char*)buf;
     ;

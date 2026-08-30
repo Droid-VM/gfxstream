@@ -41,9 +41,14 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
     unsigned char* ptr = (unsigned char*)pSubDecodeData;
     const unsigned char* const end = (const unsigned char*)buf + subDecodeDataSize;
     VkDecoderGlobalState* globalstate = VkDecoderGlobalState::get();
+    // A generated file, so keep the footprint to these few lines: the logic lives in
+    // decoder_profile.cpp and a codegen refresh only has to have them re-added.
+    const uint64_t profileSubBatchStart = decoderProfileBegin();
+    uint64_t profileSubPackets = 0;
     while (end - ptr >= 8) {
         uint32_t opcode = *(uint32_t*)ptr;
         uint32_t packetLen = *(uint32_t*)(ptr + 4);
+        const uint64_t profileStart = decoderProfileBegin();
 
         // packetLen should be at least 8 (op code and packet length) and should not be excessively
         // large
@@ -4599,13 +4604,28 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
                 GFXSTREAM_FATAL("Unrecognized opcode %" PRIu32, opcode);
             }
         }
+        decoderProfileEndInner(opcode, profileStart);
+        ++profileSubPackets;
         ++count;
         if (count % 1000 == 0) {
+            const uint64_t freeT0 = decoderProfileBegin();
             pool->freeAll();
+            if (freeT0) {
+                decoderProfileFlushPhase(FlushPhase::kPoolFree, decoderProfileNow() - freeT0);
+            }
         };
         ptr += packetLen;
     }
-    pool->freeAll();
+    decoderProfileSubBatch(profileSubPackets, profileSubBatchStart
+                                                  ? decoderProfileNow() - profileSubBatchStart
+                                                  : 0);
+    {
+        const uint64_t freeT0 = decoderProfileBegin();
+        pool->freeAll();
+        if (freeT0) {
+            decoderProfileFlushPhase(FlushPhase::kPoolFree, decoderProfileNow() - freeT0);
+        }
+    }
     return ptr - (unsigned char*)buf;
     ;
 }
