@@ -14,6 +14,9 @@
 #pragma once
 
 #include <inttypes.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include <atomic>
 #include <mutex>
@@ -78,11 +81,11 @@ struct ExternalHandleInfo {
     ManagedDescriptor toManagedDescriptor() const {
         return ManagedDescriptor(static_cast<DescriptorType>(handle));
     }
-// Android uses AHardwareBuffer* for external handle type, which is not a fd.
-#if !defined(__ANDROID__)
+// Android historically used AHardwareBuffer* here, which is not an fd. On a host whose driver
+// exports dma-buf (Turnip) the handle is a real fd on Android too, so these are available
+// everywhere; a caller must only use them when streamHandleType is an fd type.
     int getFd() const { return static_cast<int>(handle); }
     ExternalHandleType dupFd() const { return static_cast<ExternalHandleType>(dup(getFd())); }
-#endif
 #endif
 };
 

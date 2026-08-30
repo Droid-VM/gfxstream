@@ -220,13 +220,19 @@ static std::optional<ExternalHandleInfo> dupExternalMemory(std::optional<Externa
         .handle = reinterpret_cast<ExternalHandleType>(res),
         .streamHandleType = handleInfo->streamHandleType,
     };
-#elif defined(__ANDROID__)
-    // Android uses AHardwareBuffer* which is not required to dup
-    return ExternalHandleInfo{
-        .handle = handleInfo->handle,
-        .streamHandleType = handleInfo->streamHandleType,
-    };
 #else
+    // What the handle IS decides how to copy it, not what platform we are on. Android used to
+    // imply an AHardwareBuffer*, which needs no dup -- but a host driver that exports dma-buf
+    // gives back an fd on Android too, and handing the same fd to a second owner means whichever
+    // one closes first closes it for both.
+    if (handleInfo->streamHandleType == STREAM_HANDLE_TYPE_PLATFORM_AHB) {
+        // A reference-counted object, shared rather than duplicated. Callers acquire it if they
+        // need to outlive the original.
+        return ExternalHandleInfo{
+            .handle = handleInfo->handle,
+            .streamHandleType = handleInfo->streamHandleType,
+        };
+    }
     return ExternalHandleInfo{
         .handle = handleInfo->dupFd(),
         .streamHandleType = handleInfo->streamHandleType,
@@ -2635,14 +2641,24 @@ void VkEmulation::freeExternalMemoryLocked(VulkanDispatch* vk,
     if (info->handleInfo) {
 #ifdef _WIN32
         CloseHandle(static_cast<HANDLE>(reinterpret_cast<void*>(info->handleInfo->handle)));
-#elif defined(__ANDROID__)
-        AHardwareBuffer_release(static_cast<AHardwareBuffer*>(reinterpret_cast<void*>(info->handleInfo->handle)));
 #else
+        // Release by what the handle IS, not by what platform we are on. This used to release an
+        // AHardwareBuffer unconditionally on Android, which is right only while Android implies
+        // the AHB external memory mode. It does not here: the host driver exports dma-buf, so the
+        // handle is an fd, and AHardwareBuffer_release() on an fd walks a small integer as if it
+        // were a RefBase -- SIGSEGV in RefBase::decStrong with the fd number as the fault address.
         switch (info->handleInfo->streamHandleType) {
             case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
             case STREAM_HANDLE_TYPE_MEM_DMABUF:
+            case STREAM_HANDLE_TYPE_MEM_SHM:
                 close(info->handleInfo->handle);
                 break;
+#if defined(__ANDROID__)
+            case STREAM_HANDLE_TYPE_PLATFORM_AHB:
+                AHardwareBuffer_release(static_cast<AHardwareBuffer*>(
+                    reinterpret_cast<void*>(info->handleInfo->handle)));
+                break;
+#endif
             default:
                 break;
         }

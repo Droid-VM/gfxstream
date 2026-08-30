@@ -22,6 +22,57 @@
 
 #include <sstream>
 
+#if defined(__ANDROID__)
+// A host Vulkan driver built as an Android Vulkan HAL -- which is what the bundled Mesa turnip is,
+// and the only host driver on this route that exports dma-buf -- exports the "HMI" hw_module
+// symbol and NOT vkGetInstanceProcAddr. dlsym therefore finds nothing in it, and the ICD fallback
+// in SharedLibraries::dlsym does not help either: it looks for vkGetInstanceProcAddr and
+// vk_icdGetInstanceProcAddr, neither of which a HAL exports. The driver has to be opened through
+// the hwvulkan device interface instead.
+//
+// hwvulkan_headers / libhardware_headers are not apex_available for com.android.virt, so the
+// frozen libhardware and hwvulkan ABI is mirrored here under private names rather than depended on.
+namespace {
+struct GfxstreamHwModuleMethods {
+    int (*open)(const void* module, const char* id, void** device);
+};
+struct GfxstreamHwModule {
+    uint32_t tag;
+    uint16_t module_api_version;
+    uint16_t hal_api_version;
+    const char* id;
+    const char* name;
+    const char* author;
+    GfxstreamHwModuleMethods* methods;
+    void* dso;
+#ifdef __LP64__
+    uint64_t reserved[32 - 7];
+#else
+    uint32_t reserved[32 - 7];
+#endif
+};
+struct GfxstreamHwDevice {
+    uint32_t tag;
+    uint32_t version;
+    void* module;
+#ifdef __LP64__
+    uint64_t reserved[12];
+#else
+    uint32_t reserved[12];
+#endif
+    int (*close)(void* device);
+};
+struct GfxstreamHwvulkanDevice {
+    GfxstreamHwDevice common;
+    PFN_vkEnumerateInstanceExtensionProperties EnumerateInstanceExtensionProperties;
+    PFN_vkCreateInstance CreateInstance;
+    PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+};
+constexpr const char* kGfxstreamHalModuleInfoSym = "HMI";
+constexpr const char* kGfxstreamHwvulkanDevice0 = "vk0";
+}  // namespace
+#endif  // __ANDROID__
+
 using gfxstream::base::AutoLock;
 using gfxstream::base::Lock;
 using gfxstream::base::pj;
@@ -495,6 +546,44 @@ void VulkanDispatchImpl::initialize(bool forTesting) {
 
     init_vulkan_dispatch_from_system_loader(sVulkanDispatchDlOpen, sVulkanDispatchDlSym,
                                             &mDispatch);
+
+#if defined(__ANDROID__)
+    // If the library that was loaded is an Android Vulkan HAL, everything above resolved to null:
+    // it exports HMI and nothing else. Open it as an hwvulkan device to get a usable
+    // vkGetInstanceProcAddr. Without this the global dispatch has no entry points at all and
+    // VkEmulation::create refuses it with "Dispatch is invalid", which is how a perfectly good
+    // driver presents as no Vulkan support.
+    if (!mDispatch.vkGetInstanceProcAddr) {
+        void* lib = sVulkanDispatchDlOpen();
+        void* hmiSym = sVulkanDispatchDlSym(lib, kGfxstreamHalModuleInfoSym);
+        if (hmiSym) {
+            auto* halModule = reinterpret_cast<GfxstreamHwModule*>(hmiSym);
+            if (halModule->methods && halModule->methods->open) {
+                GfxstreamHwvulkanDevice* halDevice = nullptr;
+                const int openRes = halModule->methods->open(
+                    halModule, kGfxstreamHwvulkanDevice0, reinterpret_cast<void**>(&halDevice));
+                if (openRes == 0 && halDevice) {
+                    mDispatch.vkGetInstanceProcAddr = halDevice->GetInstanceProcAddr;
+                    if (!mDispatch.vkCreateInstance) {
+                        mDispatch.vkCreateInstance = halDevice->CreateInstance;
+                    }
+                    if (!mDispatch.vkEnumerateInstanceExtensionProperties) {
+                        mDispatch.vkEnumerateInstanceExtensionProperties =
+                            halDevice->EnumerateInstanceExtensionProperties;
+                    }
+                    GFXSTREAM_INFO(
+                        "Bridged an Android Vulkan HAL through HMI; vkGetInstanceProcAddr=%p",
+                        (void*)mDispatch.vkGetInstanceProcAddr);
+                } else {
+                    GFXSTREAM_ERROR("hwvulkan open() failed with %d; the HAL cannot be used.",
+                                    openRes);
+                }
+            } else {
+                GFXSTREAM_ERROR("The loaded library exports HMI but has no open() method.");
+            }
+        }
+    }
+#endif  // __ANDROID__
 
     mInitialized = true;
 }

@@ -106,6 +106,26 @@ using gfxstream::host::GfxApiLogger;
 #define STREAM_BLOB_FLAG_USE_CROSS_DEVICE 4
 #define STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE 8
 
+enum class ExternalMemoryImportKind {
+    Unsupported,
+    OpaqueFd,
+    DmaBuf,
+    AndroidHardwareBuffer,
+};
+
+static constexpr ExternalMemoryImportKind externalMemoryImportKind(uint32_t streamHandleType) {
+    switch (streamHandleType) {
+        case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
+            return ExternalMemoryImportKind::OpaqueFd;
+        case STREAM_HANDLE_TYPE_MEM_DMABUF:
+            return ExternalMemoryImportKind::DmaBuf;
+        case STREAM_HANDLE_TYPE_PLATFORM_AHB:
+            return ExternalMemoryImportKind::AndroidHardwareBuffer;
+        default:
+            return ExternalMemoryImportKind::Unsupported;
+    }
+}
+
 #define VALIDATE_REQUIRED_HANDLE(parameter) \
     validateRequiredHandle(__FUNCTION__, #parameter, parameter)
 
@@ -2411,6 +2431,44 @@ class VkDecoderGlobalState::Impl {
         std::lock_guard<std::mutex> lock(mMutex);
         if (swiftshader) {
             result = vk->vkCreateDevice(physicalDevice, &createInfoFiltered, nullptr, pDevice);
+        }
+
+        if (result == VK_ERROR_FEATURE_NOT_PRESENT) {
+            // Some Android host drivers -- the phone's stock Adreno HAL, which is a selectable
+            // host ICD -- reject VkPhysicalDeviceVulkan13Features outright when any of its fields
+            // is VK_TRUE, even for features they do support through the individual extension
+            // structs. Zero the aggregate and try once more, keeping the struct in the chain so
+            // the driver still sees a 1.3 device.
+            //
+            // Retry rather than doing this unconditionally: on Mesa turnip, which is the host
+            // driver this route is built for and which accepts the aggregate, zeroing it up front
+            // would silently take every Vulkan 1.3 feature away from the guest. A driver that
+            // needs the workaround pays one extra failed vkCreateDevice; a driver that does not
+            // never notices.
+            if (auto* vk13 =
+                    vk_find_struct<VkPhysicalDeviceVulkan13Features>(&createInfoFiltered)) {
+                const void* savedNext = vk13->pNext;
+                bool anySet = false;
+                for (const VkBool32* f = &vk13->robustImageAccess;
+                     f <= &vk13->maintenance4; ++f) {
+                    if (*f) {
+                        anySet = true;
+                        break;
+                    }
+                }
+                if (anySet) {
+                    *vk13 = VkPhysicalDeviceVulkan13Features{
+                        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                        .pNext = const_cast<void*>(savedNext),
+                    };
+                    GFXSTREAM_WARNING(
+                        "vkCreateDevice rejected VkPhysicalDeviceVulkan13Features; retrying with "
+                        "it zeroed. The 1.3 features the guest asked for reach this driver through "
+                        "their individual extension structs, if at all.");
+                    result =
+                        vk->vkCreateDevice(physicalDevice, &createInfoFiltered, nullptr, pDevice);
+                }
+            }
         }
 
         if (result != VK_SUCCESS) {
@@ -6305,6 +6363,36 @@ class VkDecoderGlobalState::Impl {
             VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
             -1,
         };
+
+        auto appendExternalMemoryImport = [&](const ExternalHandleInfo& handleInfo) -> bool {
+            switch (externalMemoryImportKind(handleInfo.streamHandleType)) {
+                case ExternalMemoryImportKind::OpaqueFd:
+                    importFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+                    importFdInfo.fd = handleInfo.getFd();
+                    vk_append_struct(&structChainIter, &importFdInfo);
+                    return true;
+                case ExternalMemoryImportKind::DmaBuf:
+                    importFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                    importFdInfo.fd = handleInfo.getFd();
+                    vk_append_struct(&structChainIter, &importFdInfo);
+                    return true;
+                case ExternalMemoryImportKind::AndroidHardwareBuffer:
+#if defined(__ANDROID__)
+                    // Android does not imply AHardwareBuffer. Turnip exports dma-buf fds on
+                    // Android too; treating such an fd as AHardwareBuffer* makes the Vulkan
+                    // driver call AHardwareBuffer_acquire() on a small integer and crash in
+                    // RefBase::incStrong. Select the import struct by the actual handle type.
+                    importInfo.buffer = reinterpret_cast<AHardwareBuffer*>(handleInfo.handle);
+                    vk_append_struct(&structChainIter, &importInfo);
+                    return true;
+#else
+                    return false;
+#endif
+                case ExternalMemoryImportKind::Unsupported:
+                    return false;
+            }
+            return false;
+        };
 #endif
         VkImportMemoryHostPointerInfoEXT importHostInfo {
             .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
@@ -6416,13 +6504,12 @@ class VkDecoderGlobalState::Impl {
                     importWin32HandleInfo.handle =
                         managedHandle.get().value_or(static_cast<HANDLE>(NULL));
                     vk_append_struct(&structChainIter, &importWin32HandleInfo);
-#elif defined(__ANDROID__)
-                    importInfo.buffer = static_cast<AHardwareBuffer*>(
-                        reinterpret_cast<void*>(dupHandleInfo->handle));
-                    vk_append_struct(&structChainIter, &importInfo);
 #else
-                    importFdInfo.fd = dupHandleInfo->getFd();
-                    vk_append_struct(&structChainIter, &importFdInfo);
+                    if (!appendExternalMemoryImport(*dupHandleInfo)) {
+                        GFXSTREAM_ERROR("Unsupported ColorBuffer external memory handle type: %u",
+                                        dupHandleInfo->streamHandleType);
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
 #endif
                 }
             }
@@ -6504,9 +6591,12 @@ class VkDecoderGlobalState::Impl {
                 importWin32HandleInfo.handle =
                     managedHandle.get().value_or(static_cast<HANDLE>(NULL));
                 vk_append_struct(&structChainIter, &importWin32HandleInfo);
-#elif !defined(__ANDROID__)
-                importFdInfo.fd = dupHandleInfo->getFd();
-                vk_append_struct(&structChainIter, &importFdInfo);
+#else
+                if (!appendExternalMemoryImport(*dupHandleInfo)) {
+                    GFXSTREAM_ERROR("Unsupported Buffer external memory handle type: %u",
+                                    dupHandleInfo->streamHandleType);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
 #endif
             }
         }
