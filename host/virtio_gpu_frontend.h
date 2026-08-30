@@ -18,6 +18,7 @@
 
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 extern "C" {
 #include "gfxstream/virtio-gpu-gfxstream-renderer-unstable.h"
@@ -31,6 +32,7 @@ extern "C" {
 #include "virtio_gpu_frontend_snapshot.pb.h"
 #endif
 #include "gfxstream/host/features.h"
+#include "gfxstream/host/process_resources.h"
 #include "render-utils/Renderer.h"
 #include "virtio_gpu_resource.h"
 #include "virtio_gpu_timelines.h"
@@ -157,6 +159,11 @@ class VirtioGpuFrontend {
 
     std::unique_ptr<CleanupThread> mCleanupThread;
     bool mLogCalls = false;
+
+    // Sequence counters belonging to context ids that have been recycled. Kept alive rather than
+    // freed because the previous occupant's render threads still hold raw pointers into them; see
+    // createContext(). One small object per re-creation, a few dozen over a session.
+    std::vector<std::unique_ptr<ProcessResources>> mRetiredProcessResources;
 };
 
 }  // namespace host

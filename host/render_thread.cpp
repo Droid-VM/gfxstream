@@ -25,6 +25,7 @@
 
 #include "channel_stream.h"
 #include "frame_buffer.h"
+#include "gfxstream_diag.h"
 #include "read_buffer.h"
 #include "render_channel_impl.h"
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -357,10 +358,40 @@ intptr_t RenderThread::main() {
     } else {
         // Not loading from a snapshot: continue regular startup, read
         // the |flags|.
+        //
+        // Accumulate. IOStream::read() is "up to n bytes": RingStream::readRaw() returns as soon
+        // as it has any data at all, and type3Read() clamps to what the ring happens to hold, so
+        // a 1..3 byte return here is normal. Re-reading into |flags| from offset 0 after a short
+        // read throws away the bytes already taken out of the stream and leaves the decoder at an
+        // arbitrary offset inside the first packet. Either direction is fatal and neither is
+        // repairable downstream: too few bytes consumed and the decoder reads the four-byte
+        // clientFlags word as an opcode and the real opcode as a length (seen as "holding 44 of
+        // 20013 bytes of opcode=0"); too many and it starts inside the first packet and reads
+        // that packet's own length field as an opcode (seen as "opcode=9749 len=1166
+        // valid=9745"). Both end the same way: the guest thread that made the first Vulkan call
+        // waits for its reply forever, with a drained ring and no error on either side.
         uint32_t flags = 0;
-        while (ioStream->read(&flags, sizeof(flags)) != sizeof(flags)) {
+        size_t flagsHave = 0;
+        size_t got = 0;
+        uint32_t flagsReads = 0;
+        while (flagsHave < sizeof(flags)) {
+            ++flagsReads;
+            got = ioStream->read(reinterpret_cast<char*>(&flags) + flagsHave,
+                                 sizeof(flags) - flagsHave);
+            if (got > 0) {
+                flagsHave += got;
+                continue;
+            }
             // Stream read may fail because of a pending snapshot.
             if (!saveSnapshot(snapshotObjects)) {
+                // Giving up here means this thread never decodes anything and never replies, so
+                // every guest thread that asks it a synchronous question waits forever -- with a
+                // drained ring and no error on either side. Say so, and say what the read
+                // returned: the guest cannot tell this apart from a host that is merely slow.
+                GFXSTREAM_STALL_PRINT(
+                    "HS-GIVEUP: gave up on the opening handshake after %u reads: last returned "
+                    "%zu, have %zu of %zu bytes; this thread will never answer\n",
+                    flagsReads, got, flagsHave, sizeof(flags));
                 setFinished();
                 tInfo.reset();
                 waitForExitSignal();
