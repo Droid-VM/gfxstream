@@ -15,8 +15,41 @@
 
 #include <utility>
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
+#if defined(__ANDROID__)
+#include <android/hardware_buffer.h>
+#endif
+
 namespace gfxstream {
 namespace host {
+
+void CloseBlobDescriptor(BlobDescriptorType& descriptorInfo) {
+#if defined(__ANDROID__)
+    if (!descriptorInfo.handle) {
+        return;
+    }
+    switch (descriptorInfo.streamHandleType) {
+        case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
+        case STREAM_HANDLE_TYPE_MEM_DMABUF:
+        case STREAM_HANDLE_TYPE_MEM_SHM:
+        case STREAM_HANDLE_TYPE_MEM_POOL:
+            close(static_cast<int>(descriptorInfo.handle));
+            break;
+        case STREAM_HANDLE_TYPE_PLATFORM_AHB:
+            AHardwareBuffer_release(
+                reinterpret_cast<AHardwareBuffer*>(descriptorInfo.handle));
+            break;
+        default:
+            break;
+    }
+    descriptorInfo.handle = 0;
+#else
+    (void)descriptorInfo;  // ManagedDescriptor closes itself.
+#endif
+}
 
 static ExternalObjectManager* sMapping() {
     static ExternalObjectManager* s = new ExternalObjectManager;
@@ -73,7 +106,27 @@ void ExternalObjectManager::addBlobDescriptorInfo(uint32_t ctxId, uint64_t blobI
 
     auto key = std::make_pair(ctxId, blobId);
     std::lock_guard<std::mutex> lock(mMutex);
+    // insert() does not overwrite, so re-exporting the same (context, blob) used to drop the
+    // freshly dup'd descriptor on the floor -- and on Android nothing closed it. Close the stale
+    // entry and keep the newest export.
+    auto found = mBlobDescriptorInfos.find(key);
+    if (found != mBlobDescriptorInfos.end()) {
+        CloseBlobDescriptor(found->second.descriptorInfo);
+        mBlobDescriptorInfos.erase(found);
+    }
     mBlobDescriptorInfos.insert(std::make_pair(key, std::move(info)));
+}
+
+void ExternalObjectManager::removeContextBlobDescriptorInfos(uint32_t ctxId) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    for (auto it = mBlobDescriptorInfos.begin(); it != mBlobDescriptorInfos.end();) {
+        if (it->first.first == ctxId) {
+            CloseBlobDescriptor(it->second.descriptorInfo);
+            it = mBlobDescriptorInfos.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 std::optional<BlobDescriptorInfo> ExternalObjectManager::removeBlobDescriptorInfo(uint32_t ctxId,
@@ -88,6 +141,35 @@ std::optional<BlobDescriptorInfo> ExternalObjectManager::removeBlobDescriptorInf
     }
 
     return std::nullopt;
+}
+
+void ExternalObjectManager::addGuestBlobResourceDescriptor(uint32_t resHandle, int fd) {
+    if (fd < 0) return;
+    int keep = dup(fd);
+    if (keep < 0) return;
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto found = mGuestBlobResourceFds.find(resHandle);
+    if (found != mGuestBlobResourceFds.end()) {
+        close(found->second);
+        found->second = keep;
+        return;
+    }
+    mGuestBlobResourceFds[resHandle] = keep;
+}
+
+int ExternalObjectManager::dupGuestBlobResourceDescriptor(uint32_t resHandle) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto found = mGuestBlobResourceFds.find(resHandle);
+    if (found == mGuestBlobResourceFds.end()) return -1;
+    return dup(found->second);
+}
+
+void ExternalObjectManager::removeGuestBlobResourceDescriptor(uint32_t resHandle) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto found = mGuestBlobResourceFds.find(resHandle);
+    if (found == mGuestBlobResourceFds.end()) return;
+    close(found->second);
+    mGuestBlobResourceFds.erase(found);
 }
 
 void ExternalObjectManager::addSyncDescriptorInfo(uint32_t ctxId, uint64_t syncId,

@@ -132,6 +132,12 @@ struct BlobDescriptorInfo {
 
 using SyncDescriptorInfo = GenericDescriptorInfo;
 
+// Android's BlobDescriptorType is a raw handle with no RAII, so any path that drops one without
+// consuming it has to close or release it explicitly, or the dma-buf fd / AHardwareBuffer
+// reference leaks for the life of the process. A no-op everywhere else, where the descriptor is a
+// ManagedDescriptor that closes itself. Idempotent: the handle is cleared.
+void CloseBlobDescriptor(BlobDescriptorType& descriptorInfo);
+
 class ExternalObjectManager {
    public:
     ExternalObjectManager() = default;
@@ -145,6 +151,23 @@ class ExternalObjectManager {
                                uint32_t streamHandleType, uint32_t caching,
                                std::optional<VulkanInfo> vulkanInfoOpt, int64_t poolOffset = -1);
     std::optional<BlobDescriptorInfo> removeBlobDescriptorInfo(uint32_t ctx_id, uint64_t blobId);
+    // Drop -- and on Android close -- every blob descriptor of a context that no
+    // RESOURCE_CREATE_BLOB ever picked up. Called when the context is destroyed, so an orphaned
+    // export cannot outlive it.
+    void removeContextBlobDescriptorInfos(uint32_t ctx_id);
+
+    // A guest-pool blob's dma-buf, keyed by the virtio resource it belongs to.
+    //
+    // The blob-id keyed registry above only helps someone who knows the blob id, and the process
+    // that imports a compositor's scanout buffer usually does not: the buffer was created by the
+    // gbm/gallium winsys on one virtio context and is imported into Vulkan on another, so all the
+    // importer can name is the resource. Without this the import falls through to
+    // VkImportColorBufferGOOGLE for a colour buffer the host never created.
+    //
+    // Entries are dups owned by the manager and live as long as the resource does.
+    void addGuestBlobResourceDescriptor(uint32_t resHandle, int fd);
+    int dupGuestBlobResourceDescriptor(uint32_t resHandle);
+    void removeGuestBlobResourceDescriptor(uint32_t resHandle);
 
     void addSyncDescriptorInfo(uint32_t ctx_id, uint64_t syncId, ManagedDescriptor descriptor,
                                uint32_t streamHandleType);
@@ -166,6 +189,7 @@ class ExternalObjectManager {
     };
 
     std::mutex mMutex;
+    std::unordered_map<uint32_t, int> mGuestBlobResourceFds GUARDED_BY(mMutex);
     std::unordered_map<std::pair<uint32_t, uint64_t>, HostMemInfo, pair_hash> mHostMemInfos
         GUARDED_BY(mMutex);
     std::unordered_map<std::pair<uint32_t, uint64_t>, BlobDescriptorInfo, pair_hash>

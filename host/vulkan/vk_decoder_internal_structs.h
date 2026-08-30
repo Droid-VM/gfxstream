@@ -191,6 +191,9 @@ struct MemoryInfo {
     std::shared_ptr<PrivateMemory> privateMemory;
     // virtio-gpu blobs
     uint64_t blobId = 0;
+    // Context the descriptor for `blobId` was filed under, so freeing this memory can drop a
+    // descriptor no RESOURCE_CREATE_BLOB ever picked up. Blob ids are recycled by the guest.
+    std::optional<uint32_t> blobCtxId;
 
     // Buffer, provided via vkAllocateMemory().
     std::optional<HandleType> boundBuffer;

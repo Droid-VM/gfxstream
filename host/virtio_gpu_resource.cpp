@@ -415,7 +415,23 @@ VirtioGpuResourceType GetResourceType(const struct stream_renderer_resource_crea
 // VMM. Returns 0 on success, -EINVAL if the descriptor could not be obtained.
 int fillExportHandle(struct stream_renderer_handle* outHandle, BlobDescriptorType& descriptorInfo) {
 #ifdef __ANDROID__
+    // Hand the VMM its own dup of an fd-type handle and keep ours, which Destroy() closes. Handing
+    // out the stored value transferred ownership implicitly the moment the VMM closed it -- and
+    // leaked it whenever the VMM never asked for an export at all.
     auto rawDescriptor = descriptorInfo.handle;
+    switch (descriptorInfo.streamHandleType) {
+        case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
+        case STREAM_HANDLE_TYPE_MEM_DMABUF:
+        case STREAM_HANDLE_TYPE_MEM_SHM:
+            rawDescriptor = dup(static_cast<int>(rawDescriptor));
+            if (static_cast<int>(rawDescriptor) < 0) {
+                return -EINVAL;
+            }
+            break;
+        default:
+            // Not an fd: the VMM takes a reference of its own kind, or none at all.
+            break;
+    }
 #else
     auto rawDescriptorOpt = descriptorInfo.descriptor.release();
     if (!rawDescriptorOpt) {
@@ -545,6 +561,18 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
     } else if (features.ExternalBlob.enabled()) {
         if (createBlobArgs->blob_mem == STREAM_BLOB_MEM_GUEST &&
             (createBlobArgs->blob_flags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
+            // Keyed by resource as well as by blob id. A compositor's scanout buffer is created
+            // here by the gbm/gallium winsys on one virtio context and imported into Vulkan on
+            // another, and the importer can only name the resource -- the blob id is private to
+            // whoever created it. Without this second key the import has nothing to bind to and
+            // falls through to a colour buffer the host never created.
+#if defined(__linux__) || defined(__ANDROID__)
+            GFXSTREAM_DIAG_PRINT("GUESTBLOB-CREATE: resource=%u blobId=%llu size=%llu\n",
+                                 resourceId, (unsigned long long)createBlobArgs->blob_id,
+                                 (unsigned long long)createBlobArgs->size);
+            ExternalObjectManager::get()->addGuestBlobResourceDescriptor(resourceId,
+                                                                        (int)handle->os_handle);
+#endif
 #if defined(__ANDROID__)
             ExternalObjectManager::get()->addBlobDescriptorInfo(
                 contextId, createBlobArgs->blob_id, handle->os_handle, handle->handle_type, 0,
@@ -564,6 +592,17 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
                     contextId, createBlobArgs->blob_id);
             }
             if (!descriptorInfoOpt) {
+                // Memory the host could not re-export registers a host-address MAPPING instead of
+                // a descriptor -- vkGetBlobInternal falls back to vkMapMemory + addMapping when
+                // the driver refuses to export imported memory. ExternalBlob mode used to reject
+                // those outright, which left such memory guest-mappable in no mode at all.
+                auto memoryMappingOpt =
+                    ExternalObjectManager::get()->removeMapping(contextId, createBlobArgs->blob_id);
+                if (memoryMappingOpt) {
+                    resource.mBlobMemory.emplace(std::move(*memoryMappingOpt));
+                    resource.mId = resourceId;
+                    return resource;
+                }
                 GFXSTREAM_ERROR("Failed to create blob: no external blob descriptor.");
                 return std::nullopt;
             }
@@ -588,6 +627,15 @@ int VirtioGpuResource::Destroy() {
         FrameBuffer::getFB()->closeBuffer(mId);
     } else if (mResourceType == VirtioGpuResourceType::COLOR_BUFFER) {
         FrameBuffer::getFB()->closeColorBuffer(mId);
+    }
+    // Close the descriptor consumed into mBlobMemory exactly once, here, where the resource dies.
+    // On Android it is a raw handle, so every ColorBuffer- or Buffer-backed blob used to leak the
+    // dma-buf fd dup'd at export time.
+    if (mBlobMemory && std::holds_alternative<ExternalMemoryInfo>(*mBlobMemory)) {
+        auto& memory = std::get<ExternalMemoryInfo>(*mBlobMemory);
+        if (memory) {
+            CloseBlobDescriptor(memory->descriptorInfo);
+        }
     }
     return 0;
 }
