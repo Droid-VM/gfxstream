@@ -16,12 +16,15 @@
 
 #include <vulkan/vulkan.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <future>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <variant>
 
 #include "vulkan_dispatch.h"
@@ -46,6 +49,7 @@ enum class DeviceOpStatus { kPending, kDone, kFailure };
 class DeviceOpTracker {
    public:
     DeviceOpTracker(VkDevice device, VulkanDispatch* deviceDispatch);
+    ~DeviceOpTracker();
 
     DeviceOpTracker(const DeviceOpTracker& rhs) = delete;
     DeviceOpTracker& operator=(const DeviceOpTracker& rhs) = delete;
@@ -65,6 +69,16 @@ class DeviceOpTracker {
     // objects.
     void PollAndProcessGarbage();
 
+    // Completes the tracked operations submitted with these fences, for a caller that has already
+    // established the fences are signalled. Asks the driver nothing.
+    //
+    // A waitable's promise could otherwise only be fulfilled from inside a sweep, so a caller that
+    // knew perfectly well the work was done still had to pay for a walk of the whole queue --
+    // hundreds of microseconds per entry, because vkGetFenceStatus is not cheap on this driver.
+    // Measured at roughly 3.7ms per vkResetFences and about a quarter of all host dispatch, spent
+    // re-discovering completions the caller had confirmed 5us earlier.
+    void CompleteOpsForSignalledFences(const VkFence* fences, uint32_t fenceCount);
+
     void OnDestroyDevice();
 
    private:
@@ -73,15 +87,43 @@ class DeviceOpTracker {
 
     friend class DeviceOpBuilder;
 
-    using OpPollingFunction = std::function<DeviceOpStatus()>;
-
-    void AddPendingDeviceOp(OpPollingFunction pollFunction);
-    struct PollFunction {
-        OpPollingFunction func;
+    // What a pending operation is, rather than a closure that knows how to poll one.
+    //
+    // The difference matters because a closure can only be asked "are you done?", and answering
+    // that means a driver call. Recording the fence, the promise and who owns the fence lets a
+    // caller that has already established the fence is signalled have the completion written down
+    // without the driver being consulted at all -- see CompleteOpsForSignalledFences().
+    struct PendingOp {
+        VkFence fence;  // VK_NULL_HANDLE for an operation that is complete on arrival
+        std::shared_ptr<std::promise<void>> promise;
+        bool destroyFenceOnCompletion;
         std::chrono::time_point<std::chrono::system_clock> timepoint;
     };
+
+    void AddPendingDeviceOp(VkFence fence, std::shared_ptr<std::promise<void>> promise,
+                            bool destroyFenceOnCompletion);
+
+    // Completes op (fulfilling its promise, destroying its fence if owned) if its fence has
+    // signalled. Returns whether it is still pending.
+    DeviceOpStatus PollOne(const PendingOp& op, bool assumeSignalled);
+
     std::mutex mPollFunctionsMutex;
-    std::deque<PollFunction> mPollFunctions GUARDED_BY(mPollFunctionsMutex);
+    std::deque<PendingOp> mPollFunctions GUARDED_BY(mPollFunctionsMutex);
+
+    // Reclaiming completed operations means asking the driver whether they are done, and
+    // vkGetFenceStatus is not the cheap non-blocking read its name suggests: on some drivers a
+    // single call averages milliseconds. Doing that from a guest-facing call -- which the submit
+    // path used to -- puts a multi-millisecond driver query in the middle of every submit, and the
+    // guest ends up spinning in the transport waiting for it. Sweep from a thread of our own
+    // instead, so the cost never lands on a path the guest is waiting on. Started lazily, on the
+    // first operation there is anything to reclaim.
+    void StartPollThreadIfNeeded();
+    void StopPollThread();
+    std::once_flag mPollThreadOnce;
+    std::thread mPollThread;
+    std::mutex mPollThreadMutex;
+    std::condition_variable mPollThreadCv;
+    std::atomic<bool> mPollThreadStopping{false};
 
     struct PendingGarbage {
         DeviceOpWaitable waitable;

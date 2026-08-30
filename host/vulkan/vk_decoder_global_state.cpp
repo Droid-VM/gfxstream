@@ -1242,6 +1242,15 @@ class VkDecoderGlobalState::Impl {
             const_cast<VkApplicationInfo*>(createInfoFiltered.pApplicationInfo)->apiVersion =
                 apiVersion;
             appInfo = *createInfoFiltered.pApplicationInfo;
+        } else {
+            // Omitting VkApplicationInfo means Vulkan 1.0 by spec, and the host driver then gates
+            // off every promoted-to-core entry point on any device made from this instance --
+            // including vkQueueSubmit2, which this renderer submits with itself on the present
+            // path. A guest is entitled to pass no application info, so synthesize one rather than
+            // silently dropping the version computed just above.
+            appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+            appInfo.apiVersion = apiVersion;
+            createInfoFiltered.pApplicationInfo = &appInfo;
         }
 
         vk_struct_chain_filter<VkDebugReportCallbackCreateInfoEXT>(&createInfoFiltered);
@@ -1299,6 +1308,7 @@ class VkDecoderGlobalState::Impl {
         // Box it up
         VkInstance boxed = new_boxed_VkInstance(*pInstance, nullptr);
         init_vulkan_dispatch_from_instance(m_vk, *pInstance, dispatch_VkInstance(boxed));
+        fillMissingDispatchAliases(dispatch_VkInstance(boxed));
         info.boxed = boxed;
 
         std::string_view engineName = appInfo.pEngineName ? appInfo.pEngineName : "";
@@ -1335,10 +1345,19 @@ class VkDecoderGlobalState::Impl {
         if (vkCleanupEnabled()) {
             m_vkEmulation->getCallbacks().registerProcessCleanupCallback(
                 unbox_VkInstance(boxed), contextId, [this, boxed] {
+                    // try_, not unbox_: this callback outlives the instance whenever the guest
+                    // destroys it after the cleanup list has been copied out of its lock, and by
+                    // then the boxed handle has been deleted. Unboxing a deleted handle hands
+                    // back whatever now occupies that slot, and destroying that would take out a
+                    // live instance belonging to someone else.
+                    VkInstance instance = try_unbox_VkInstance(boxed);
+                    if (instance == VK_NULL_HANDLE) {
+                        return;
+                    }
                     if (snapshotsEnabled()) {
                         snapshot()->vkDestroyInstance(nullptr, kInvalidSnapshotApiCallHandle, nullptr, 0, boxed, nullptr);
                     }
-                    vkDestroyInstanceImpl(unbox_VkInstance(boxed));
+                    vkDestroyInstanceImpl(instance);
                 });
         }
 
@@ -1357,8 +1376,9 @@ class VkDecoderGlobalState::Impl {
             std::lock_guard<std::mutex> lock(mMutex);
 
             for (const auto& [device, deviceInfo] : mDeviceInfo) {
-                auto* physDevInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo.physicalDevice);
-                if (physDevInfo && instance == physDevInfo->instance) {
+                // Select by the device's own creating instance, not through the physdev
+                // backpointer: that one names whichever instance enumerated the handle last.
+                if (deviceInfo.parentInstance == instance) {
                     devicesToDestroy.push_back(device);
                 }
             }
@@ -1575,11 +1595,13 @@ class VkDecoderGlobalState::Impl {
         auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
         if (!instanceInfo) return;
 
-        if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
-            physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        // Pick by host dispatch-pointer availability, not by guest apiVersion or an advertised
+        // instance extension: on an apiVersion-1.0 host instance both the core entry point and
+        // the KHR alias can be null, and calling either jumps the whole host process to 0 -- at
+        // the guest's choosing.
+        if (vk->vkGetPhysicalDeviceFeatures2) {
             vk->vkGetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
-        } else if (hasInstanceExtension(physdevInfo->instance,
-                                        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+        } else if (vk->vkGetPhysicalDeviceFeatures2KHR) {
             vk->vkGetPhysicalDeviceFeatures2KHR(physicalDevice, pFeatures);
         } else {
             // No instance extension, fake it!!!!
@@ -1743,12 +1765,11 @@ class VkDecoderGlobalState::Impl {
             return res;
         }
 
-        if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
-            physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        // Pick by host dispatch-pointer availability; see on_vkGetPhysicalDeviceFeatures2.
+        if (vk->vkGetPhysicalDeviceImageFormatProperties2) {
             res = vk->vkGetPhysicalDeviceImageFormatProperties2(physicalDevice, pImageFormatInfo,
                                                                 pImageFormatProperties);
-        } else if (hasInstanceExtension(physdevInfo->instance,
-                                        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+        } else if (vk->vkGetPhysicalDeviceImageFormatProperties2KHR) {
             res = vk->vkGetPhysicalDeviceImageFormatProperties2KHR(physicalDevice, pImageFormatInfo,
                                                                    pImageFormatProperties);
         } else {
@@ -1819,7 +1840,7 @@ class VkDecoderGlobalState::Impl {
             kGetPhysicalDeviceFormatProperties2KHR,
         };
 
-        auto func = WhichFunc::kGetPhysicalDeviceFormatProperties2KHR;
+        auto func = WhichFunc::kGetPhysicalDeviceFormatProperties;
 
         {
             std::lock_guard<std::mutex> lock(mMutex);
@@ -1830,11 +1851,11 @@ class VkDecoderGlobalState::Impl {
             auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
             if (!instanceInfo) return;
 
-            if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
-                physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+            // Prefer core, else the KHR alias, else the 1.0 path this now defaults to. Picking
+            // by dispatch-pointer availability; see on_vkGetPhysicalDeviceFeatures2.
+            if (vk->vkGetPhysicalDeviceFormatProperties2) {
                 func = WhichFunc::kGetPhysicalDeviceFormatProperties2;
-            } else if (hasInstanceExtension(
-                           physdevInfo->instance, VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+            } else if (vk->vkGetPhysicalDeviceFormatProperties2KHR) {
                 func = WhichFunc::kGetPhysicalDeviceFormatProperties2KHR;
             }
         }
@@ -1907,11 +1928,13 @@ class VkDecoderGlobalState::Impl {
         auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
         if (!instanceInfo) return;
 
-        if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
-            physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        // Pick by host dispatch-pointer availability, not by guest apiVersion or an advertised
+        // instance extension: on an apiVersion-1.0 host instance both the core entry point and
+        // the KHR alias can be null, and calling either jumps the whole host process to 0 -- at
+        // the guest's choosing.
+        if (vk->vkGetPhysicalDeviceProperties2) {
             vk->vkGetPhysicalDeviceProperties2(physicalDevice, pProperties);
-        } else if (hasInstanceExtension(physdevInfo->instance,
-                                        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+        } else if (vk->vkGetPhysicalDeviceProperties2KHR) {
             vk->vkGetPhysicalDeviceProperties2KHR(physicalDevice, pProperties);
         } else {
             // No instance extension, fake it!!!!
@@ -2041,11 +2064,13 @@ class VkDecoderGlobalState::Impl {
         auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physicalDeviceInfo->instance);
         if (!instanceInfo) return;
 
-        if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
-            physicalDeviceInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        // Pick by host dispatch-pointer availability, not by guest apiVersion or an advertised
+        // instance extension: on an apiVersion-1.0 host instance both the core entry point and
+        // the KHR alias can be null, and calling either jumps the whole host process to 0 -- at
+        // the guest's choosing.
+        if (vk->vkGetPhysicalDeviceMemoryProperties2) {
             vk->vkGetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);
-        } else if (hasInstanceExtension(physicalDeviceInfo->instance,
-                                        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+        } else if (vk->vkGetPhysicalDeviceMemoryProperties2KHR) {
             vk->vkGetPhysicalDeviceMemoryProperties2KHR(physicalDevice, pMemoryProperties);
         } else {
             // No instance extension, fake it!!!!
@@ -2578,6 +2603,7 @@ class VkDecoderGlobalState::Impl {
         VALIDATE_NEW_HANDLE_INFO_ENTRY(mDeviceInfo, *pDevice);
         auto& deviceInfo = mDeviceInfo[*pDevice];
         deviceInfo.physicalDevice = physicalDevice;
+        deviceInfo.parentInstance = physicalDeviceInfo.instance;
         deviceInfo.maxImageDimension2D = physicalDeviceInfo.props.limits.maxImageDimension2D;
         deviceInfo.emulateTextureEtc2 = emulateTextureEtc2;
         deviceInfo.emulateTextureAstc = emulateTextureAstc;
@@ -2585,8 +2611,6 @@ class VkDecoderGlobalState::Impl {
         deviceInfo.useAstcCpuDecompression =
             m_vkEmulation->getAstcLdrEmulationMode() == AstcEmulationMode::Cpu &&
             AstcCpuDecompressor::get().available();
-        deviceInfo.decompPipelines =
-            std::make_unique<GpuDecompressionPipelineManager>(m_vk, *pDevice);
         getSupportedFenceHandleTypes(vk, physicalDevice, &supportedFenceHandleTypes);
         getSupportedSemaphoreHandleTypes(vk, physicalDevice, &supportedBinarySemaphoreHandleTypes);
 
@@ -2617,6 +2641,19 @@ class VkDecoderGlobalState::Impl {
 
         VulkanDispatch* dispatch = dispatch_VkDevice(boxedDevice);
         init_vulkan_dispatch_from_device(vk, *pDevice, dispatch);
+        fillMissingDispatchAliases(dispatch);
+
+        // Built here, once the device dispatch exists, rather than earlier with the global one.
+        // m_vk holds only what the loader could resolve by dlsym, and for a host driver loaded
+        // directly -- an Android Vulkan HAL, opened through HMI -- that is the global commands and
+        // nothing else: every device-level pointer in it is null, so tearing these pipelines down
+        // through it jumps to 0.
+        deviceInfo.decompPipelines =
+            std::make_unique<GpuDecompressionPipelineManager>(dispatch, *pDevice);
+        // Kept for the ASTC CPU decompression path, which needs both device-level calls and
+        // vkGetPhysicalDeviceMemoryProperties -- so it needs the instance dispatch, which has
+        // both, and not the device one, which has no physical-device entry points.
+        deviceInfo.instanceDispatch = vk;
 
         if (mLogging) {
             GFXSTREAM_INFO("%s: init vulkan dispatch from device (end)", __func__);
@@ -2854,8 +2891,17 @@ class VkDecoderGlobalState::Impl {
 
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
-        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2(physicalDevice, pFormatInfo,
-                                                                   pPropertyCount, pProperties);
+        // Prefer core, else the KHR alias; see on_vkGetPhysicalDeviceFeatures2. Reporting zero
+        // properties is a legal answer and the only one that cannot jump the host to 0.
+        if (vk->vkGetPhysicalDeviceSparseImageFormatProperties2) {
+            return vk->vkGetPhysicalDeviceSparseImageFormatProperties2(
+                physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        }
+        if (vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR) {
+            return vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
+                physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        }
+        if (pPropertyCount) *pPropertyCount = 0;
     }
 
     void on_vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
@@ -2870,8 +2916,17 @@ class VkDecoderGlobalState::Impl {
 
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
-        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR(physicalDevice, pFormatInfo,
-                                                                      pPropertyCount, pProperties);
+        // Prefer core, else the KHR alias; see on_vkGetPhysicalDeviceFeatures2. Reporting zero
+        // properties is a legal answer and the only one that cannot jump the host to 0.
+        if (vk->vkGetPhysicalDeviceSparseImageFormatProperties2) {
+            return vk->vkGetPhysicalDeviceSparseImageFormatProperties2(
+                physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        }
+        if (vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR) {
+            return vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
+                physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        }
+        if (pPropertyCount) *pPropertyCount = 0;
     }
 
     void on_vkGetDeviceImageMemoryRequirements(gfxstream::base::BumpPool* pool,
@@ -2891,11 +2946,6 @@ class VkDecoderGlobalState::Impl {
         }
 
         const VkFormat format = pInfo->pCreateInfo->format;
-        bool needDecompression = isEtc2(format) || isAstc(format);
-        if (!needDecompression) {
-            // No modifications needed
-            return;
-        }
 
         std::lock_guard<std::mutex> lock(mMutex);
 
@@ -2905,31 +2955,37 @@ class VkDecoderGlobalState::Impl {
             return;
         }
 
-        needDecompression = deviceInfo->needEmulatedDecompression(format);
-        if (!needDecompression) {
-            // No modifications needed
-            return;
-        }
+        if ((isEtc2(format) || isAstc(format)) && deviceInfo->needEmulatedDecompression(format)) {
+            // Create CompressedImageInfo on the fly to get requirements to use when creating the
+            // image
+            CompressedImageInfo cmpInfo =
+                CompressedImageInfo(device, *pInfo->pCreateInfo, deviceInfo->decompPipelines.get());
+            {
+                VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo);
+                VkImage tempImage;
+                VkResult createRes = vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
+                if (createRes != VK_SUCCESS) {
+                    GFXSTREAM_ERROR("%s: vkCreateImage failed for decompression: %s", __func__,
+                                    string_VkResult(createRes));
+                    return;
+                }
 
-        // Create CompressedImageInfo on the fly to get requirements to use when creating the image
-        CompressedImageInfo cmpInfo =
-            CompressedImageInfo(device, *pInfo->pCreateInfo, deviceInfo->decompPipelines.get());
-        {
-            VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo);
-            VkImage tempImage;
-            VkResult createRes = vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
-            if (createRes != VK_SUCCESS) {
-                GFXSTREAM_ERROR("%s: Failed to find device info for device: %p", __func__, device);
-                return;
+                cmpInfo.setOutputImage(tempImage);
+                cmpInfo.createCompressedMipmapImages(vk, decompInfo);
             }
 
-            cmpInfo.setOutputImage(tempImage);
-            cmpInfo.createCompressedMipmapImages(vk, decompInfo);
+            pMemoryRequirements->memoryRequirements = cmpInfo.getMemoryRequirements();
+            cmpInfo.destroy(vk);
         }
 
-        pMemoryRequirements->memoryRequirements = cmpInfo.getMemoryRequirements();
-        cmpInfo.destroy(vk);
-
+        // The host-to-guest memory type index mapping belongs on EVERY image, not only on the
+        // emulated-decompression formats: the two early returns this replaces handed the guest raw
+        // HOST memory type bits for every ordinary image. Every sibling handler here --
+        // on_vkGetImageMemoryRequirements, ...2, and the buffer pair -- applies it unconditionally,
+        // which is what makes this an oversight rather than an exemption. The guest then picks a
+        // memory type by index against its own emulated properties, so an unmapped set is not a
+        // near miss; it is a different type. Reached through maintenance4, so it stayed hidden
+        // until a guest driver started using vkGetDeviceImageMemoryRequirements.
         auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
         if (!physicalDeviceInfo) {
             GFXSTREAM_ERROR("Failed to find physical device info for physical device:%p",
@@ -2990,7 +3046,9 @@ class VkDecoderGlobalState::Impl {
         // Run the underlying API call.
         {
             AutoLock lock(*graphicsDriverLock());
-            m_vk->vkDestroyDevice(device, nullptr);
+            // Device-level command: the per-device dispatch owns it. See the note on
+            // decompPipelines in on_vkCreateDevice for why the global dispatch cannot be used.
+            deviceDispatch->vkDestroyDevice(device, nullptr);
         }
 
         GFXSTREAM_INFO("Destroyed VkDevice:%p", device);
@@ -3297,7 +3355,12 @@ class VkDecoderGlobalState::Impl {
             cmpInfo->createCompressedMipmapImages(vk, *pCreateInfo);
 
             if (deviceInfo->useAstcCpuDecompression && cmpInfo->isAstc()) {
-                cmpInfo->initAstcCpuDecompression(m_vk, deviceInfo->physicalDevice);
+                // The instance dispatch: this path makes device-level calls AND asks for the
+                // physical device's memory properties, and only the instance dispatch has both.
+                // See the note in on_vkCreateDevice about the global dispatch.
+                cmpInfo->initAstcCpuDecompression(
+                    deviceInfo->instanceDispatch ? deviceInfo->instanceDispatch : m_vk,
+                    deviceInfo->physicalDevice);
             }
         }
 
@@ -3991,6 +4054,11 @@ class VkDecoderGlobalState::Impl {
         std::vector<VkFence> externalFences;
 
         std::vector<DeviceOpWaitable> pendingUses;
+        // The fences those pending uses were submitted with. A fence only acquires a latestUse
+        // from a submission made with that same fence, so waiting on these waits on exactly the
+        // host-side work that has to finish before the reset.
+        std::vector<VkFence> pendingUseFences;
+        DeviceOpTrackerPtr tracker;
 
         {
             std::lock_guard<std::mutex> lock(mMutex);
@@ -4009,6 +4077,7 @@ class VkDecoderGlobalState::Impl {
                 if (fenceInfo.latestUse) {
                     if (!IsDone(*fenceInfo.latestUse)) {
                         pendingUses.emplace_back(*fenceInfo.latestUse);
+                        pendingUseFences.push_back(fence);
                     }
                     fenceInfo.latestUse.reset();
                 }
@@ -4023,35 +4092,72 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
-        // Ensure that any host operations that reference this fence have completed
-        // before reseting.
-        while (!pendingUses.empty()) {
+        // Ensure that any host operations referencing these fences have completed before
+        // resetting. This used to be a spin: sweep the tracker under the global lock, re-test the
+        // waitables, yield, repeat. Three things were wrong with it. The sweep is where the driver
+        // is asked, and it was asked from inside mMutex, so every other decoder thread queued
+        // behind a call that can take milliseconds. The re-test only ever becomes true because a
+        // sweep made it true, so the loop's exit condition was its own side effect. And measuring
+        // it showed the wait was never the GPU: the work was finished long before the loop noticed.
+        //
+        // Ask the driver the question directly instead. vkWaitForFences on exactly these fences is
+        // one call, it blocks in the driver rather than spinning, and it holds no lock of ours.
+        // One sweep afterwards turns "the fence signalled" into "the tracked operation completed"
+        // for the bookkeeping.
+        if (!pendingUses.empty()) {
             {
                 std::lock_guard<std::mutex> lock(mMutex);
-
                 auto deviceInfoIt = mDeviceInfo.find(device);
                 if (deviceInfoIt == mDeviceInfo.end()) {
                     GFXSTREAM_ERROR("Invalid VkDevice:%p!", device);
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
-                DeviceInfo& deviceInfo = deviceInfoIt->second;
-
-                if (!deviceInfo.deviceOpTracker) {
+                tracker = deviceInfoIt->second.deviceOpTracker;
+                if (!tracker) {
                     GFXSTREAM_ERROR("VkDevice:%p missing op tracker?", device);
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
-                deviceInfo.deviceOpTracker->PollAndProcessGarbage();
             }
 
-            pendingUses.erase(
-                std::remove_if(pendingUses.begin(),
-                               pendingUses.end(),
-                               [](const DeviceOpWaitable& waitable) {
-                                    return IsDone(waitable);
-                               }),
-                pendingUses.end());
+            if (kResetFenceTrace) {
+                sWithPending.fetch_add(1, std::memory_order_relaxed);
+                sFenceCount.fetch_add(pendingUseFences.size(), std::memory_order_relaxed);
+            }
 
-            std::this_thread::yield();
+            VkResult waitRes = VK_SUCCESS;
+            if (!pendingUseFences.empty()) {
+                static constexpr uint64_t kFenceWaitTimeoutNs = 5ULL * 1000 * 1000 * 1000;
+                waitRes = vk->vkWaitForFences(device, (uint32_t)pendingUseFences.size(),
+                                              pendingUseFences.data(), VK_TRUE,
+                                              kFenceWaitTimeoutNs);
+                if (waitRes != VK_SUCCESS) {
+                    // A fence that never signals must not hang the guest thread that reset it.
+                    // The tracker expires such an operation on its own after five seconds.
+                    GFXSTREAM_WARNING(
+                        "vkResetFences: waiting for %zu in-flight fence use(s) returned %s; "
+                        "resetting anyway.",
+                        pendingUseFences.size(), string_VkResult(waitRes));
+                }
+            }
+
+            // Outside mMutex on purpose: this is the call that enters the driver.
+            //
+            // Which of the two is used matters more than it looks. The wait above has just
+            // established these fences are signalled -- measured at 100% of the time, in 5us --
+            // and recording that costs nothing. A sweep re-establishes it by asking the driver
+            // about every queued operation instead, at hundreds of microseconds each, which was
+            // measured at roughly 3.7ms a call and a quarter of all host dispatch. It also lands
+            // on a guest-facing path, which is exactly what the tracker's own sweeper thread
+            // exists to avoid.
+            if (!pendingUseFences.empty() && waitRes == VK_SUCCESS) {
+                tracker->CompleteOpsForSignalledFences(pendingUseFences.data(),
+                                                       (uint32_t)pendingUseFences.size());
+            } else {
+                // Either there was nothing to confirm, or the wait timed out and the fences are
+                // NOT known to be signalled -- marking those operations complete would let objects
+                // still referenced by them be destroyed. Fall back to asking the driver.
+                tracker->PollAndProcessGarbage();
+            }
         }
 
         if (!cleanedFences.empty()) {
@@ -4237,7 +4343,6 @@ class VkDecoderGlobalState::Impl {
 
         if (deviceInfo.deviceOpTracker && semaphoreInfo.latestUse && !IsDone(*semaphoreInfo.latestUse)) {
             deviceInfo.deviceOpTracker->AddPendingGarbage(*semaphoreInfo.latestUse, semaphore);
-            deviceInfo.deviceOpTracker->PollAndProcessGarbage();
         } else {
             deviceDispatch->vkDestroySemaphore(device, semaphore, nullptr);
         }
@@ -4459,7 +4564,6 @@ class VkDecoderGlobalState::Impl {
 
         if (deviceInfo.deviceOpTracker && fenceInfo.latestUse && !IsDone(*fenceInfo.latestUse)) {
             deviceInfo.deviceOpTracker->AddPendingGarbage(*fenceInfo.latestUse, fence);
-            deviceInfo.deviceOpTracker->PollAndProcessGarbage();
         } else {
             deviceDispatch->vkDestroyFence(device, fence, nullptr);
         }
@@ -6477,7 +6581,18 @@ class VkDecoderGlobalState::Impl {
                     &localAllocInfo.memoryTypeIndex, &colorBufferMemoryUsesDedicatedAlloc,
                     &mappedPtr)) {
                 if (mSnapshotState != SnapshotState::Loading) {
-                    GFXSTREAM_FATAL("Failed to get allocation info for ColorBuffer:%d", importCbInfoPtr->colorBuffer);
+                    // A guest can hand us a ColorBuffer id the host never backed: Xorg's
+                    // glamor smooth takeover (-background none, hardcoded in sddm) imports
+                    // the boot framebuffer, a classic guest-shmem resource with no host
+                    // allocation. That is the guest's problem, not grounds to abort the
+                    // whole VMM -- aborting here turned every greeter start into a dead VM
+                    // (exit 134, silent outside logcat). Fail the allocation like the
+                    // Metal/QNX import paths below do and let the guest driver cope.
+                    GFXSTREAM_ERROR(
+                        "%s: VK_ERROR_OUT_OF_DEVICE_MEMORY: "
+                        "no allocation info for ColorBuffer:%d",
+                        __func__, importCbInfoPtr->colorBuffer);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
                 // During snapshot load there could be invalidated references to
                 // color buffers.
@@ -8059,7 +8174,16 @@ class VkDecoderGlobalState::Impl {
 
     VkResult dispatchVkQueueSubmit(VulkanDispatch* vk, VkQueue unboxed_queue, uint32_t submitCount,
                                    const VkSubmitInfo2* pSubmits, VkFence fence) {
-        VkResult res = vk->vkQueueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
+        // vkQueueSubmit2 is Vulkan 1.3 core: a dispatch table built against a lower device API
+        // version leaves it null, and calling it jumps to 0 -- so a guest submit would kill the
+        // whole VMM. Prefer the core entry, fall back to the KHR alias (identical VkSubmitInfo2),
+        // and fail the submit rather than the process when the host has neither.
+        auto queueSubmit2 = vk->vkQueueSubmit2 ? vk->vkQueueSubmit2 : vk->vkQueueSubmit2KHR;
+        if (!queueSubmit2) {
+            GFXSTREAM_ERROR("Host exposes neither vkQueueSubmit2 nor vkQueueSubmit2KHR.");
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
+        VkResult res = queueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
         if (res != VK_SUCCESS) {
             GFXSTREAM_VERBOSE("vkQueueSubmit2 failed with %s [%d]", string_VkResult(res), res);
             return res;
@@ -8419,7 +8543,10 @@ class VkDecoderGlobalState::Impl {
         if (!snapshotsEnabled()) {
             processDelayedRemovesForDevice(device);
         }
-        deviceOpTracker->PollAndProcessGarbage();
+        // No sweep here. This is the guest submit path, and a sweep enters the driver: on some
+        // drivers a single vkGetFenceStatus averages milliseconds, so reclaiming garbage from here
+        // put a multi-millisecond driver query in the middle of every submit and left the guest
+        // spinning in the transport waiting for it. The tracker sweeps from its own thread now.
 
         if (snapshotsEnabled()) {
             for (uint32_t i = 0; i < submitCount; ++i) {
@@ -10971,9 +11098,10 @@ class VkDecoderGlobalState::Impl {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
             .pNext = &swapchainMaintenance1Features,
         };
-        if (hasGetPhysicalDeviceFeatures2) {
+        // The advertised extension is not the same thing as a resolved entry point; require both.
+        if (hasGetPhysicalDeviceFeatures2 && vk->vkGetPhysicalDeviceFeatures2) {
             vk->vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
-        } else if (hasGetPhysicalDeviceFeatures2KHR) {
+        } else if (hasGetPhysicalDeviceFeatures2KHR && vk->vkGetPhysicalDeviceFeatures2KHR) {
             vk->vkGetPhysicalDeviceFeatures2KHR(physicalDevice, &features2);
         } else {
             return false;
@@ -11083,8 +11211,8 @@ class VkDecoderGlobalState::Impl {
             // "Extracting a node invalidates only the iterators to the extracted element ..."
             auto current = it++;
             VkDevice device = current->first;
-            auto* physDevInfo = gfxstream::base::find(mPhysdevInfo, current->second.physicalDevice);
-            if (physDevInfo && physDevInfo->instance == instance) {
+            // Select by the device's own creating instance (see DeviceInfo::parentInstance).
+            if (current->second.parentInstance == instance) {
                 InstanceObjects::DeviceObjects& deviceObjects = objects.devices.emplace_back();
                 deviceObjects.device = mDeviceInfo.extract(current);
                 extractDeviceAndDependenciesLocked(device, deviceObjects);
@@ -11237,6 +11365,12 @@ class VkDecoderGlobalState::Impl {
     }
 
     void destroyInstanceObjects(InstanceObjects& objects) {
+        // The extraction that produced this returns without filling the node in when the instance
+        // is already gone -- a cleanup callback racing the guest's own vkDestroyInstance -- and a
+        // node handle that holds nothing has no key() or mapped() to read.
+        if (objects.instance.empty()) {
+            return;
+        }
         VkInstance instance = objects.instance.key();
         InstanceInfo& instanceInfo = objects.instance.mapped();
         LOG_CALLS_VERBOSE(
@@ -11256,7 +11390,17 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
-        m_vk->vkDestroyInstance(instance, nullptr);
+        // Instance-level command; the instance dispatch owns it. The global dispatch's copy is
+        // null whenever the host driver was loaded directly rather than through a system loader.
+        if (auto* instanceVk = dispatch_VkInstance(instanceInfo.boxed);
+            instanceVk && instanceVk->vkDestroyInstance) {
+            instanceVk->vkDestroyInstance(instance, nullptr);
+        } else if (m_vk->vkDestroyInstance) {
+            m_vk->vkDestroyInstance(instance, nullptr);
+        } else {
+            GFXSTREAM_ERROR("No vkDestroyInstance in any dispatch; leaking VkInstance:%p.",
+                            instance);
+        }
         GFXSTREAM_INFO("Destroyed VkInstance:%p for application:'%s' engine:'%s'.", instance,
                        instanceInfo.applicationName.c_str(), instanceInfo.engineName.c_str());
 

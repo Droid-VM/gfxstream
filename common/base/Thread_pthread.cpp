@@ -164,6 +164,17 @@ void* Thread::thread_main(void* arg) {
 void Thread::maskAllSignals() {
     sigset_t set;
     sigfillset(&set);
+    // Synchronous fault signals must stay deliverable. Blocking one does not stop the fault: the
+    // kernel force-kills the process on the spot, before any handler runs, so a crash on this
+    // thread leaves no diagnostic at all -- a SIGSEGV here took the whole VMM down silently and
+    // looked like exit(139) with nothing written anywhere.
+    sigdelset(&set, SIGSEGV);
+    sigdelset(&set, SIGBUS);
+    sigdelset(&set, SIGILL);
+    sigdelset(&set, SIGFPE);
+    sigdelset(&set, SIGABRT);
+    sigdelset(&set, SIGSYS);
+    sigdelset(&set, SIGTRAP);
     pthread_sigmask(SIG_SETMASK, &set, nullptr);
 }
 

@@ -15,6 +15,8 @@
 #include "device_op_tracker.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <iterator>
 #include <type_traits>
 
 #include "gfxstream/common/logging.h"
@@ -67,14 +69,92 @@ void DeviceOpTracker::AddPendingGarbage(DeviceOpWaitable waitable, VkSemaphore s
     }
 }
 
+DeviceOpTracker::~DeviceOpTracker() { StopPollThread(); }
+
+void DeviceOpTracker::StartPollThreadIfNeeded() {
+    std::call_once(mPollThreadOnce, [this] {
+        mPollThread = std::thread([this] {
+            // Deliberately infrequent. A pass enters the driver, and on some drivers a fence
+            // status query serialises against queue submits, so polling often enough to matter
+            // for latency would only move the stall into vkQueueSubmit. All this reclaims is
+            // fences and semaphores whose last use has already finished, so a lazy pass is fine.
+            static const auto kInterval = std::chrono::milliseconds([] {
+                const char* env = getenv("GFXSTREAM_DEVICE_OP_POLL_MS");
+                if (env) {
+                    char* end = nullptr;
+                    const unsigned long v = strtoul(env, &end, 10);
+                    if (end != env) return static_cast<long>(v);
+                }
+                return 500L;
+            }());
+            while (true) {
+                {
+                    std::unique_lock<std::mutex> lock(mPollThreadMutex);
+                    mPollThreadCv.wait_for(lock, kInterval,
+                                           [this] { return mPollThreadStopping.load(); });
+                    if (mPollThreadStopping.load()) {
+                        return;
+                    }
+                }
+                PollAndProcessGarbage();
+            }
+        });
+    });
+}
+
+void DeviceOpTracker::StopPollThread() {
+    {
+        std::lock_guard<std::mutex> lock(mPollThreadMutex);
+        mPollThreadStopping = true;
+    }
+    mPollThreadCv.notify_all();
+    if (mPollThread.joinable()) {
+        mPollThread.join();
+    }
+}
+
 void DeviceOpTracker::PollAndProcessGarbage() {
+
+    // Take the operations to examine out of the queue before touching the driver. Polling can cost
+    // milliseconds per call, and AddPendingDeviceOp -- which every queue submit runs -- needs this
+    // same lock: holding it across the driver calls would only move the stall from the submit path
+    // onto the lock.
+    std::deque<PendingOp> examining;
+    {
+        std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
+        examining.swap(mPollFunctions);
+    }
+
+    {
+        const auto expiry = std::chrono::system_clock::now() - kAutoDeleteTimeThreshold;
+        // Stop at the first operation still in flight: entries are in submission order, so the
+        // ones behind it are almost certainly pending too, and every extra probe costs a driver
+        // call.
+        auto firstInFlightIt = examining.begin();
+        for (; firstInFlightIt != examining.end(); ++firstInFlightIt) {
+            if (PollOne(*firstInFlightIt, /* assumeSignalled */ false) != DeviceOpStatus::kPending) {
+                continue;
+            }
+            // An operation that never completes must not wedge everything queued behind it.
+            if (firstInFlightIt->timepoint < expiry) {
+                GFXSTREAM_WARNING(
+                    "VkDevice:%p had an operation pending for over %d seconds; dropping it so "
+                    "later completions can be reclaimed.",
+                    mDevice,
+                    std::chrono::duration_cast<std::chrono::seconds>(kAutoDeleteTimeThreshold)
+                        .count());
+                continue;
+            }
+            break;
+        }
+        examining.erase(examining.begin(), firstInFlightIt);
+    }
+
     std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
-    mPollFunctions.erase(std::remove_if(mPollFunctions.begin(), mPollFunctions.end(),
-                                        [](const PollFunction& pollingFunc) {
-                                            DeviceOpStatus status = pollingFunc.func();
-                                            return status != DeviceOpStatus::kPending;
-                                        }),
-                         mPollFunctions.end());
+    // Anything submitted while we were polling belongs after what we put back.
+    examining.insert(examining.end(), std::make_move_iterator(mPollFunctions.begin()),
+                     std::make_move_iterator(mPollFunctions.end()));
+    mPollFunctions.swap(examining);
 
     if (mPollFunctions.size() > kSizeLoggingThreshold) {
         // Only report old-enough objects to avoid reporting lots of pending waitables
@@ -82,7 +162,7 @@ void DeviceOpTracker::PollAndProcessGarbage() {
         const auto now = std::chrono::system_clock::now();
         const auto old = now - kSizeLoggingTimeThreshold;
         size_t numOldFuncs = std::count_if(
-            mPollFunctions.begin(), mPollFunctions.end(), [old](const PollFunction& pollingFunc) {
+            mPollFunctions.begin(), mPollFunctions.end(), [old](const PendingOp& pollingFunc) {
                 return (pollingFunc.timepoint < old);
             });
         if (numOldFuncs > kSizeLoggingThreshold) {
@@ -171,12 +251,64 @@ void DeviceOpTracker::OnDestroyDevice() {
     }
 }
 
-void DeviceOpTracker::AddPendingDeviceOp(std::function<DeviceOpStatus()> pollFunction) {
-    std::lock_guard<std::mutex> lock(mPollFunctionsMutex);
-    mPollFunctions.push_back(PollFunction{
-        .func = std::move(pollFunction),
-        .timepoint = std::chrono::system_clock::now(),
-    });
+DeviceOpStatus DeviceOpTracker::PollOne(const PendingOp& op, bool assumeSignalled) {
+    if (op.fence == VK_NULL_HANDLE) {
+        if (op.promise) op.promise->set_value();
+        return DeviceOpStatus::kDone;
+    }
+    VkResult result = VK_SUCCESS;
+    if (!assumeSignalled) {
+        result = mDeviceDispatch->vkGetFenceStatus(mDevice, op.fence);
+        if (result == VK_NOT_READY) {
+            return DeviceOpStatus::kPending;
+        }
+    }
+    if (op.destroyFenceOnCompletion) {
+        mDeviceDispatch->vkDestroyFence(mDevice, op.fence, nullptr);
+    }
+    if (op.promise) op.promise->set_value();
+    return result == VK_SUCCESS ? DeviceOpStatus::kDone : DeviceOpStatus::kFailure;
+}
+
+void DeviceOpTracker::CompleteOpsForSignalledFences(const VkFence* fences, uint32_t fenceCount) {
+    if (!fenceCount) return;
+
+    std::deque<PendingOp> completed;
+    {
+        std::lock_guard<std::mutex> pollFunctionsLock(mPollFunctionsMutex);
+        // Entries are in submission order and the queue is short (single digits in practice), so a
+        // linear scan is cheaper than any index would be -- and unlike a sweep, it touches no
+        // driver state at all.
+        for (auto it = mPollFunctions.begin(); it != mPollFunctions.end();) {
+            const bool matches =
+                it->fence != VK_NULL_HANDLE &&
+                std::find(fences, fences + fenceCount, it->fence) != fences + fenceCount;
+            if (matches) {
+                completed.push_back(std::move(*it));
+                it = mPollFunctions.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // Fulfil off the lock: a promise's continuation runs on whoever fulfils it, and holding the
+    // queue lock across that would put arbitrary work under it.
+    for (const PendingOp& op : completed) {
+        PollOne(op, /* assumeSignalled */ true);
+    }
+}
+
+void DeviceOpTracker::AddPendingDeviceOp(VkFence fence,
+                                         std::shared_ptr<std::promise<void>> promise,
+                                         bool destroyFenceOnCompletion) {
+    {
+        std::lock_guard<std::mutex> lock(mPollFunctionsMutex);
+        mPollFunctions.push_back(PendingOp{fence, std::move(promise), destroyFenceOnCompletion,
+                                           std::chrono::system_clock::now()});
+    }
+    // There is something to reclaim now, so there is a reason for the sweeper to exist.
+    StartPollThreadIfNeeded();
 }
 
 DeviceOpBuilder::DeviceOpBuilder(DeviceOpTracker& tracker) : mTracker(tracker) {}
@@ -218,25 +350,7 @@ DeviceOpWaitable DeviceOpBuilder::OnQueueSubmittedWithFence(VkFence fence) {
     std::shared_ptr<std::promise<void>> promise = std::make_shared<std::promise<void>>();
     DeviceOpWaitable future = promise->get_future().share();
 
-    mTracker.AddPendingDeviceOp([device = mTracker.mDevice,
-                                 deviceDispatch = mTracker.mDeviceDispatch, fence,
-                                 promise = std::move(promise), destroyFenceOnCompletion] {
-        if (fence == VK_NULL_HANDLE) {
-            return DeviceOpStatus::kDone;
-        }
-
-        VkResult result = deviceDispatch->vkGetFenceStatus(device, fence);
-        if (result == VK_NOT_READY) {
-            return DeviceOpStatus::kPending;
-        }
-
-        if (destroyFenceOnCompletion) {
-            deviceDispatch->vkDestroyFence(device, fence, nullptr);
-        }
-        promise->set_value();
-
-        return result == VK_SUCCESS ? DeviceOpStatus::kDone : DeviceOpStatus::kFailure;
-    });
+    mTracker.AddPendingDeviceOp(fence, std::move(promise), destroyFenceOnCompletion);
 
     return future;
 }
@@ -250,16 +364,13 @@ void DeviceOpBuilder::OnQueueSubmissionAborted(VkFence fence) {
 
     mSubmittedFence = fence;
 
-    // Can be destroyed immediately as it's not used
-    const bool destroyFenceOnCompletion = mCreatedFence.has_value();
-    mTracker.AddPendingDeviceOp([device = mTracker.mDevice,
-                                 deviceDispatch = mTracker.mDeviceDispatch, fence,
-                                 destroyFenceOnCompletion] {
-        if (destroyFenceOnCompletion) {
-            deviceDispatch->vkDestroyFence(device, fence, nullptr);
-        }
-        return DeviceOpStatus::kDone;
-    });
+    // Destroyed here rather than queued. The submission was abandoned, so this fence was never
+    // handed to the driver and nothing can be waiting on it -- and a queue entry now carries a
+    // fence the sweeper would poll, which for an unsubmitted fence never signals: it would sit
+    // pending until the expiry threshold dropped it, leaking the fence it was queued to free.
+    if (mCreatedFence.has_value()) {
+        mTracker.mDeviceDispatch->vkDestroyFence(mTracker.mDevice, fence, nullptr);
+    }
 }
 
 }  // namespace vk
