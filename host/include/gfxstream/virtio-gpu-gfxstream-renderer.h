@@ -82,6 +82,11 @@ struct stream_renderer_fence {
 #define STREAM_HANDLE_TYPE_MEM_OPAQUE_WIN32 0x3
 #define STREAM_HANDLE_TYPE_MEM_SHM 0x4
 #define STREAM_HANDLE_TYPE_MEM_ZIRCON 0x5
+/* DroidVM gfxstream pre-alloc: the blob lives in the boot-blessed GpuPool. os_handle is a dup of
+ * the pool memfd and pool_offset below is valid. 0x6 is deliberately skipped: it was
+ * STREAM_HANDLE_TYPE_MEM_AHB, retired upstream, and a VMM built against the older header must not
+ * mistake one for the other. */
+#define STREAM_HANDLE_TYPE_MEM_POOL 0x7
 
 #define STREAM_HANDLE_TYPE_SIGNAL_OPAQUE_FD 0x10
 #define STREAM_HANDLE_TYPE_SIGNAL_SYNC_FD 0x20
@@ -96,6 +101,11 @@ struct stream_renderer_fence {
 struct stream_renderer_handle {
     int64_t os_handle;
     uint32_t handle_type;
+    // DroidVM gfxstream pre-alloc: valid only when handle_type == STREAM_HANDLE_TYPE_MEM_POOL.
+    // Byte offset of this blob within the boot-blessed GpuPool; the VMM maps the pool GPA
+    // (pool_base + pool_offset) directly, with no runtime SHARE. Zeroed for every other type.
+    uint32_t _pad_pool;
+    uint64_t pool_offset;
 };
 
 // @user_data: custom user data passed during `stream_renderer_init`
@@ -154,7 +164,6 @@ typedef void (*stream_renderer_debug_callback_ex)(void* user_data,
 #define STREAM_RENDERER_PARAM_WIN0_HEIGHT 5
 #define STREAM_RENDERER_PARAM_DEBUG_CALLBACK 6
 #define STREAM_RENDERER_PARAM_DEBUG_CALLBACK_EX 7
-
 // An entry in the stream renderer parameters list.
 // The key should be one of STREAM_RENDERER_PARAM_*
 // The value can be either a uint64_t or cast to a pointer to a struct, depending on if the

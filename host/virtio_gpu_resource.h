@@ -100,6 +100,11 @@ class VirtioGpuResource {
 
     std::shared_ptr<RingBlob> ShareRingBlob();
 
+    // If this resource owns a RingBlob, return it to the recycle pool -- kept alive and reusable
+    // by a later same-size blob -- instead of letting it be freed on unref, so its physical pages
+    // stay put for Gunyah's permanent SHARE. No-op unless GFXSTREAM_GUNYAH_PIN_RINGBLOB=1.
+    void ReturnRingBlobToGunyahPool();
+
 #ifdef GFXSTREAM_BUILD_WITH_SNAPSHOT_FRONTEND_SUPPORT
     std::optional<gfxstream::host::snapshot::VirtioGpuResourceSnapshot> Snapshot() const;
 
@@ -133,6 +138,14 @@ class VirtioGpuResource {
         IOV_TO_LINEAR = 0,
         LINEAR_TO_IOV = 1,
     };
+    // Blob-backed BUFFER/COLOR_BUFFER resources are created through Create(createArgs, nullptr, 0),
+    // so AttachIov() runs with zero iovs and leaves mLinear empty. The copy path -- a VMM
+    // transfer_read for display scanout -- still needs that staging buffer, so size it from this
+    // resource's own create args the first time a transfer asks for it. Only ever fills in a
+    // buffer that was NEVER attached; an attached-but-too-small one keeps failing the size guards,
+    // as before.
+    void EnsureLinearAllocated();
+
     int TransferWithIov(uint64_t offset, const stream_renderer_box* box,
                         const std::vector<struct iovec>& iovs, TransferDirection direction);
 

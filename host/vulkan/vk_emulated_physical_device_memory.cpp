@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <limits>
 
+#include "gfxstream/system/System.h"
+
 #include "gfxstream/common/logging.h"
 
 namespace gfxstream {
@@ -152,6 +154,66 @@ EmulatedPhysicalDeviceMemoryProperties::EmulatedPhysicalDeviceMemoryProperties(
 
         mGuestColorBufferMemoryTypeIndex = ahbMemoryTypeIndex;
     }
+
+    // Synthesize a device-local-only "shadow" for every host memory type that is both
+    // DEVICE_LOCAL and HOST_VISIBLE.
+    //
+    // On a UMA GPU -- Adreno, for one -- every memory type is HOST_VISIBLE, and the guest driver
+    // reacts to HOST_VISIBLE by eagerly creating a coherent blob mapped through the virtio-gpu PCI
+    // BAR. Every guest allocation then consumes BAR space, so total GPU memory is capped at the
+    // BAR size even though the heap is far larger, and a large allocation -- model weights, a big
+    // texture -- fails with "Failed to allocate coherent memory".
+    //
+    // A shadow type advertises DEVICE_LOCAL only, so the guest takes its pass-through path and
+    // never maps it: the allocation lives purely in host GPU memory, costs no BAR space, and is
+    // filled the ordinary Vulkan way through a staging buffer. A guest that wants a mappable
+    // allocation keeps using the original host-visible types, which are unchanged.
+    std::fill_n(mHostToGuestDeviceLocalShadowMap, VK_MAX_MEMORY_TYPES, kInvalidMemoryTypeIndex);
+    std::fill_n(mGuestMemoryTypeIsShadow, VK_MAX_MEMORY_TYPES, false);
+
+    if (gfxstream::base::getEnvironmentVariable("GFXSTREAM_DEVICE_LOCAL_MEMORY_TYPE") == "1") {
+        const uint32_t originalGuestMemoryTypeCount = mGuestMemoryProperties.memoryTypeCount;
+        for (uint32_t hostMemoryTypeIndex = 0;
+             hostMemoryTypeIndex < mHostMemoryProperties.memoryTypeCount; hostMemoryTypeIndex++) {
+            const VkMemoryType& hostMemoryType =
+                mHostMemoryProperties.memoryTypes[hostMemoryTypeIndex];
+            const bool deviceLocal =
+                hostMemoryType.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            const bool hostVisible =
+                hostMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+            if (!deviceLocal || !hostVisible) {
+                continue;
+            }
+            // Only shadow types the guest can actually reach.
+            if (mHostToGuestMemoryTypeIndexMap[hostMemoryTypeIndex] == kInvalidMemoryTypeIndex) {
+                continue;
+            }
+            if (mGuestMemoryProperties.memoryTypeCount == VK_MAX_MEMORY_TYPES) {
+                GFXSTREAM_ERROR(
+                    "No room for a device-local-only shadow of host memory type %u: "
+                    "VK_MAX_MEMORY_TYPES already in use.",
+                    hostMemoryTypeIndex);
+                break;
+            }
+
+            const uint32_t shadowIndex = mGuestMemoryProperties.memoryTypeCount;
+            ++mGuestMemoryProperties.memoryTypeCount;
+
+            VkMemoryType& shadowType = mGuestMemoryProperties.memoryTypes[shadowIndex];
+            shadowType.propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            shadowType.heapIndex = hostMemoryType.heapIndex;
+
+            // An allocation of the shadow uses the real host type; only the guest-visible flags
+            // differ. The reverse map is left pointing at the original host-visible type so
+            // existing lookups are unchanged.
+            mGuestToHostMemoryTypeIndexMap[shadowIndex] = hostMemoryTypeIndex;
+            mHostToGuestDeviceLocalShadowMap[hostMemoryTypeIndex] = shadowIndex;
+            mGuestMemoryTypeIsShadow[shadowIndex] = true;
+        }
+        GFXSTREAM_INFO("Device-local-only memory types: %u (guest memory types %u -> %u)",
+                       mGuestMemoryProperties.memoryTypeCount - originalGuestMemoryTypeCount,
+                       originalGuestMemoryTypeCount, mGuestMemoryProperties.memoryTypeCount);
+    }
 }
 
 std::optional<EmulatedPhysicalDeviceMemoryProperties::HostMemoryInfo>
@@ -179,7 +241,17 @@ EmulatedPhysicalDeviceMemoryProperties::getHostMemoryInfoFromGuestMemoryTypeInde
         return std::nullopt;
     }
 
-    return getHostMemoryInfoFromHostMemoryTypeIndex(hostMemoryTypeIndex);
+    auto hostMemoryInfo = getHostMemoryInfoFromHostMemoryTypeIndex(hostMemoryTypeIndex);
+
+    // Allocate from the real host memory type, but report the shadow's device-local-only flags:
+    // callers use these flags to decide whether to set up host-visible emulation -- shared memory
+    // plus a guest mapping -- which is exactly what a shadow allocation must not do.
+    if (hostMemoryInfo && mGuestMemoryTypeIsShadow[guestMemoryTypeIndex]) {
+        hostMemoryInfo->memoryType.propertyFlags =
+            mGuestMemoryProperties.memoryTypes[guestMemoryTypeIndex].propertyFlags;
+    }
+
+    return hostMemoryInfo;
 }
 
 void EmulatedPhysicalDeviceMemoryProperties::transformToGuestMemoryRequirements(
@@ -199,6 +271,13 @@ void EmulatedPhysicalDeviceMemoryProperties::transformToGuestMemoryRequirements(
         }
 
         guestMemoryTypeBits |= (1u << guestMemoryTypeIndex);
+
+        // A resource that can live in a host-visible host type can equally live in that type's
+        // device-local-only shadow, so offer the guest both.
+        const uint32_t shadowIndex = mHostToGuestDeviceLocalShadowMap[hostMemoryTypeIndex];
+        if (shadowIndex != kInvalidMemoryTypeIndex) {
+            guestMemoryTypeBits |= (1u << shadowIndex);
+        }
     }
 
     memoryRequirements->memoryTypeBits = guestMemoryTypeBits;

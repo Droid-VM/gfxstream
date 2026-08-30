@@ -54,7 +54,8 @@ std::optional<HostMemInfo> ExternalObjectManager::removeMapping(uint32_t ctxId, 
 void ExternalObjectManager::addBlobDescriptorInfo(uint32_t ctxId, uint64_t blobId,
                                                   BlobDescriptorValueType descriptor,
                                                   uint32_t streamHandleType, uint32_t caching,
-                                                  std::optional<VulkanInfo> vulkanInfoOpt) {
+                                                  std::optional<VulkanInfo> vulkanInfoOpt,
+                                                  int64_t poolOffset) {
     struct BlobDescriptorInfo info = {
         .descriptorInfo =
             {
@@ -67,6 +68,7 @@ void ExternalObjectManager::addBlobDescriptorInfo(uint32_t ctxId, uint64_t blobI
             },
         .caching = caching,
         .vulkanInfoOpt = vulkanInfoOpt,
+        .poolOffset = poolOffset,
     };
 
     auto key = std::make_pair(ctxId, blobId);

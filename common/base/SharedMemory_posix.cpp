@@ -146,7 +146,13 @@ int SharedMemory::openInternal(int oflag, int mode, bool doMapping) {
         }
 
 #if defined(HAVE_MEMFD_CREATE)
-        if (fcntl(mFd, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW) == -1) {
+        // DroidVM: seal against SHRINK only (protects existing mappings from SIGBUS), NOT GROW/SEAL.
+        // The VMM (crosvm) grows a host-visible blob's shmem to a 2MB multiple to fold it into
+        // order-9 folios (host-visible blob backing; see HostVisibleFolio.h). Only crosvm holds the
+        // fd -- the guest reaches the memory through a BAR mapping, never the fd -- so allowing grow
+        // does not widen the guest's authority. Growing is additive and never invalidates the
+        // original-size mappings other consumers hold.
+        if (fcntl(mFd, F_ADD_SEALS, F_SEAL_SHRINK) == -1) {
             err = -errno;
             close();
             return err;

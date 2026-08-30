@@ -38,6 +38,11 @@ class UdmabufCreator {
 
     std::optional<DescriptorType> handleFromSharedMemory(SharedMemory& memory);
 
+    // DroidVM gfxstream pre-alloc: create a udmabuf aliasing [offset, offset+size)
+    // of an existing memfd (the boot-blessed GpuPool). Unlike handleFromSharedMemory
+    // this does not own or close `memfd`. offset/size must be page-aligned.
+    std::optional<DescriptorType> handleFromFd(int memfd, uint64_t offset, uint64_t size);
+
    private:
     ManagedDescriptor mOsHandleCreator;
 };

@@ -46,16 +46,48 @@ struct AlignedMemory {
     AlignedMemory& operator=(AlignedMemory&& other) = delete;
 };
 
+// Borrowed external memory (e.g. guest DMA coherent backing on Gunyah).
+// Does NOT own the memory — caller must ensure lifetime.
+struct ExternalMemory {
+    void* addr = nullptr;
+
+    explicit ExternalMemory(void* ptr) : addr(ptr) {}
+    ~ExternalMemory() = default;
+
+    ExternalMemory(const ExternalMemory&) = delete;
+    ExternalMemory& operator=(const ExternalMemory&) = delete;
+    ExternalMemory(ExternalMemory&&) = delete;
+    ExternalMemory& operator=(ExternalMemory&&) = delete;
+};
+
 // Memory used as a ring buffer for communication between the guest and host.
 class RingBlob {
    public:
     static std::unique_ptr<RingBlob> CreateWithShmem(uint32_t id, uint64_t size);
     static std::unique_ptr<RingBlob> CreateWithHostMemory(uint32_t, uint64_t size, uint64_t alignment);
+    // DroidVM gfxstream pre-alloc: back the RingBlob with a borrowed host VA into the boot-blessed
+    // GpuPool (the whole pool is mapped once by HostVisiblePool; `hva` = pool_base_hva + poolOffset,
+    // pure pointer arithmetic, no per-blob mmap). The guest maps the pool GPA directly. No fresh
+    // memfd, no runtime SHARE. `poolOffset` is the byte offset within the pool.
+    static std::unique_ptr<RingBlob> CreateFromPool(uint32_t id, uint64_t size, void* hva,
+                                                    int64_t poolOffset);
 
     bool isExportable() const;
 
+    // DroidVM gfxstream pre-alloc: byte offset within the GpuPool if this RingBlob is
+    // pool-resident (exported as MEM_POOL, mapped by the guest at pool_gpa + offset); -1 if
+    // it is an ordinary fresh-memfd RingBlob.
+    int64_t poolOffset() const { return mPoolOffset; }
+
     // Only valid if `isExportable()` returns `true`.
     gfxstream::base::SharedMemory::handle_type releaseHandle();
+
+    // Like `releaseHandle()`, but duplicates the handle instead of transferring
+    // ownership, so the RingBlob keeps its own handle and can be exported again.
+    // Needed for the Gunyah RingBlob recycle path, where the same shmem-backed
+    // RingBlob is reused (and re-exported) for multiple blob resources.
+    // Only valid if `isExportable()` returns `true`.
+    gfxstream::base::SharedMemory::handle_type dupHandle();
 
     void* map();
 
@@ -73,13 +105,17 @@ class RingBlob {
              uint64_t size,
              uint64_t alignment,
              std::variant<std::unique_ptr<AlignedMemory>,
-                          std::unique_ptr<gfxstream::base::SharedMemory>> memory);
+                          std::unique_ptr<gfxstream::base::SharedMemory>,
+                          std::unique_ptr<ExternalMemory>> memory);
 
     const uint64_t mId;
     const uint64_t mSize;
     const uint64_t mAlignment;
     std::variant<std::unique_ptr<AlignedMemory>,
-                 std::unique_ptr<gfxstream::base::SharedMemory>> mMemory;
+                 std::unique_ptr<gfxstream::base::SharedMemory>,
+                 std::unique_ptr<ExternalMemory>> mMemory;
+    // DroidVM gfxstream pre-alloc: >=0 when this RingBlob is GpuPool-resident (CreateFromPool).
+    int64_t mPoolOffset = -1;
 };
 
 // LINT.ThenChange(VirtioGpuRingBlobSnapshot.h:virtio_gpu_ring_blob)

@@ -31,5 +31,10 @@ std::optional<DescriptorType> UdmabufCreator::handleFromSharedMemory(SharedMemor
     return std::nullopt;
 }
 
+std::optional<DescriptorType> UdmabufCreator::handleFromFd(int memfd, uint64_t offset,
+                                                           uint64_t size) {
+    return std::nullopt;
+}
+
 }  // namespace base
 }  // namespace gfxstream

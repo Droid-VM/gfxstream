@@ -2651,6 +2651,7 @@ void VkEmulation::freeExternalMemoryLocked(VulkanDispatch* vk,
             case STREAM_HANDLE_TYPE_MEM_OPAQUE_FD:
             case STREAM_HANDLE_TYPE_MEM_DMABUF:
             case STREAM_HANDLE_TYPE_MEM_SHM:
+            case STREAM_HANDLE_TYPE_MEM_POOL:
                 close(info->handleInfo->handle);
                 break;
 #if defined(__ANDROID__)
