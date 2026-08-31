@@ -6907,7 +6907,18 @@ class VkDecoderGlobalState::Impl {
                     &localAllocInfo.memoryTypeIndex, &colorBufferMemoryUsesDedicatedAlloc,
                     &mappedPtr)) {
                 if (mSnapshotState != SnapshotState::Loading) {
-                    GFXSTREAM_FATAL("Failed to get allocation info for ColorBuffer:%d", importCbInfoPtr->colorBuffer);
+                    // A guest can hand us a ColorBuffer id the host never backed: Xorg's
+                    // glamor smooth takeover (-background none, hardcoded in sddm) imports
+                    // the boot framebuffer, a classic guest-shmem resource with no host
+                    // allocation. That is the guest's problem, not grounds to abort the
+                    // whole VMM -- aborting here turned every greeter start into a dead VM
+                    // (exit 134, silent outside logcat). Fail the allocation like the
+                    // Metal/QNX import paths below do and let the guest driver cope.
+                    GFXSTREAM_ERROR(
+                        "%s: VK_ERROR_OUT_OF_DEVICE_MEMORY: "
+                        "no allocation info for ColorBuffer:%d",
+                        __func__, importCbInfoPtr->colorBuffer);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
                 // During snapshot load there could be invalidated references to
                 // color buffers.
