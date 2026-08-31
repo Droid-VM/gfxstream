@@ -3636,6 +3636,28 @@ class VkDecoderGlobalState::Impl {
         }
         imageInfo->memory = memory;
 
+        // Ties an image bind to the memory's provenance so a render target can be told apart from
+        // the scanout export: prints the blobId, whether it is a ColorBuffer, and the GpuPool
+        // offset. The hardware greeter renders to images bound to fresh host memory (blob=0,
+        // cb=none) while the buffer the display scans out is a distinct guest blob -- if that is
+        // what this shows, the two never alias and the drawn frame never reaches the screen.
+        if (::gfxstream::host::diagEnabled() &&
+            imageInfo->imageCreateInfoShallow.extent.width >= 512) {
+            const char* tilingStr =
+                imageInfo->imageCreateInfoShallow.tiling == VK_IMAGE_TILING_LINEAR    ? "LINEAR"
+                : imageInfo->imageCreateInfoShallow.tiling == VK_IMAGE_TILING_OPTIMAL ? "OPTIMAL"
+                                                                                      : "DRM_MOD";
+            GFXSTREAM_DIAG_PRINT(
+                "BIND-PROV: %ux%u fmt=%s tiling=%s usage=%#x mem=%p blobId=%llu cb=%d poolOff=%lld\n",
+                imageInfo->imageCreateInfoShallow.extent.width,
+                imageInfo->imageCreateInfoShallow.extent.height,
+                string_VkFormat(imageInfo->imageCreateInfoShallow.format), tilingStr,
+                imageInfo->imageCreateInfoShallow.usage, (void*)memory,
+                (unsigned long long)memoryInfo->blobId,
+                (int)memoryInfo->boundColorBuffer.value_or(-1),
+                (long long)memoryInfo->poolOffset);
+        }
+
         noteImageMemoryBind(imageInfo->imageCreateInfoShallow, memory, memoryOffset);
 
         if (!imageInfo->compressInfo) {
